@@ -35,8 +35,13 @@ void pwm_init(void)
     SYS->GPB_MFPH = (SYS->GPB_MFPH & ~SYS_GPB_MFPH_PB9MFP_Msk)  | SYS_GPB_MFPH_PB9MFP_PWM0_CH4;
     SYS->GPB_MFPH = (SYS->GPB_MFPH & ~SYS_GPB_MFPH_PB11MFP_Msk) | SYS_GPB_MFPH_PB11MFP_PWM0_CH5;
 
-    /* 3. Set PWM Period and Mode */
-    PWM0->CTL1 = 0; 
+    /* Force Push-Pull output mode and High Slew Rate for strong, fast gate drive */
+    GPIO_SetMode(PB, BIT7 | BIT8 | BIT9 | BIT11 | BIT12 | BIT13, GPIO_MODE_OUTPUT);
+    GPIO_SetSlewCtl(PB, BIT7 | BIT8 | BIT9 | BIT11 | BIT12 | BIT13, GPIO_SLEWCTL_HIGH);
+
+    /* 3. Set PWM Period and Mode — Independent output (OUTMODE=0, the default).
+     * Up-counter type (CNTTYPE=0). */
+    PWM0->CTL1 = 0;
     PWM0->PERIOD[0] = PWM_MAX_DUTY - 1;
     PWM0->PERIOD[1] = PWM_MAX_DUTY - 1;
     PWM0->PERIOD[2] = PWM_MAX_DUTY - 1;
@@ -61,8 +66,14 @@ void pwm_init(void)
     /* 6. Enable Output Pins */
     PWM0->POEN |= 0x3F;
 
-    /* 7. Enable Synchronous Loading */
-    /* Check if DBGTRIOFF exists, else remove */
+    /* 7. Configure ADC Triggering */
+    /* Select PWM_CH0 zero point to trigger ADC */
+    PWM0->ADCTS0 = (PWM0->ADCTS0 & ~PWM_ADCTS0_TRGSEL0_Msk) | (0 << PWM_ADCTS0_TRGSEL0_Pos);
+    /* Enable Trigger */
+    PWM0->ADCTS0 |= PWM_ADCTS0_TRGEN0_Msk;
+
+    /* 8. Start the counter continuously so ADC triggers fire */
+    PWM0->CNTEN |= PWM_CNTEN_CNTEN0_Msk | PWM_CNTEN_CNTEN2_Msk | PWM_CNTEN_CNTEN4_Msk;
 }
 
 void pwm_set_duty(uint16_t duty)

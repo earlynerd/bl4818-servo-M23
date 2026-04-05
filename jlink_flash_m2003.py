@@ -1,114 +1,123 @@
 #!/usr/bin/env python3
 """
-Generate a J-Link Commander script to program Nuvoton M2003 flash
-via FMC ISP registers. Brute force but it works.
+Program and verify Nuvoton M2003 flash via J-Link Commander and FMC ISP registers.
 
 Usage:
-  1. arm-none-eabi-objcopy -O binary m2003-motor.elf m2003-motor.bin
-  2. python jlink_flash_m2003.py m2003-motor.bin flash.jlink
-  3. JLink.exe -device Cortex-M23 -if SWD -speed 4000 -CommandFile flash.jlink
+  python jlink_flash_m2003.py <firmware.bin> [output.jlink]
+
+Generates a J-Link script, runs it (program + readback), then verifies.
 """
 
 import sys
 import struct
+import subprocess
 from pathlib import Path
 
 # Nuvoton M2003 FMC register addresses
-SYS_REGLCTL    = 0x40000100   # Register lock control (unlock sequence target)
-CLK_AHBCLK     = 0x40000204   # AHB clock enable (may need FMC clock bit)
-FMC_ISPCON     = 0x4000C000   # ISP control
-FMC_ISPADR     = 0x4000C004   # ISP address
-FMC_ISPDAT     = 0x4000C008   # ISP data
-FMC_ISPCMD     = 0x4000C00C   # ISP command
-FMC_ISPTRG     = 0x4000C010   # ISP trigger
-FMC_ISPSTS     = 0x4000C040   # ISP status
+SYS_REGLCTL    = 0x40000100
+FMC_ISPCON     = 0x4000C000
+FMC_ISPADR     = 0x4000C004
+FMC_ISPDAT     = 0x4000C008
+FMC_ISPCMD     = 0x4000C00C
+FMC_ISPTRG     = 0x4000C010
+FMC_ISPSTS     = 0x4000C040
 
-# ISP commands
-CMD_PAGE_ERASE = 0x00000022   # Page erase (512 bytes typical)
-CMD_PROGRAM    = 0x00000021   # Program one word
-CMD_READ       = 0x00000000   # Read one word
+CMD_PAGE_ERASE = 0x00000022
+CMD_PROGRAM    = 0x00000021
 
 FLASH_BASE     = 0x00000000
-PAGE_SIZE      = 512          # Nuvoton typical page size, adjust if needed
-ISPCTL_ENABLE_APROM = 0x00000009  # ISPEN | APUEN, boot from APROM
+PAGE_SIZE      = 512
+ISPCTL_ENABLE_APROM = 0x00000009  # ISPEN | APUEN
 
 
-def generate_script(bin_path: Path, out_path: Path):
+def generate_script(bin_path: Path, out_path: Path, readback_path: Path):
     data = bin_path.read_bytes()
 
-    # Pad to 4-byte alignment
     if len(data) % 4:
         data += b'\xFF' * (4 - len(data) % 4)
 
     num_words = len(data) // 4
     num_pages = (len(data) + PAGE_SIZE - 1) // PAGE_SIZE
 
-    print(f"Binary: {len(data)} bytes, {num_words} words, {num_pages} pages")
-
     lines = []
-    lines.append("// Auto-generated M2003 flash programming script")
-    lines.append(f"// Source: {bin_path.name} ({len(data)} bytes)")
-    lines.append("")
-    lines.append("r")  # Reset and halt
+    lines.append(f"// Flash + verify: {bin_path.name} ({len(data)} bytes)")
+    lines.append("r")
     lines.append("h")
-    lines.append("")
 
-    # Unlock protected registers (three-key sequence)
-    lines.append("// Unlock register write protection")
+    # Unlock
     lines.append(f"w4 0x{SYS_REGLCTL:08X} 0x00000059")
     lines.append(f"w4 0x{SYS_REGLCTL:08X} 0x00000016")
     lines.append(f"w4 0x{SYS_REGLCTL:08X} 0x00000088")
-    lines.append("")
-
-    # Enable ISP with APROM updates allowed. Do not clear APUEN here.
-    lines.append("// Enable FMC ISP and APROM update, booting from APROM")
     lines.append(f"w4 0x{FMC_ISPCON:08X} 0x{ISPCTL_ENABLE_APROM:08X}")
-    lines.append("")
 
-    # Erase pages
-    lines.append(f"// Erase {num_pages} pages")
+    # Erase
     for page in range(num_pages):
         addr = FLASH_BASE + page * PAGE_SIZE
         lines.append(f"w4 0x{FMC_ISPADR:08X} 0x{addr:08X}")
         lines.append(f"w4 0x{FMC_ISPCMD:08X} 0x{CMD_PAGE_ERASE:08X}")
         lines.append(f"w4 0x{FMC_ISPTRG:08X} 0x00000001")
-        lines.append("sleep 50")  # Give erase time to complete
-    lines.append("")
+        lines.append("sleep 20")
+        lines.append(f"mem32 0x{FMC_ISPTRG:08X} 1")
 
-    # Program words
-    lines.append(f"// Program {num_words} words")
+    # Program
     words = struct.unpack(f'<{num_words}I', data)
+    programmed = 0
     for i, word in enumerate(words):
         if word == 0xFFFFFFFF:
-            continue  # Skip blank words, already erased
+            continue
         addr = FLASH_BASE + i * 4
         lines.append(f"w4 0x{FMC_ISPADR:08X} 0x{addr:08X}")
         lines.append(f"w4 0x{FMC_ISPDAT:08X} 0x{word:08X}")
         lines.append(f"w4 0x{FMC_ISPCMD:08X} 0x{CMD_PROGRAM:08X}")
         lines.append(f"w4 0x{FMC_ISPTRG:08X} 0x00000001")
-        lines.append("sleep 5")
+        # Read back ISPTRG to force SWD bus synchronization —
+        # the read stalls until the write completes on the target
+        lines.append(f"mem32 0x{FMC_ISPTRG:08X} 1")
+        programmed += 1
 
-    lines.append("")
+    # Readback for verify — use forward slashes, J-Link handles both
+    lines.append(f"savebin {str(readback_path).replace(chr(92), '/')} 0x{FLASH_BASE:08X} 0x{len(data):X}")
 
-    # Verify: read back first few words
-    lines.append("// Verify first 16 bytes and FMC status")
-    lines.append(f"mem 0x{FLASH_BASE:08X} 16")
-    lines.append(f"mem32 0x{FMC_ISPCON:08X} 1")
-    lines.append(f"mem32 0x{FMC_ISPSTS:08X} 1")
-    lines.append("")
-
-    # Lock registers back and reset
-    lines.append("// Lock registers and reset")
+    # Lock and run
     lines.append(f"w4 0x{SYS_REGLCTL:08X} 0x00000000")
     lines.append("r")
     lines.append("g")
     lines.append("exit")
 
     out_path.write_text('\n'.join(lines))
-    print(f"Written: {out_path} ({len(lines)} lines)")
-    print()
-    print("Run with:")
-    print(f'  JLink.exe -device Cortex-M23 -if SWD -speed 4000 -CommandFile {out_path.name}')
+    print(f"{len(data)} bytes, {num_pages} pages, {programmed} words to program")
+    return data
+
+
+def verify(expected: bytes, readback_path: Path):
+    if not readback_path.exists():
+        print(f"VERIFY SKIP: {readback_path} not found (J-Link savebin may have failed)")
+        return False
+
+    actual = readback_path.read_bytes()
+    if len(actual) < len(expected):
+        print(f"VERIFY FAIL: readback {len(actual)} bytes, expected {len(expected)}")
+        return False
+
+    actual = actual[:len(expected)]
+    errors = 0
+    for i in range(0, len(expected), 4):
+        exp = struct.unpack_from('<I', expected, i)[0]
+        act = struct.unpack_from('<I', actual, i)[0]
+        if exp != act:
+            print(f"  MISMATCH @ 0x{FLASH_BASE + i:08X}: "
+                  f"expected 0x{exp:08X}, got 0x{act:08X}")
+            errors += 1
+            if errors >= 20:
+                print("  ... (stopping after 20)")
+                break
+
+    if errors == 0:
+        print(f"VERIFY OK ({len(expected)} bytes)")
+        return True
+    else:
+        print(f"VERIFY FAILED ({errors} words differ)")
+        return False
 
 
 if __name__ == '__main__':
@@ -117,10 +126,29 @@ if __name__ == '__main__':
         sys.exit(1)
 
     bin_path = Path(sys.argv[1])
-    out_path = Path(sys.argv[2]) if len(sys.argv) > 2 else bin_path.with_suffix('.jlink')
+    jlink_path = Path(sys.argv[2]) if len(sys.argv) > 2 else bin_path.with_suffix('.jlink')
+    readback_path = bin_path.with_name(bin_path.stem + '_readback.bin')
 
     if not bin_path.exists():
         print(f"Error: {bin_path} not found")
         sys.exit(1)
 
-    generate_script(bin_path, out_path)
+    expected = generate_script(bin_path, jlink_path, readback_path)
+
+    print(f"Flashing...")
+    result = subprocess.run(
+        ['JLink.exe', '-device', 'Cortex-M23', '-if', 'SWD',
+         '-speed', '4000', '-CommandFile', str(jlink_path)],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        print(f"J-Link failed (exit {result.returncode})")
+        print(result.stdout[-500:] if result.stdout else "")
+        print(result.stderr[-500:] if result.stderr else "")
+        sys.exit(1)
+
+    print("Flash complete, verifying...")
+    if verify(expected, readback_path):
+        sys.exit(0)
+    else:
+        sys.exit(1)

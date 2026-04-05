@@ -8,20 +8,96 @@
 
 static const uint8_t hall_decode[8] = { 0, 1, 2, 3, 4, 5, 6, 7 };
 static const uint8_t hall_forward_seq[8] = { 0xFF, 3, 6, 2, 5, 1, 4, 0xFF };
+static const uint8_t hall_to_sector[8] = { 0xFF, 0, 2, 1, 4, 5, 3, 0xFF };
+
+#define HALL_TIMER_FREQ 1000000UL
+#define HALL_TIMER_MASK 0x00FFFFFFUL
+#define HALL_PORTB_MASK (BIT4 | BIT5)
+#define HALL_PORTC_MASK BIT14
 
 static uint8_t prev_hall;
 static int8_t  detected_direction;
 static int32_t hall_position;
+static uint16_t transition_period;
+static uint32_t last_transition_time;
+static volatile uint8_t hall_irq_hint;
+
+static uint32_t irq_save(void)
+{
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    return primask;
+}
+
+static void irq_restore(uint32_t primask)
+{
+    if ((primask & 1u) == 0u) {
+        __enable_irq();
+    }
+}
+
+static uint8_t hall_process_transition(uint8_t current)
+{
+    if (current == prev_hall) {
+        return HALL_POLL_NO_CHANGE;
+    }
+
+    if (current == 0u || current == 7u) {
+        return HALL_POLL_INVALID;
+    }
+
+    if (hall_forward_seq[prev_hall] == current) {
+        detected_direction = 1;
+        hall_position++;
+    } else if (hall_forward_seq[current] == prev_hall) {
+        detected_direction = -1;
+        hall_position--;
+    }
+
+    {
+        uint32_t now = TIMER_GetCounter(TIMER1) & HALL_TIMER_MASK;
+        transition_period = (uint16_t)((now - last_transition_time) & HALL_TIMER_MASK);
+        last_transition_time = now;
+    }
+
+    prev_hall = current;
+    return HALL_POLL_TRANSITION;
+}
 
 void hall_init(void)
 {
     /* Configure Hall pins as Input (PC.14, PB.5, PB.4) */
     GPIO_SetMode(PC, BIT14, GPIO_MODE_INPUT);
     GPIO_SetMode(PB, BIT5 | BIT4, GPIO_MODE_INPUT);
+    GPIO_ENABLE_DIGITAL_PATH(PC, BIT14);
+    GPIO_ENABLE_DIGITAL_PATH(PB, BIT5 | BIT4);
+
+    /* Free-running 1 MHz timer for hall transition timing. */
+    CLK->APBCLK0 |= CLK_APBCLK0_TMR1CKEN_Msk;
+    CLK->CLKSEL1 = (CLK->CLKSEL1 & ~CLK_CLKSEL1_TMR1SEL_Msk) | CLK_CLKSEL1_TMR1SEL_HIRC;
+    TIMER_Open(TIMER1, TIMER_CONTINUOUS_MODE, HALL_TIMER_FREQ);
+    TIMER_Start(TIMER1);
+    while (!TIMER_IS_ACTIVE(TIMER1)) {
+    }
+
+    GPIO_DISABLE_DEBOUNCE(PB, HALL_PORTB_MASK);
+    GPIO_DISABLE_DEBOUNCE(PC, HALL_PORTC_MASK);
+    GPIO_EnableInt(PB, 4u, GPIO_INT_BOTH_EDGE);
+    GPIO_EnableInt(PB, 5u, GPIO_INT_BOTH_EDGE);
+    GPIO_EnableInt(PC, 14u, GPIO_INT_BOTH_EDGE);
+    GPIO_CLR_INT_FLAG(PB, HALL_PORTB_MASK);
+    GPIO_CLR_INT_FLAG(PC, HALL_PORTC_MASK);
+    NVIC_SetPriority(GPB_IRQn, 0u);
+    NVIC_SetPriority(GPC_IRQn, 0u);
+    NVIC_EnableIRQ(GPB_IRQn);
+    NVIC_EnableIRQ(GPC_IRQn);
 
     prev_hall = hall_read();
     detected_direction = 0;
     hall_position = 0;
+    transition_period = 0xFFFFu;
+    last_transition_time = TIMER_GetCounter(TIMER1) & HALL_TIMER_MASK;
+    hall_irq_hint = 1u;
 }
 
 uint8_t hall_read_raw(void)
@@ -45,28 +121,40 @@ uint8_t hall_read(void)
 
 uint8_t hall_poll(void)
 {
-    uint8_t current = hall_read();
+    uint32_t primask = irq_save();
 
-    if (current == prev_hall)
+    if (hall_irq_hint == 0u) {
+        irq_restore(primask);
         return HALL_POLL_NO_CHANGE;
-
-    if (current == 0 || current == 7)
-        return HALL_POLL_INVALID;
-
-    if (hall_forward_seq[prev_hall] == current) {
-        detected_direction = 1;
-        hall_position++;
-    } else if (hall_forward_seq[current] == prev_hall) {
-        detected_direction = -1;
-        hall_position--;
     }
 
-    prev_hall = current;
-    return HALL_POLL_TRANSITION;
+    hall_irq_hint = 0u;
+    irq_restore(primask);
+    return hall_process_transition(hall_read());
 }
 
 int8_t hall_direction(void) { return detected_direction; }
 int32_t hall_count(void)     { return hall_position; }
 void hall_count_reset(void) { hall_position = 0; }
-uint16_t hall_period(void)  { return 0; } // TODO: Implement timer period
-uint8_t hall_sector(void)   { return 0; } // TODO: Implement sector map
+uint16_t hall_period(void)  { return transition_period; }
+uint8_t hall_sector(void)   { return hall_to_sector[hall_read() & 0x07u]; }
+
+void GPB_IRQHandler(void)
+{
+    uint32_t flags = PB->INTSRC & HALL_PORTB_MASK;
+
+    if (flags != 0u) {
+        GPIO_CLR_INT_FLAG(PB, flags);
+        hall_irq_hint = 1u;
+    }
+}
+
+void GPC_IRQHandler(void)
+{
+    uint32_t flags = PC->INTSRC & HALL_PORTC_MASK;
+
+    if (flags != 0u) {
+        GPIO_CLR_INT_FLAG(PC, flags);
+        hall_irq_hint = 1u;
+    }
+}

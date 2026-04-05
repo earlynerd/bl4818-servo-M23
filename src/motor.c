@@ -1,7 +1,8 @@
 /*
  * Motor Control for Nuvoton M2003
  *
- * Direct duty-cycle drive with 1kHz control loop and current limiting.
+ * Control loop runs from the main loop 2kHz tick, NOT from ISR.
+ * ADC ISR only captures raw samples.
  */
 
 #include <stdint.h>
@@ -53,8 +54,7 @@ void motor_start(void)
     int8_t dir = (target_duty >= 0) ? 1 : -1;
     fault = FAULT_NONE;
     state = MOTOR_RUN;
-    
-    /* Commutation update uses the same tables as the 8051 port */
+
     commutation_update(dir);
     pwm_enable();
 }
@@ -81,8 +81,6 @@ uint16_t motor_get_current(void)    { return current_ma; }
 
 void motor_poll_fast(void)
 {
-    /* On the M2003, we could eventually move this to a 
-     * Hall change interrupt, but for now we keep the polled approach. */
     uint8_t result = hall_poll();
 
     if (result == HALL_POLL_INVALID) {
@@ -101,29 +99,20 @@ void motor_poll_fast(void)
     }
 }
 
-void motor_update(void)
+void motor_tick_2khz(void)
 {
     int16_t duty;
     int8_t dir;
     uint16_t abs_duty;
-    uint8_t hall_state;
 
-    /* ── Sensors ─────────────────────────────────────────────────── */
+    /* Grab latest ADC sample (captured at 20kHz by ISR) */
     current_ma = adc_read_current_ma();
-    hall_state = hall_read();
 
-    /* ── Faults ──────────────────────────────────────────────────── */
+    /* Hard overcurrent fault */
     if (current_ma > CURRENT_LIMIT_MA) {
         pwm_fault_brake();
         state = MOTOR_FAULT;
         fault = FAULT_OVERCURRENT;
-        return;
-    }
-
-    if (hall_state == 0 || hall_state == 7) {
-        pwm_fault_brake();
-        state = MOTOR_FAULT;
-        fault = FAULT_HALL_INVALID;
         return;
     }
 
@@ -135,15 +124,12 @@ void motor_update(void)
         return;
     }
 
-    /* ── Duty with current limiting ──────────────────────────────── */
+    /* Torque limiting */
     duty = target_duty;
-
     if (current_ma > torque_limit_ma) {
-        /* M2003 Hardware math makes this very efficient */
-        duty = (int16_t)(((int32_t)duty * (int32_t)torque_limit_ma) / (int32_t)current_ma);
+        duty = (int16_t)(((int32_t)(duty) * (int32_t)(torque_limit_ma)) / (int32_t)(current_ma));
     }
 
-    /* ── Apply ───────────────────────────────────────────────────── */
     if (duty >= 0) {
         dir = 1;
         abs_duty = (uint16_t)duty;
@@ -153,5 +139,4 @@ void motor_update(void)
     }
 
     pwm_set_duty(abs_duty);
-    commutation_update(dir);
 }

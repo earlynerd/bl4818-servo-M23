@@ -1,0 +1,16 @@
+ Enumeration sequence (run once at startup):
+  \h(A5 5A 01 01 3E 1F)              ENTER_STORE_FORWARD
+  \h(A5 5A 02 03 00 F7 AF)           SET_ADDRESS [0]
+  \h(A5 5A 01 02 0E 7C)              ENTER_CUT_THROUGH
+
+  Motor control (after enumeration):
+  \h(A5 5A 03 10 00 80 CD F7)        Broadcast duty = 128
+  \h(A5 5A 03 10 00 A0 E9 95)        Broadcast duty = 160
+  \h(A5 5A 03 10 00 00 5C 7F)        Broadcast duty = 0 (stop)
+
+  Addressed commands to device 0:
+  \h(A5 5A 02 20 03 94 79)           STOP
+  \h(A5 5A 02 20 04 E4 9E)           CLEAR_FAULT
+  \h(A5 5A 02 20 10 B6 2B)           QUERY_STATUS (returns status reply)
+  \h(A5 5A 04 20 01 00 80 09 FC)     SET_DUTY = 128
+  \h(A5 5A 04 20 02 03 20 B0 15)     SET_TORQUE = 800 mA

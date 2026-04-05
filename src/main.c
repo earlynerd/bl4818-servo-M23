@@ -6,8 +6,10 @@
 #include "m2003_config.h"
 #include "M2003.h"
 #include "app_pwm.h"
+#include "app_uart.h"
 #include "app_adc.h"
 #include "hall.h"
+#include "encoder.h"
 #include "motor.h"
 #include "protocol.h"
 
@@ -15,89 +17,71 @@ extern uint32_t SystemCoreClock;
 extern uint32_t CyclesPerUs;
 extern uint32_t PllClock;
 
-static void debug_pin_init(void)
+void Uart0DefaultMPF(void) {}
+
+#define UART_BAUD              250000UL
+#define ENCODER_DIVIDER        10u    /* encoder_poll every 10th tick = 200Hz */
+
+static volatile uint32_t systick_count;
+
+static void clock_init(void)
 {
-    CLK->AHBCLK |= CLK_AHBCLK_GPFCKEN_Msk;
-    SYS->GPF_MFPL = (SYS->GPF_MFPL & ~SYS_GPF_MFPL_PF0MFP_Msk) | SYS_GPF_MFPL_PF0MFP_GPIO;
-    SYS->GPF_MFOS &= ~SYS_GPF_MFOS_PF0MFOS_Msk;
-
-    GPIO_SetMode(PF, BIT0, GPIO_MODE_OUTPUT);
-    PF0 = 1;
-}
-
-static void delay_timer_init(void)
-{
-    CLK->APBCLK0 |= CLK_APBCLK0_TMR0CKEN_Msk;
-    CLK->CLKSEL1 = (CLK->CLKSEL1 & ~CLK_CLKSEL1_TMR0SEL_Msk) | CLK_CLKSEL1_TMR0SEL_HIRC;
-
-    TIMER_Open(TIMER0, TIMER_CONTINUOUS_MODE, 1000000);
-    TIMER_Start(TIMER0);
-    while (!TIMER_IS_ACTIVE(TIMER0)) {
-    }
-}
-
-static void delay_us(uint32_t usec)
-{
-    TIMER_ResetCounter(TIMER0);
-    while (TIMER_GetCounter(TIMER0) < usec) {
-    }
-}
-
-#define SOFT_UART_BIT_US 104U
-
-static void soft_uart_tx_byte(uint8_t value)
-{
-    PF0 = 0;
-    delay_us(SOFT_UART_BIT_US);
-
-    for (uint32_t i = 0; i < 8; ++i) {
-        PF0 = (value & 0x01u) ? 1 : 0;
-        delay_us(SOFT_UART_BIT_US);
-        value >>= 1;
-    }
-
-    PF0 = 1;
-    delay_us(SOFT_UART_BIT_US);
-}
-
-static void soft_uart_tx_string(const char *s)
-{
-    while (*s != '\0') {
-        soft_uart_tx_byte((uint8_t)*s++);
-    }
-}
-
-int main(void)
-{
-    /* 1. Unlock Protected Registers */
-    SYS_UnlockReg();
-
-    /* 2. Enable HIRC (24MHz) */
     CLK->PWRCTL |= CLK_PWRCTL_HIRCEN_Msk;
-    while (!(CLK->STATUS & CLK_STATUS_HIRCSTB_Msk));
+    while (!(CLK->STATUS & CLK_STATUS_HIRCSTB_Msk)) {
+    }
 
-    /* Select HCLK clock source as HIRC and HCLK source divider as 1 */
-    CLK->CLKSEL0 = (CLK->CLKSEL0 & (~CLK_CLKSEL0_HCLKSEL_Msk)) | CLK_CLKSEL0_HCLKSEL_HIRC;
-    CLK->CLKDIV0 = (CLK->CLKDIV0 & (~CLK_CLKDIV0_HCLKDIV_Msk)) | CLK_CLKDIV0_HCLK(1);
+    CLK->CLKSEL0 = (CLK->CLKSEL0 & ~CLK_CLKSEL0_HCLKSEL_Msk) | CLK_CLKSEL0_HCLKSEL_HIRC;
+    CLK->CLKDIV0 = (CLK->CLKDIV0 & ~CLK_CLKDIV0_HCLKDIV_Msk) | CLK_CLKDIV0_HCLK(1);
 
-    /* Avoid SystemCoreClockUpdate() here until CPU divide support is verified. */
+    CLK->AHBCLK |= CLK_AHBCLK_GPBCKEN_Msk | CLK_AHBCLK_GPCCKEN_Msk |
+                   CLK_AHBCLK_GPECKEN_Msk | CLK_AHBCLK_GPFCKEN_Msk;
+
     SystemCoreClock = CLK_HIRC_24M;
     PllClock = CLK_HIRC_24M;
     CyclesPerUs = CLK_HIRC_24M / 1000000UL;
 
-    /* 3. Use a timer-driven software UART on PF.0, the one proven-good header pad. */
-    debug_pin_init();
-    delay_timer_init();
+    SysTick_Config(SystemCoreClock / CONTROL_LOOP_HZ);
+}
 
-    /* Lock Protected Registers after all clock and pin mux changes. */
+void SysTick_Handler(void)
+{
+    systick_count++;
+}
+
+int main(void)
+{
+    uint32_t handled_sys_ticks = 0;
+    uint8_t encoder_div = 0;
+
+    SYS_UnlockReg();
+
+    clock_init();
+    pwm_init();
+    adc_init();
+    hall_init();
+    encoder_init();
+    uart_init(UART_BAUD);
+    protocol_init();
+    motor_init();
+
+    adc_irq_enable();
+
     SYS_LockReg();
-    
-    while (1) {
-        soft_uart_tx_byte(0x55);
-        soft_uart_tx_byte(0x55);
-        soft_uart_tx_byte(0x55);
-        soft_uart_tx_string(" SOFTUART PF0 OK\r\n");
 
-        delay_us(50000);
+    while (1) {
+        motor_poll_fast();
+        protocol_poll();
+
+        while (handled_sys_ticks != systick_count) {
+            handled_sys_ticks++;
+
+            motor_tick_2khz();
+            protocol_tick();
+
+            if (++encoder_div >= ENCODER_DIVIDER) {
+                encoder_div = 0;
+                encoder_poll();
+            }
+        }
     }
 }

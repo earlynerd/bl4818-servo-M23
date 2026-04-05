@@ -10,6 +10,9 @@
 
 static uint32_t encoder_raw = 0;
 static uint16_t encoder_angle = 0;
+static uint16_t encoder_prev_angle = 0;
+static int32_t  encoder_position = 0;   /* continuous unwrapped position */
+static uint8_t  encoder_initialized = 0;
 
 /* Simple delay using NOPs */
 static inline void delay_nop(uint32_t n)
@@ -77,9 +80,24 @@ void encoder_poll(void)
     
 
     encoder_raw = raw;
-    
+
     /* MT6701's 14-bit angle is in the top 14 bits of the 24-bit frame */
     encoder_angle = (uint16_t)(raw >> 10);
+
+    /* Unwrap into continuous multi-turn position */
+    if (!encoder_initialized) {
+        encoder_prev_angle = encoder_angle;
+        encoder_initialized = 1;
+    } else {
+        int16_t delta = (int16_t)(encoder_angle - encoder_prev_angle);
+        /* Handle 14-bit wrap: if jump > half revolution, it wrapped */
+        if (delta > 8192)
+            delta -= 16384;
+        else if (delta < -8192)
+            delta += 16384;
+        encoder_position += delta;
+        encoder_prev_angle = encoder_angle;
+    }
 }
 
 uint32_t encoder_get_raw(void)
@@ -90,4 +108,14 @@ uint32_t encoder_get_raw(void)
 uint16_t encoder_get_angle(void)
 {
     return encoder_angle;
+}
+
+int32_t encoder_get_position(void)
+{
+    return encoder_position;
+}
+
+void encoder_reset_position(void)
+{
+    encoder_position = 0;
 }

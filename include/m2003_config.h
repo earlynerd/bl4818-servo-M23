@@ -37,11 +37,23 @@
 #define PIN_SSI_DAT         PB15      /* PB.15, Pin 11 */
 
 /* ── Commutation ──────────────────────────────────────────────────────── */
-#define COMMUTATION_OFFSET  1       /* Advance commutation by 1 sector (matches MS51 tuning) */
+#define COMMUTATION_OFFSET  0       /* Advance commutation by 1 sector (matches MS51 tuning) */
+
+/* ── Motor Parameters ─────────────────────────────────────────────────── */
+#define MOTOR_POLE_PAIRS    7       /* 14-pole outrunner (typical massage gun motor) */
+#define HALL_TRANSITIONS_PER_REV (6 * MOTOR_POLE_PAIRS)  /* 42 */
+#define ENCODER_COUNTS_PER_REV  16384   /* 14-bit absolute encoder */
 
 /* ── Control Settings ──────────────────────────────────────────────────── */
-#define CONTROL_LOOP_HZ     2000
+#define CONTROL_LOOP_HZ     5000
 #define PWM_FREQ_HZ         20000
 #define PWM_PERIOD          (CLK_HIRC_24M / PWM_FREQ_HZ)
+
+/* Velocity PID defaults (Q8 — divide by 256 for real value) */
+#define VEL_PID_KP_DEFAULT  128     /* 0.50 */
+#define VEL_PID_KI_DEFAULT  8      /* 0.0625 */
+#define VEL_PID_KD_DEFAULT  0       /* off */
+#define VEL_FF_DEFAULT      0       /* feedforward off until tuned */
+#define VEL_FILTER_SHIFT    2       /* IIR alpha = 1/(1<<N): 2→1/4, 3→1/8 */
 
 #endif /* M2003_CONFIG_H */

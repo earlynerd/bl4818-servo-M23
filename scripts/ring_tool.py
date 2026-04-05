@@ -6,6 +6,9 @@ Examples:
     python ring_tool.py -p COM7 enumerate
     python ring_tool.py -p COM7 status 0
     python ring_tool.py -p COM7 set-duty 0 400
+    python ring_tool.py -p COM7 set-velocity 0 500
+    python ring_tool.py -p COM7 set-pid 0 128 16 0
+    python ring_tool.py -p COM7 set-mode 0 1
     python ring_tool.py -p COM7 torque 0 2500
     python ring_tool.py -p COM7 stop 0
     python ring_tool.py -p COM7 broadcast 200 0 0
@@ -54,6 +57,10 @@ SUBCMD_SET_DUTY     = 0x01
 SUBCMD_SET_TORQUE   = 0x02
 SUBCMD_STOP         = 0x03
 SUBCMD_CLEAR_FAULT  = 0x04
+SUBCMD_SET_MODE     = 0x05
+SUBCMD_SET_VELOCITY = 0x06
+SUBCMD_SET_PID      = 0x07
+SUBCMD_SET_FF       = 0x08
 SUBCMD_QUERY_STATUS = 0x10
 
 # ── Timing defaults ─────────────────────────────────────────────────────────
@@ -81,6 +88,7 @@ def crc16_ccitt(data: bytes, init: int = 0xFFFF) -> int:
 
 MOTOR_STATES = {0: "IDLE", 1: "RUN", 2: "FAULT"}
 FAULT_CODES  = {0: "NONE", 1: "OVERCURRENT", 2: "HALL_INVALID"}
+CTRL_MODES   = {0: "DUTY", 1: "VELOCITY"}
 
 
 @dataclasses.dataclass
@@ -88,9 +96,12 @@ class MotorStatus:
     address: int
     state: int
     fault: int
+    mode: int           # ctrl_mode_t: 0=DUTY, 1=VELOCITY
     current_ma: int
     hall: int
     angle: int          # 14-bit encoder angle (0-16383)
+    velocity: int       # measured RPM (signed)
+    target: int         # active target: duty or RPM depending on mode
 
     @property
     def state_name(self) -> str:
@@ -99,6 +110,10 @@ class MotorStatus:
     @property
     def fault_name(self) -> str:
         return FAULT_CODES.get(self.fault, f"UNKNOWN({self.fault})")
+
+    @property
+    def mode_name(self) -> str:
+        return CTRL_MODES.get(self.mode, f"UNKNOWN({self.mode})")
 
     @property
     def angle_deg(self) -> float:
@@ -342,6 +357,48 @@ class RingClientV2:
         self._send_frame(bytes([CMD_ADDR_BASE | address, SUBCMD_CLEAR_FAULT]))
         return self._recv_status_reply()
 
+    def set_mode(self, address: int, mode: int) -> MotorStatus:
+        self._check_address(address)
+        self._flush_rx()
+        self._send_frame(
+            bytes([CMD_ADDR_BASE | address, SUBCMD_SET_MODE, mode & 0xFF])
+        )
+        return self._recv_status_reply()
+
+    def set_velocity(self, address: int, rpm: int) -> MotorStatus:
+        self._check_address(address)
+        if rpm < -32768 or rpm > 32767:
+            raise RingError("velocity must fit in int16")
+        self._flush_rx()
+        self._send_frame(
+            bytes([CMD_ADDR_BASE | address, SUBCMD_SET_VELOCITY])
+            + struct.pack(">h", rpm)
+        )
+        return self._recv_status_reply()
+
+    def set_ff(self, address: int, gain: int) -> MotorStatus:
+        self._check_address(address)
+        if gain < -32768 or gain > 32767:
+            raise RingError("ff gain must fit in int16")
+        self._flush_rx()
+        self._send_frame(
+            bytes([CMD_ADDR_BASE | address, SUBCMD_SET_FF])
+            + struct.pack(">h", gain)
+        )
+        return self._recv_status_reply()
+
+    def set_pid(self, address: int, kp: int, ki: int, kd: int) -> MotorStatus:
+        self._check_address(address)
+        for name, val in [("kp", kp), ("ki", ki), ("kd", kd)]:
+            if val < -32768 or val > 32767:
+                raise RingError(f"{name} must fit in int16")
+        self._flush_rx()
+        self._send_frame(
+            bytes([CMD_ADDR_BASE | address, SUBCMD_SET_PID])
+            + struct.pack(">hhh", kp, ki, kd)
+        )
+        return self._recv_status_reply()
+
     def broadcast_duty(self, duties: Iterable[int]) -> None:
         duty_list = list(duties)
         if not duty_list or len(duty_list) > MAX_DEVICES:
@@ -356,7 +413,11 @@ class RingClientV2:
     # ── Parsing ──────────────────────────────────────────────────────────
 
     def _parse_status(self, payload: bytes) -> MotorStatus:
-        """Parse a STATUS_REPLY payload (8 bytes: cmd state fault cur_hi cur_lo hall angle_hi angle_lo)."""
+        """Parse a STATUS_REPLY payload.
+
+        v2 format (13 bytes): cmd state fault mode cur_hi cur_lo hall
+                               angle_hi angle_lo vel_hi vel_lo tgt_hi tgt_lo
+        """
         if len(payload) < 7:
             raise RingError(f"status reply too short ({len(payload)} bytes): {payload.hex(' ')}")
 
@@ -367,22 +428,34 @@ class RingClientV2:
         address = cmd & 0x0F
         state = payload[1]
         fault = payload[2]
-        current = struct.unpack(">H", payload[3:5])[0]
-        hall = payload[5]
 
-        # Encoder angle is present if payload is 8 bytes (new format)
-        if len(payload) >= 8:
-            angle = struct.unpack(">H", payload[6:8])[0]
+        # New v2 format has mode byte at [3], shifting everything after it
+        if len(payload) >= 13:
+            mode = payload[3]
+            current = struct.unpack(">H", payload[4:6])[0]
+            hall = payload[6]
+            angle = struct.unpack(">H", payload[7:9])[0]
+            velocity = struct.unpack(">h", payload[9:11])[0]
+            target = struct.unpack(">h", payload[11:13])[0]
         else:
-            angle = 0
+            # Legacy 8-byte format fallback
+            mode = 0
+            current = struct.unpack(">H", payload[3:5])[0]
+            hall = payload[5]
+            angle = struct.unpack(">H", payload[6:8])[0] if len(payload) >= 8 else 0
+            velocity = 0
+            target = 0
 
         return MotorStatus(
             address=address,
             state=state,
             fault=fault,
+            mode=mode,
             current_ma=current,
             hall=hall,
             angle=angle,
+            velocity=velocity,
+            target=target,
         )
 
     def _check_address(self, address: int) -> None:
@@ -395,10 +468,12 @@ class RingClientV2:
 # ── Display helpers ──────────────────────────────────────────────────────────
 
 def format_status(s: MotorStatus) -> str:
+    target_label = "duty" if s.mode == 0 else "rpm"
     return (
         f"addr={s.address} state={s.state_name} fault={s.fault_name} "
-        f"current={s.current_ma}mA hall={s.hall} "
-        f"angle={s.angle} ({s.angle_deg:.1f}°)"
+        f"mode={s.mode_name} current={s.current_ma}mA hall={s.hall} "
+        f"angle={s.angle} ({s.angle_deg:.1f}\u00b0) "
+        f"vel={s.velocity}rpm target_{target_label}={s.target}"
     )
 
 
@@ -478,6 +553,26 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("clear-fault", help="Clear fault on a device")
     sp.add_argument("address", type=int)
 
+    sp = sub.add_parser("set-mode", help="Set control mode (0=DUTY, 1=VELOCITY)")
+    sp.add_argument("address", type=int)
+    sp.add_argument("mode", type=int, choices=[0, 1],
+                    help="0=DUTY, 1=VELOCITY")
+
+    sp = sub.add_parser("set-velocity", help="Set velocity target (RPM, auto-sets VELOCITY mode)")
+    sp.add_argument("address", type=int)
+    sp.add_argument("rpm", type=int, help="Signed int16 target RPM")
+
+    sp = sub.add_parser("set-pid", help="Set velocity PID gains (Q8 fixed-point)")
+    sp.add_argument("address", type=int)
+    sp.add_argument("kp", type=int, help="Proportional gain (Q8: 256 = 1.0)")
+    sp.add_argument("ki", type=int, help="Integral gain (Q8)")
+    sp.add_argument("kd", type=int, help="Derivative gain (Q8)")
+
+    sp = sub.add_parser("set-ff", help="Set velocity feedforward gain (Q8)")
+    sp.add_argument("address", type=int)
+    sp.add_argument("gain", type=int,
+                    help="Duty per RPM of back-EMF (Q8: 256 = 1.0)")
+
     sp = sub.add_parser("broadcast", help="Broadcast duty to all devices")
     sp.add_argument("duties", nargs="+", type=int, help="One signed duty per device")
 
@@ -543,6 +638,18 @@ def main() -> int:
 
         elif args.command == "clear-fault":
             print(format_status(client.clear_fault(args.address)))
+
+        elif args.command == "set-mode":
+            print(format_status(client.set_mode(args.address, args.mode)))
+
+        elif args.command == "set-velocity":
+            print(format_status(client.set_velocity(args.address, args.rpm)))
+
+        elif args.command == "set-pid":
+            print(format_status(client.set_pid(args.address, args.kp, args.ki, args.kd)))
+
+        elif args.command == "set-ff":
+            print(format_status(client.set_ff(args.address, args.gain)))
 
         elif args.command == "broadcast":
             if client.device_count is not None and len(args.duties) != client.device_count:

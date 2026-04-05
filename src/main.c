@@ -20,7 +20,7 @@ extern uint32_t PllClock;
 void Uart0DefaultMPF(void) {}
 
 #define UART_BAUD              250000UL
-#define ENCODER_DIVIDER        10u    /* encoder_poll every 10th tick = 200Hz */
+#define ENCODER_DIVIDER        1u     /* encoder_poll every tick = 2kHz */
 
 static volatile uint32_t systick_count;
 

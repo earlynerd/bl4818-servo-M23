@@ -27,6 +27,7 @@ SRCS = src/main.c \
        src/app_adc.c \
        src/motor.c \
        src/protocol.c \
+       src/pid.c \
        src/crc16.c \
        src/commutation.c \
        src/hall.c \

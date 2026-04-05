@@ -28,7 +28,7 @@ static const uint8_t rev_pmd[8] = {
 
 static uint8_t rotate_hall_state(uint8_t hall_state)
 {
-    static const uint8_t seq[6] = { 1, 3, 2, 6, 4, 5 };
+    static const uint8_t seq[6] = {3, 2, 6, 4, 5, 1};
     uint8_t i;
 
     if (COMMUTATION_OFFSET == 0 || hall_state == 0 || hall_state == 7)

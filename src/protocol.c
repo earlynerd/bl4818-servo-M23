@@ -42,6 +42,10 @@
 #define SUBCMD_SET_TORQUE       0x02u
 #define SUBCMD_STOP             0x03u
 #define SUBCMD_CLEAR_FAULT      0x04u
+#define SUBCMD_SET_MODE         0x05u
+#define SUBCMD_SET_VELOCITY     0x06u
+#define SUBCMD_SET_PID          0x07u
+#define SUBCMD_SET_FF           0x08u
 #define SUBCMD_QUERY_STATUS     0x10u
 
 /* ── Forwarding mode ──────────────────────────────────────────────────── */
@@ -111,7 +115,18 @@ static uint8_t prepare_set_duty(int16_t duty)
     if (motor_get_state() == MOTOR_FAULT)
         return 0u;
 
+    motor_set_mode(CTRL_DUTY);
     motor_set_duty(duty);
+    return 1u;
+}
+
+static uint8_t prepare_set_velocity(int16_t rpm)
+{
+    if (motor_get_state() == MOTOR_FAULT)
+        return 0u;
+
+    motor_set_mode(CTRL_VELOCITY);
+    motor_set_velocity(rpm);
     return 1u;
 }
 
@@ -119,24 +134,31 @@ static void send_status_reply(void)
 {
     uint16_t current = motor_get_current();
     uint16_t angle = encoder_get_angle();
-    uint8_t buf[11];
+    int16_t  velocity = motor_get_velocity();
+    int16_t  target = motor_get_target();
+    uint8_t buf[16];
     uint16_t crc;
 
-    buf[0] = 8u;
-    buf[1] = CMD_STATUS_BASE | device_addr;
-    buf[2] = (uint8_t)motor_get_state();
-    buf[3] = (uint8_t)motor_get_fault();
-    buf[4] = (uint8_t)(current >> 8);
-    buf[5] = (uint8_t)(current & 0xFFu);
-    buf[6] = hall_read();
-    buf[7] = (uint8_t)(angle >> 8);
-    buf[8] = (uint8_t)(angle & 0xFFu);
+    buf[0]  = 13u;
+    buf[1]  = CMD_STATUS_BASE | device_addr;
+    buf[2]  = (uint8_t)motor_get_state();
+    buf[3]  = (uint8_t)motor_get_fault();
+    buf[4]  = (uint8_t)motor_get_mode();
+    buf[5]  = (uint8_t)(current >> 8);
+    buf[6]  = (uint8_t)(current & 0xFFu);
+    buf[7]  = hall_read();
+    buf[8]  = (uint8_t)(angle >> 8);
+    buf[9]  = (uint8_t)(angle & 0xFFu);
+    buf[10] = (uint8_t)((uint16_t)velocity >> 8);
+    buf[11] = (uint8_t)((uint16_t)velocity & 0xFFu);
+    buf[12] = (uint8_t)((uint16_t)target >> 8);
+    buf[13] = (uint8_t)((uint16_t)target & 0xFFu);
 
-    crc = crc16_ccitt(buf, 9);
-    buf[9] = (uint8_t)(crc >> 8);
-    buf[10] = (uint8_t)(crc & 0xFFu);
+    crc = crc16_ccitt(buf, 14);
+    buf[14] = (uint8_t)(crc >> 8);
+    buf[15] = (uint8_t)(crc & 0xFFu);
 
-    send_frame(buf, 11);
+    send_frame(buf, 16);
 }
 
 /* ── Command handlers ─────────────────────────────────────────────────── */
@@ -228,6 +250,36 @@ static void handle_addressed_cmd(uint8_t cmd_type, const uint8_t *payload, uint8
         break;
     case SUBCMD_CLEAR_FAULT:
         motor_clear_fault();
+        send_status_reply();
+        break;
+    case SUBCMD_SET_MODE:
+        if (len >= 3u) {
+            motor_set_mode((ctrl_mode_t)payload[2]);
+        }
+        send_status_reply();
+        break;
+    case SUBCMD_SET_VELOCITY:
+        if (len >= 4u) {
+            int16_t rpm = (int16_t)(((uint16_t)payload[2] << 8) | payload[3]);
+            start_after = prepare_set_velocity(rpm);
+            send_status_reply();
+            if (start_after) motor_start();
+        }
+        break;
+    case SUBCMD_SET_PID:
+        if (len >= 8u) {
+            int16_t kp = (int16_t)(((uint16_t)payload[2] << 8) | payload[3]);
+            int16_t ki = (int16_t)(((uint16_t)payload[4] << 8) | payload[5]);
+            int16_t kd = (int16_t)(((uint16_t)payload[6] << 8) | payload[7]);
+            motor_set_vel_pid(kp, ki, kd);
+        }
+        send_status_reply();
+        break;
+    case SUBCMD_SET_FF:
+        if (len >= 4u) {
+            int16_t gain = (int16_t)(((uint16_t)payload[2] << 8) | payload[3]);
+            motor_set_vel_ff(gain);
+        }
         send_status_reply();
         break;
     case SUBCMD_QUERY_STATUS:

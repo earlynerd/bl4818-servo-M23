@@ -50,20 +50,21 @@
 #define PWM_PERIOD          (CLK_HIRC_24M / PWM_FREQ_HZ)
 
 /* Velocity PID defaults (Q8 — divide by 256 for real value) */
-#define VEL_PID_KP_DEFAULT  128     /* 0.50 */
-#define VEL_PID_KI_DEFAULT  1      /* 0.0625 */
-#define VEL_PID_KD_DEFAULT  10       /* off */
+#define VEL_PID_KP_DEFAULT  1024     /* 0.50 */
+#define VEL_PID_KI_DEFAULT  30     /* 0.0625 */
+#define VEL_PID_KD_DEFAULT  50       /* off */
 #define VEL_FF_DEFAULT      27       /* feedforward tuned */
-#define VEL_FILTER_SHIFT    4       /* IIR alpha = 1/(1<<N): 2→1/4, 3→1/8 */
+#define VEL_FILTER_SHIFT    2       /* IIR alpha = 1/(1<<N): 2→1/4, 3→1/8 */
 
 /* Position PID defaults (Q8 — output is velocity RPM)
  * Error is prescaled by POS_ERROR_PRESCALE for finer gain resolution.
  * Effective gain = Q8_value / 256 / POS_ERROR_PRESCALE RPM per encoder count */
 #define POS_ERROR_PRESCALE  16      /* divide position error by 16 before PID */
-#define POS_PID_KP_DEFAULT  256     /* ≈0.0625 RPM/count (same as old 16 w/o prescale) */
-#define POS_PID_KI_DEFAULT  5
-#define POS_PID_KD_DEFAULT  8
+#define POS_PID_KP_DEFAULT  1024     /* ≈0.0625 RPM/count (same as old 16 w/o prescale) */
+#define POS_PID_KI_DEFAULT  1
+#define POS_PID_KD_DEFAULT  50
 #define POS_MAX_VEL_RPM     2000    /* position loop velocity clamp */
+#define POS_INT_MAX_RPM     150     /* position integral velocity clamp (RPM) */
 #define POS_LOOP_DIVIDER    (CONTROL_LOOP_HZ / 1000)  /* = 5 → 1 kHz */
 
 #endif /* M2003_CONFIG_H */

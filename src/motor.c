@@ -38,7 +38,7 @@ static int32_t       prev_enc_position;
 static int32_t       vel_filt_q8;       /* IIR-filtered velocity in Q8 */
 static uint8_t       vel_initialized;
 
-static int32_t       vel_ff_gain;        /* Q8 feedforward: duty per RPM */
+static int32_t       last_applied_duty;  /* for bumpless transfer on mode switch */
 static pid_t         vel_pid;
 static pid_t         pos_pid;
 static uint8_t       pos_div;            /* divider counter for 1 kHz position loop */
@@ -78,31 +78,35 @@ static int32_t estimate_velocity(void)
 
 static int32_t run_velocity_loop(void)
 {
-    int32_t error = target_velocity - measured_velocity;
-    int32_t pid_out = pid_update(&vel_pid, error, measured_velocity);
-    int32_t ff = (vel_ff_gain * target_velocity) / PID_SCALE;
-    int32_t sum = pid_out + ff;
-    if (sum > PWM_MAX_DUTY) sum = PWM_MAX_DUTY;
-    else if (sum < -(int32_t)PWM_MAX_DUTY) sum = -(int32_t)PWM_MAX_DUTY;
-    return sum;
+    return pid_update(&vel_pid, target_velocity, measured_velocity);
 }
 
 static void apply_duty(int32_t duty)
 {
-    uint16_t abs_duty;
+    uint32_t abs_duty;
+    int8_t new_dir;
+    last_applied_duty = duty;
 
     if (duty >= 0) {
-        drive_dir = 1;
-        abs_duty = (uint16_t)duty;
+        new_dir = 1;
+        abs_duty = (uint32_t)duty;
     } else {
-        drive_dir = -1;
-        abs_duty = (uint16_t)(-duty);
+        new_dir = -1;
+        abs_duty = (uint32_t)(-duty);
     }
 
     if (abs_duty > PWM_MAX_DUTY)
         abs_duty = PWM_MAX_DUTY;
 
-    pwm_set_duty(abs_duty);
+    /* Update commutation immediately on direction change — otherwise
+     * the motor runs on a stale phase pattern until the next hall
+     * transition, which may never come if the motor is near standstill. */
+    if (new_dir != drive_dir) {
+        drive_dir = new_dir;
+        commutation_update(drive_dir);
+    }
+
+    pwm_set_duty((uint16_t)abs_duty);
 }
 
 static int32_t torque_clamp(int32_t duty)
@@ -110,7 +114,7 @@ static int32_t torque_clamp(int32_t duty)
     if (current_ma <= torque_limit_ma)
         return duty;
 
-    return (duty * torque_limit_ma) / current_ma;
+    return (duty * (int32_t)torque_limit_ma) / (int32_t)current_ma;
 }
 
 /* ── Public API ──────────────────────────────────────────────────────── */
@@ -130,26 +134,59 @@ void motor_init(void)
     prev_enc_position = 0;
     vel_filt_q8 = 0;
     vel_initialized = 0;
-    vel_ff_gain = VEL_FF_DEFAULT;
+    last_applied_duty = 0;
     pos_div = 0;
 
     pid_init(&vel_pid,
-             VEL_PID_KP_DEFAULT, VEL_PID_KI_DEFAULT, VEL_PID_KD_DEFAULT,
+             VEL_PID_KP_DEFAULT, VEL_PID_KI_DEFAULT, VEL_PID_KD_DEFAULT, VEL_FF_DEFAULT,
              -(int32_t)PWM_MAX_DUTY, (int32_t)PWM_MAX_DUTY);
 
     pid_init(&pos_pid,
-             POS_PID_KP_DEFAULT, POS_PID_KI_DEFAULT, POS_PID_KD_DEFAULT,
+             POS_PID_KP_DEFAULT, POS_PID_KI_DEFAULT, POS_PID_KD_DEFAULT, 0,
              -(int32_t)(POS_MAX_VEL_RPM * POS_ERROR_PRESCALE),
              (int32_t)(POS_MAX_VEL_RPM * POS_ERROR_PRESCALE));
+    pos_pid.int_max = (int64_t)POS_INT_MAX_RPM * POS_ERROR_PRESCALE * PID_SCALE;
 }
 
 void motor_set_mode(ctrl_mode_t mode)
 {
     if (mode == ctrl_mode)
         return;
+
+    if (state == MOTOR_RUN) {
+        /* Bumpless transfer: preload PIDs to match current outputs
+         * so the motor doesn't jerk on mode switch */
+        switch (mode) {
+        case CTRL_VELOCITY:
+            if (ctrl_mode == CTRL_DUTY) {
+                /* vel_pid wasn't running — seed it */
+                pid_preload(&vel_pid, last_applied_duty, measured_velocity);
+            }
+            /* else: vel_pid was inner loop, keep its state */
+            pid_reset(&pos_pid);
+            break;
+        case CTRL_POSITION:
+            if (ctrl_mode == CTRL_DUTY) {
+                /* Neither PID was running — seed vel_pid */
+                pid_preload(&vel_pid, last_applied_duty, measured_velocity);
+            }
+            /* Seed pos_pid to hold current velocity */
+            target_velocity = measured_velocity;
+            pid_preload(&pos_pid,
+                        measured_velocity * POS_ERROR_PRESCALE,
+                        -encoder_get_position());
+            break;
+        default:
+            pid_reset(&vel_pid);
+            pid_reset(&pos_pid);
+            break;
+        }
+    } else {
+        pid_reset(&vel_pid);
+        pid_reset(&pos_pid);
+    }
+
     ctrl_mode = mode;
-    pid_reset(&vel_pid);
-    pid_reset(&pos_pid);
     pos_div = 0;
 }
 
@@ -168,20 +205,21 @@ void motor_set_torque_limit(uint32_t ma)
 
 void motor_set_vel_pid(int32_t kp, int32_t ki, int32_t kd)
 {
-    pid_init(&vel_pid, kp, ki, kd,
+    pid_init(&vel_pid, kp, ki, kd, vel_pid.kf,
              -(int32_t)PWM_MAX_DUTY, (int32_t)PWM_MAX_DUTY);
 }
 
 void motor_set_vel_ff(int32_t gain)
 {
-    vel_ff_gain = gain;
+    vel_pid.kf = gain;
 }
 
 void motor_set_pos_pid(int32_t kp, int32_t ki, int32_t kd)
 {
-    pid_init(&pos_pid, kp, ki, kd,
+    pid_init(&pos_pid, kp, ki, kd, 0,
              -(int32_t)(POS_MAX_VEL_RPM * POS_ERROR_PRESCALE),
              (int32_t)(POS_MAX_VEL_RPM * POS_ERROR_PRESCALE));
+    pos_pid.int_max = (int64_t)POS_INT_MAX_RPM * POS_ERROR_PRESCALE * PID_SCALE;
 }
 
 void motor_start(void)
@@ -190,6 +228,9 @@ void motor_start(void)
         return;
 
     if (ctrl_mode == CTRL_DUTY && target_duty == 0)
+        return;
+
+    if (state == MOTOR_RUN)
         return;
 
     pid_reset(&vel_pid);
@@ -308,10 +349,9 @@ void motor_tick_2khz(void)
              * The PID math scales the output, which is then divided by POS_ERROR_PRESCALE
              * to maintain the original gain scaling for backwards compatibility. */
             int32_t pos = -encoder_get_position();
-            int32_t error = target_position - pos;
             
             /* Position PID outputs velocity setpoint (RPM) scaled by POS_ERROR_PRESCALE */
-            int32_t pid_out = pid_update(&pos_pid, error, pos);
+            int32_t pid_out = pid_update(&pos_pid, target_position, pos);
             target_velocity = pid_out / POS_ERROR_PRESCALE;
         }
         /* Velocity loop at full rate */

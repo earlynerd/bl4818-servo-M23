@@ -9,37 +9,51 @@
 
 #include "pid.h"
 
-void pid_init(pid_t *pid, int32_t kp, int32_t ki, int32_t kd,
+void pid_init(pid_t *pid, int32_t kp, int32_t ki, int32_t kd, int32_t kf,
               int32_t out_min, int32_t out_max)
 {
     pid->kp = kp;
     pid->ki = ki;
     pid->kd = kd;
+    pid->kf = kf;
     pid->integral = 0;
     pid->prev_meas = 0;
+    pid->prev_d_term = 0;
     pid->out_min = out_min;
     pid->out_max = out_max;
     pid->int_max = out_max * PID_SCALE;
 }
 
-int32_t pid_update(pid_t *pid, int32_t error, int32_t measurement)
+int32_t pid_update(pid_t *pid, int32_t setpoint, int32_t measurement)
 {
+    int32_t error = setpoint - measurement;
+
     /* Proportional */
     int32_t p_term = pid->kp * error;
 
     /* Tentative integral update */
-    int32_t new_integral = pid->integral + pid->ki * error;
+    int64_t new_integral = pid->integral + pid->ki * error;
     if (new_integral > pid->int_max)
         new_integral = pid->int_max;
     else if (new_integral < -pid->int_max)
         new_integral = -pid->int_max;
 
-    /* Derivative on measurement (negated: rising measurement = falling error) */
-    int32_t d_term = -pid->kd * (measurement - pid->prev_meas);
+    /* Derivative on measurement (negated: rising measurement = falling error)
+     * Filtered with a simple first-order IIR (alpha = 0.25).
+     * The internal state is kept in Q8 (* 256) to eliminate the integer 
+     * truncation deadband that causes the D-term to get stuck. */
+    int32_t raw_d_term = -pid->kd * (measurement - pid->prev_meas);
+    int32_t raw_d_q8 = raw_d_term * 256;
+    pid->prev_d_term += (raw_d_q8 - pid->prev_d_term) / 4;
     pid->prev_meas = measurement;
+    
+    int32_t d_term = pid->prev_d_term / 256;
+
+    /* Feedforward */
+    int32_t ff_term = pid->kf * setpoint;
 
     /* Sum and scale back from Q8 */
-    int32_t output = (p_term + new_integral + d_term) / PID_SCALE;
+    int32_t output = (p_term + new_integral + d_term + ff_term) / PID_SCALE;
 
     /* Clamp output + conditional integration anti-windup */
     if (output >= pid->out_max) {
@@ -61,4 +75,12 @@ void pid_reset(pid_t *pid)
 {
     pid->integral = 0;
     pid->prev_meas = 0;
+    pid->prev_d_term = 0;
+}
+
+void pid_preload(pid_t *pid, int32_t current_output, int32_t current_meas)
+{
+    pid->integral = (int64_t)current_output * PID_SCALE;
+    pid->prev_meas = current_meas;
+    pid->prev_d_term = 0;
 }

@@ -145,10 +145,10 @@ static uint8_t prepare_set_position(int32_t counts)
 
 static void send_status_reply(void)
 {
-    uint16_t current = motor_get_current();
+    uint16_t current = (uint16_t)motor_get_current();
     uint16_t angle = encoder_get_angle();
-    int16_t  velocity = motor_get_velocity();
-    int16_t  target = motor_get_target();
+    int16_t  velocity = (int16_t)motor_get_velocity();
+    int16_t  target = (int16_t)motor_get_target();
     int32_t  position = -encoder_get_position(); /* negate: forward = positive */
     uint8_t buf[20];
     uint16_t crc;

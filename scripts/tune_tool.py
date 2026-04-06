@@ -43,10 +43,14 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ring_tool import (
     RingClientV2,
     MotorStatus,
+    StrikeStatus,
     RingError,
     RingTimeout,
     auto_detect_port,
     DEFAULT_BAUD,
+    STRIKE_PARAM_HOME_OFFSET,
+    STRIKE_PARAM_COAST_DISTANCE,
+    STRIKE_PARAM_HOMING_DUTY,
 )
 
 
@@ -344,6 +348,173 @@ def plot_step(
     plt.show()
 
 
+# ── Strike test ────────────────────────────────────────────────────────────
+
+STRIKE_STATE_NAMES = {0: "IDLE", 1: "HOMING", 2: "DRIVING", 3: "COASTING", 4: "BRAKING", 5: "CATCHING"}
+
+
+def wait_for_homed(client: RingClientV2, address: int, timeout: float = 15.0) -> StrikeStatus:
+    """Poll strike status until homing is complete."""
+    deadline = time.monotonic() + timeout
+    last_state = -1
+    while time.monotonic() < deadline:
+        try:
+            ss = client.query_strike(address)
+            if ss.state != last_state:
+                print(f"  strike state: {STRIKE_STATE_NAMES.get(ss.state, '?')}")
+                last_state = ss.state
+            if ss.homed and ss.state == 0:
+                return ss
+        except RingTimeout:
+            pass
+        time.sleep(0.05)
+    raise RingError("homing timed out")
+
+
+def wait_for_strike_idle(client: RingClientV2, address: int, timeout: float = 5.0) -> None:
+    """Poll strike status until the strike cycle completes."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            ss = client.query_strike(address)
+            if ss.state == 0:
+                return
+        except RingTimeout:
+            pass
+        time.sleep(0.02)
+
+
+def run_strike(
+    client: RingClientV2,
+    address: int,
+    strike_duty: int,
+    home_offset: int | None,
+    coast_distance: int | None,
+    homing_duty: int | None,
+    pre_duration: float,
+    capture_duration: float,
+) -> tuple[list[tuple[float, MotorStatus]], float, StrikeStatus]:
+    """
+    Run a full strike test: configure, home (if needed), capture telemetry through strike.
+
+    Returns (samples, t_strike, strike_status).
+    """
+    # 1. Configure strike parameters
+    if home_offset is not None:
+        print(f"Setting home offset: {home_offset}")
+        client.set_strike_param(address, STRIKE_PARAM_HOME_OFFSET, home_offset)
+    if coast_distance is not None:
+        print(f"Setting coast distance: {coast_distance}")
+        client.set_strike_param(address, STRIKE_PARAM_COAST_DISTANCE, coast_distance)
+    if homing_duty is not None:
+        print(f"Setting homing duty: {homing_duty}")
+        client.set_strike_param(address, STRIKE_PARAM_HOMING_DUTY, homing_duty)
+
+    # 2. Check if already homed
+    ss = client.query_strike(address)
+    if not ss.homed:
+        print("Running homing sequence...")
+        client.strike_home(address)
+        ss = wait_for_homed(client, address)
+    print(f"Homed: drum={ss.drum_position}, home={ss.home_position}")
+
+    all_samples: list[tuple[float, MotorStatus]] = []
+
+    # 3. Pre-strike baseline
+    if pre_duration > 0:
+        print(f"Capturing baseline ({pre_duration:.1f}s)...")
+        all_samples.extend(capture_loop(client, address, pre_duration))
+
+    # 4. Fire strike
+    t_strike = time.monotonic()
+    print(f"STRIKE: duty={strike_duty}")
+    s = client.strike(address, strike_duty)
+    all_samples.append((time.monotonic(), s))
+
+    # 5. Capture through the strike cycle
+    print(f"Capturing strike cycle ({capture_duration:.1f}s)...")
+    all_samples.extend(capture_loop(client, address, capture_duration))
+
+    # 6. Wait for strike to complete (if not already)
+    wait_for_strike_idle(client, address, timeout=2.0)
+
+    # 7. Brief post-strike capture
+    all_samples.extend(capture_loop(client, address, 0.3))
+
+    rate = len(all_samples) / (pre_duration + capture_duration + 0.3) if all_samples else 0
+    print(f"Captured {len(all_samples)} samples ({rate:.0f} Hz effective)")
+
+    return all_samples, t_strike, ss
+
+
+def plot_strike(
+    samples: list[tuple[float, MotorStatus]],
+    t_strike: float,
+    strike_info: StrikeStatus,
+    title: str,
+) -> None:
+    try:
+        import matplotlib.pyplot as plt
+        from matplotlib.patches import Patch
+    except ImportError:
+        print("ERROR: matplotlib required. Install with: pip install matplotlib")
+        return
+
+    if not samples:
+        print("No samples to plot.")
+        return
+
+    t = [s[0] - t_strike for s in samples]
+    pos = [s[1].position for s in samples]
+    vel = [s[1].velocity for s in samples]
+    current = [s[1].current_ma for s in samples]
+
+    home_pos = strike_info.home_position
+    drum_pos = strike_info.drum_position
+
+    fig, axes = plt.subplots(3, 1, figsize=(10, 7), sharex=True)
+    fig.suptitle(title, fontsize=12)
+
+    # Position
+    ax = axes[0]
+    ax.plot(t, pos, "b-", linewidth=1, label="position")
+    ax.axhline(home_pos, color="green", linestyle="--", linewidth=1, alpha=0.7,
+               label=f"home ({home_pos})")
+    ax.axhline(drum_pos, color="red", linestyle="--", linewidth=1, alpha=0.7,
+               label=f"drum ({drum_pos})")
+    ax.axvline(0, color="gray", linestyle=":", linewidth=0.8, label="strike")
+    ax.set_ylabel("Position (counts)")
+    ax.legend(loc="upper right", fontsize=8)
+    ax.grid(True, alpha=0.3)
+
+    # Velocity
+    ax = axes[1]
+    ax.plot(t, vel, "b-", linewidth=1, label="velocity")
+    ax.axhline(0, color="gray", linestyle="-", linewidth=0.5, alpha=0.5)
+    ax.axvline(0, color="gray", linestyle=":", linewidth=0.8)
+    # Mark the rebound (first velocity sign change after strike)
+    for i in range(1, len(vel)):
+        if t[i] > 0 and vel[i - 1] != 0 and vel[i] != 0:
+            if (vel[i - 1] > 0) != (vel[i] > 0):
+                ax.axvline(t[i], color="orange", linestyle="--", linewidth=1,
+                           alpha=0.7, label=f"rebound ({t[i]:.3f}s)")
+                break
+    ax.set_ylabel("Velocity (RPM)")
+    ax.legend(loc="upper right", fontsize=8)
+    ax.grid(True, alpha=0.3)
+
+    # Current
+    ax = axes[2]
+    ax.plot(t, current, "m-", linewidth=1)
+    ax.axvline(0, color="gray", linestyle=":", linewidth=0.8)
+    ax.set_ylabel("Current (mA)")
+    ax.set_xlabel("Time (s)")
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.show()
+
+
 # ── CLI ─────────────────────────────────────────────────────────────────────
 
 def build_parser() -> argparse.ArgumentParser:
@@ -370,6 +541,8 @@ def build_parser() -> argparse.ArgumentParser:
                       help="Position step target (encoder counts, auto-zeros first)")
     step.add_argument("--measure-ff", action="store_true",
                       help="Measure feedforward gain (Kff) by open-loop sweep")
+    step.add_argument("--strike", type=int, metavar="DUTY",
+                      help="Strike test: home, strike at given duty, capture cycle")
 
     parser.add_argument("--pid", nargs=3, type=int, metavar=("KP", "KI", "KD"),
                         help="Set velocity PID gains before step (Q8)")
@@ -379,6 +552,14 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Set velocity feedforward gain (Q8: duty per RPM)")
     parser.add_argument("--torque", type=int, metavar="MA",
                         help="Set torque limit (mA) before step")
+
+    # Strike-specific options
+    parser.add_argument("--home-offset", type=int, metavar="COUNTS",
+                        help="Strike: encoder counts above drum for home position")
+    parser.add_argument("--coast-distance", type=int, metavar="COUNTS",
+                        help="Strike: cut power this many counts from drum")
+    parser.add_argument("--homing-duty", type=int, metavar="DUTY",
+                        help="Strike: duty for drum-sensing homing (sign = toward drum)")
     parser.add_argument("--duration", type=float, default=2.0,
                         help="Step capture duration in seconds (default: 2.0)")
     parser.add_argument("--pre", type=float, default=0.3,
@@ -424,6 +605,31 @@ def main() -> int:
             duties = [150, 250, 350, 500, 700, -150, -250, -350, -500, -700]
             measure_ff(client, args.address, duties,
                        settle_s=1.0, sample_s=0.5)
+            return 0
+
+        if args.strike is not None:
+            samples, t_strike, strike_info = run_strike(
+                client=client,
+                address=args.address,
+                strike_duty=args.strike,
+                home_offset=args.home_offset,
+                coast_distance=args.coast_distance,
+                homing_duty=args.homing_duty,
+                pre_duration=args.pre,
+                capture_duration=args.duration,
+            )
+
+            if args.csv:
+                save_csv(args.csv, samples, t_strike)
+
+            title = f"Strike Test: duty={args.strike}"
+            if args.home_offset is not None:
+                title += f"  home_offset={args.home_offset}"
+            if args.coast_distance is not None:
+                title += f"  coast={args.coast_distance}"
+
+            if not args.no_plot:
+                plot_strike(samples, t_strike, strike_info, title)
             return 0
 
         pid = tuple(args.pid) if args.pid else None

@@ -67,4 +67,18 @@
 #define POS_INT_MAX_RPM     150     /* position integral velocity clamp (RPM) */
 #define POS_LOOP_DIVIDER    (CONTROL_LOOP_HZ / 1000)  /* = 5 → 1 kHz */
 
+/* ── Strike Defaults ──────────────────────────────────────────────────── */
+#define STRIKE_HOME_OFFSET_DEFAULT      2048    /* encoder counts above drum surface */
+#define STRIKE_COAST_DISTANCE_DEFAULT   512     /* cut power this far from drum (counts) */
+#define STRIKE_HOMING_DUTY_DEFAULT      (-100)  /* low duty toward drum (sign = toward drum) */
+#define STRIKE_SETTLE_DEADBAND          50      /* counts: position "settled" threshold */
+#define STRIKE_SETTLE_TICKS             100     /* 100 ms at 1 kHz */
+#define STRIKE_HOMING_STALL_TICKS       200     /* 200 ms no movement = drum contact */
+#define STRIKE_HOMING_STALL_THRESHOLD   4       /* counts: less than this = stalled */
+#define STRIKE_COAST_TIMEOUT_TICKS      500     /* 500 ms max coast before forced catch */
+#define STRIKE_REBOUND_THRESHOLD        5       /* RPM away from drum to confirm rebound */
+#define STRIKE_BRAKE_VEL_THRESHOLD      50      /* RPM: switch from braking to position hold */
+#define STRIKE_BRAKE_RAMP_RATE          20      /* RPM per strike tick (1kHz) decel rate */
+#define STRIKE_TICK_DIVIDER             5       /* 5 kHz → 1 kHz for strike state machine */
+
 #endif /* M2003_CONFIG_H */

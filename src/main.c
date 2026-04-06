@@ -12,6 +12,7 @@
 #include "encoder.h"
 #include "motor.h"
 #include "protocol.h"
+#include "strike.h"
 
 extern uint32_t SystemCoreClock;
 extern uint32_t CyclesPerUs;
@@ -52,6 +53,7 @@ int main(void)
 {
     uint32_t handled_sys_ticks = 0;
     uint8_t encoder_div = 0;
+    uint8_t strike_div = 0;
 
     SYS_UnlockReg();
 
@@ -63,6 +65,7 @@ int main(void)
     uart_init(UART_BAUD);
     protocol_init();
     motor_init();
+    strike_init();
 
     adc_irq_enable();
 
@@ -82,6 +85,11 @@ int main(void)
 
             motor_tick_2khz();
             protocol_tick();
+
+            if (++strike_div >= STRIKE_TICK_DIVIDER) {
+                strike_div = 0;
+                strike_tick();
+            }
         }
     }
 }

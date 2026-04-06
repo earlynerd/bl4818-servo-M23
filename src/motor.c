@@ -39,6 +39,10 @@ static int32_t       vel_filt_q8;       /* IIR-filtered velocity in Q8 */
 static uint8_t       vel_initialized;
 
 static int32_t       last_applied_duty;  /* for bumpless transfer on mode switch */
+static uint8_t       coasting;           /* 1 = phases floating, skip duty dispatch */
+static int32_t       coast_trip_pos;     /* auto-coast position threshold */
+static int8_t        coast_trip_dir;     /* +1: coast when pos >= trip, -1: when <= */
+static uint8_t       coast_armed;        /* 1 = watching for coast trigger at 5 kHz */
 static pid_t         vel_pid;
 static pid_t         pos_pid;
 static uint8_t       pos_div;            /* divider counter for 1 kHz position loop */
@@ -135,6 +139,8 @@ void motor_init(void)
     vel_filt_q8 = 0;
     vel_initialized = 0;
     last_applied_duty = 0;
+    coasting = 0;
+    coast_armed = 0;
     pos_div = 0;
 
     pid_init(&vel_pid,
@@ -152,6 +158,8 @@ void motor_set_mode(ctrl_mode_t mode)
 {
     if (mode == ctrl_mode)
         return;
+
+    coasting = 0;
 
     if (state == MOTOR_RUN) {
         /* Bumpless transfer: preload PIDs to match current outputs
@@ -236,6 +244,7 @@ void motor_start(void)
     pid_reset(&vel_pid);
     pid_reset(&pos_pid);
     pos_div = 0;
+    coasting = 0;
     state = MOTOR_RUN;
 
     /* Set initial commutation direction */
@@ -258,7 +267,34 @@ void motor_stop(void)
     pwm_disable();
     pid_reset(&vel_pid);
     pid_reset(&pos_pid);
+    coasting = 0;
+    coast_armed = 0;
     state = MOTOR_IDLE;
+}
+
+void motor_coast(void)
+{
+    commutation_coast();
+    pwm_set_duty(0);
+    last_applied_duty = 0;
+    coasting = 1;
+}
+
+void motor_arm_coast(int32_t threshold, int8_t direction)
+{
+    coast_trip_pos = threshold;
+    coast_trip_dir = direction;
+    coast_armed = 1;
+}
+
+void motor_disarm_coast(void)
+{
+    coast_armed = 0;
+}
+
+uint8_t motor_is_coasting(void)
+{
+    return coasting;
 }
 
 void motor_clear_fault(void)
@@ -269,6 +305,8 @@ void motor_clear_fault(void)
     pid_reset(&vel_pid);
     pid_reset(&pos_pid);
     pwm_disable();
+    coasting = 0;
+    coast_armed = 0;
     state = MOTOR_IDLE;
 }
 
@@ -323,6 +361,19 @@ void motor_tick_2khz(void)
     /* Always update measured velocity (useful for status reporting) */
     measured_velocity = estimate_velocity();
 
+    /* Fast coast detection at 5 kHz — armed by strike module.
+     * Must cut power before the mallet hits the drum. */
+    if (coast_armed && state == MOTOR_RUN) {
+        int32_t pos = -encoder_get_position();
+        uint8_t crossed = (coast_trip_dir > 0)
+            ? (pos >= coast_trip_pos)
+            : (pos <= coast_trip_pos);
+        if (crossed) {
+            motor_coast();
+            coast_armed = 0;
+        }
+    }
+
     if (state != MOTOR_RUN)
         return;
 
@@ -330,6 +381,8 @@ void motor_tick_2khz(void)
     switch (ctrl_mode) {
 
     case CTRL_DUTY:
+        if (coasting)
+            return;
         if (target_duty == 0) {
             motor_stop();
             return;

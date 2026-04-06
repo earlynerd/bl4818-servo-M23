@@ -14,6 +14,7 @@
 #include "motor.h"
 #include "hall.h"
 #include "encoder.h"
+#include "strike.h"
 /* Enable for parser state tracing: #define DBG(c) uart_putc(c) */
 #define DBG(c) ((void)0)
 
@@ -49,7 +50,12 @@
 #define SUBCMD_SET_POSITION     0x09u
 #define SUBCMD_SET_POS_PID      0x0Au
 #define SUBCMD_ZERO_POSITION    0x0Bu
+#define SUBCMD_STRIKE           0x0Cu
+#define SUBCMD_STRIKE_HOME      0x0Du
+#define SUBCMD_STRIKE_CANCEL    0x0Eu
+#define SUBCMD_SET_STRIKE_PARAM 0x0Fu
 #define SUBCMD_QUERY_STATUS     0x10u
+#define SUBCMD_QUERY_STRIKE     0x11u
 
 /* ── Forwarding mode ──────────────────────────────────────────────────── */
 typedef enum {
@@ -177,6 +183,38 @@ static void send_status_reply(void)
     buf[19] = (uint8_t)(crc & 0xFFu);
 
     send_frame(buf, 20);
+}
+
+/* Strike parameter IDs */
+#define STRIKE_PARAM_HOME_OFFSET     0x01u
+#define STRIKE_PARAM_COAST_DISTANCE  0x02u
+#define STRIKE_PARAM_HOMING_DUTY     0x03u
+
+static void send_strike_status_reply(void)
+{
+    int32_t drum_pos = strike_get_drum_position();
+    int32_t home_pos = strike_get_home_position();
+    uint8_t buf[14];
+    uint16_t crc;
+
+    buf[0]  = 11u;                                  /* LEN */
+    buf[1]  = CMD_STATUS_BASE | device_addr;
+    buf[2]  = (uint8_t)strike_get_state();
+    buf[3]  = strike_is_homed();
+    buf[4]  = (uint8_t)((uint32_t)drum_pos >> 24);
+    buf[5]  = (uint8_t)((uint32_t)drum_pos >> 16);
+    buf[6]  = (uint8_t)((uint32_t)drum_pos >> 8);
+    buf[7]  = (uint8_t)((uint32_t)drum_pos & 0xFFu);
+    buf[8]  = (uint8_t)((uint32_t)home_pos >> 24);
+    buf[9]  = (uint8_t)((uint32_t)home_pos >> 16);
+    buf[10] = (uint8_t)((uint32_t)home_pos >> 8);
+    buf[11] = (uint8_t)((uint32_t)home_pos & 0xFFu);
+
+    crc = crc16_ccitt(buf, 12);
+    buf[12] = (uint8_t)(crc >> 8);
+    buf[13] = (uint8_t)(crc & 0xFFu);
+
+    send_frame(buf, 14);
 }
 
 /* ── Command handlers ─────────────────────────────────────────────────── */
@@ -323,8 +361,46 @@ static void handle_addressed_cmd(uint8_t cmd_type, const uint8_t *payload, uint8
         encoder_reset_position();
         send_status_reply();
         break;
+    case SUBCMD_STRIKE:
+        if (len >= 4u) {
+            int16_t duty = (int16_t)(((uint16_t)payload[2] << 8) | payload[3]);
+            strike_trigger((int32_t)duty);
+        }
+        send_status_reply();
+        break;
+    case SUBCMD_STRIKE_HOME:
+        strike_home();
+        send_status_reply();
+        break;
+    case SUBCMD_STRIKE_CANCEL:
+        strike_cancel();
+        send_status_reply();
+        break;
+    case SUBCMD_SET_STRIKE_PARAM:
+        if (len >= 5u) {
+            uint8_t param_id = payload[2];
+            int16_t value = (int16_t)(((uint16_t)payload[3] << 8) | payload[4]);
+            switch (param_id) {
+            case STRIKE_PARAM_HOME_OFFSET:
+                strike_set_home_offset((int32_t)value);
+                break;
+            case STRIKE_PARAM_COAST_DISTANCE:
+                strike_set_coast_distance((int32_t)value);
+                break;
+            case STRIKE_PARAM_HOMING_DUTY:
+                strike_set_homing_duty((int32_t)value);
+                break;
+            default:
+                break;
+            }
+        }
+        send_status_reply();
+        break;
     case SUBCMD_QUERY_STATUS:
         send_status_reply();
+        break;
+    case SUBCMD_QUERY_STRIKE:
+        send_strike_status_reply();
         break;
     default:
         break;

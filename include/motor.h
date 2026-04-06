@@ -46,6 +46,10 @@ void motor_set_pos_pid(int32_t kp, int32_t ki, int32_t kd);
 
 void motor_start(void);
 void motor_stop(void);
+void motor_coast(void);        /* Float phases, stay MOTOR_RUN (for strike coast) */
+void motor_arm_coast(int32_t threshold, int8_t direction);  /* Auto-coast at position */
+void motor_disarm_coast(void);
+uint8_t motor_is_coasting(void);
 void motor_clear_fault(void);
 
 void motor_poll_fast(void);     /* Main loop: commutation on hall transitions */

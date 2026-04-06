@@ -64,7 +64,18 @@ SUBCMD_SET_FF       = 0x08
 SUBCMD_SET_POSITION = 0x09
 SUBCMD_SET_POS_PID  = 0x0A
 SUBCMD_ZERO_POS     = 0x0B
+SUBCMD_STRIKE       = 0x0C
+SUBCMD_STRIKE_HOME  = 0x0D
+SUBCMD_STRIKE_CANCEL = 0x0E
+SUBCMD_SET_STRIKE_PARAM = 0x0F
 SUBCMD_QUERY_STATUS = 0x10
+SUBCMD_QUERY_STRIKE = 0x11
+
+# ── Strike parameter IDs ───────────────────────────────────────────────────
+
+STRIKE_PARAM_HOME_OFFSET    = 0x01
+STRIKE_PARAM_COAST_DISTANCE = 0x02
+STRIKE_PARAM_HOMING_DUTY    = 0x03
 
 # ── Timing defaults ─────────────────────────────────────────────────────────
 
@@ -89,9 +100,10 @@ def crc16_ccitt(data: bytes, init: int = 0xFFFF) -> int:
 
 # ── Data types ───────────────────────────────────────────────────────────────
 
-MOTOR_STATES = {0: "IDLE", 1: "RUN", 2: "FAULT"}
-FAULT_CODES  = {0: "NONE", 1: "OVERCURRENT", 2: "HALL_INVALID"}
-CTRL_MODES   = {0: "DUTY", 1: "VELOCITY", 2: "POSITION"}
+MOTOR_STATES  = {0: "IDLE", 1: "RUN", 2: "FAULT"}
+FAULT_CODES   = {0: "NONE", 1: "OVERCURRENT", 2: "HALL_INVALID"}
+CTRL_MODES    = {0: "DUTY", 1: "VELOCITY", 2: "POSITION"}
+STRIKE_STATES = {0: "IDLE", 1: "HOMING", 2: "DRIVING", 3: "COASTING", 4: "BRAKING", 5: "CATCHING"}
 
 
 @dataclasses.dataclass
@@ -122,6 +134,19 @@ class MotorStatus:
     @property
     def angle_deg(self) -> float:
         return self.angle * 360.0 / 16384.0
+
+
+@dataclasses.dataclass
+class StrikeStatus:
+    address: int
+    state: int          # strike_state_t: 0=IDLE..4=CATCHING
+    homed: int
+    drum_position: int  # int32
+    home_position: int  # int32
+
+    @property
+    def state_name(self) -> str:
+        return STRIKE_STATES.get(self.state, f"UNKNOWN({self.state})")
 
 
 # ── Exceptions ───────────────────────────────────────────────────────────────
@@ -430,6 +455,62 @@ class RingClientV2:
         )
         return self._recv_status_reply()
 
+    # ── Strike commands ────────────────────────────────────────────────
+
+    def strike(self, address: int, duty: int) -> MotorStatus:
+        self._check_address(address)
+        self._flush_rx()
+        self._send_frame(
+            bytes([CMD_ADDR_BASE | address, SUBCMD_STRIKE])
+            + struct.pack(">h", duty)
+        )
+        return self._recv_status_reply()
+
+    def strike_home(self, address: int) -> MotorStatus:
+        self._check_address(address)
+        self._flush_rx()
+        self._send_frame(bytes([CMD_ADDR_BASE | address, SUBCMD_STRIKE_HOME]))
+        return self._recv_status_reply()
+
+    def strike_cancel(self, address: int) -> MotorStatus:
+        self._check_address(address)
+        self._flush_rx()
+        self._send_frame(bytes([CMD_ADDR_BASE | address, SUBCMD_STRIKE_CANCEL]))
+        return self._recv_status_reply()
+
+    def set_strike_param(self, address: int, param_id: int, value: int) -> MotorStatus:
+        self._check_address(address)
+        self._flush_rx()
+        self._send_frame(
+            bytes([CMD_ADDR_BASE | address, SUBCMD_SET_STRIKE_PARAM, param_id])
+            + struct.pack(">h", value)
+        )
+        return self._recv_status_reply()
+
+    def query_strike(self, address: int) -> StrikeStatus:
+        self._check_address(address)
+        self._flush_rx()
+        self._send_frame(bytes([CMD_ADDR_BASE | address, SUBCMD_QUERY_STRIKE]))
+        deadline = time.monotonic() + self.timeout_ms / 1000.0
+        while True:
+            remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
+            payload = self._recv_frame(timeout_ms=remaining_ms)
+            cmd = payload[0] if payload else 0
+            if CMD_STATUS_BASE <= cmd < CMD_STATUS_END and len(payload) == 11:
+                return self._parse_strike_status(payload)
+            self._trace("skip", bytes([cmd]))
+
+    def _parse_strike_status(self, payload: bytes) -> StrikeStatus:
+        cmd = payload[0]
+        address = cmd & 0x0F
+        return StrikeStatus(
+            address=address,
+            state=payload[1],
+            homed=payload[2],
+            drum_position=struct.unpack(">i", payload[3:7])[0],
+            home_position=struct.unpack(">i", payload[7:11])[0],
+        )
+
     def broadcast_duty(self, duties: Iterable[int]) -> None:
         duty_list = list(duties)
         if not duty_list or len(duty_list) > MAX_DEVICES:
@@ -623,6 +704,24 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("gain", type=int,
                     help="Duty per RPM of back-EMF (Q8: 256 = 1.0)")
 
+    sp = sub.add_parser("strike", help="Trigger a strike")
+    sp.add_argument("address", type=int)
+    sp.add_argument("duty", type=int, help="Signed strike duty (loudness)")
+
+    sp = sub.add_parser("strike-home", help="Run strike homing sequence")
+    sp.add_argument("address", type=int)
+
+    sp = sub.add_parser("strike-cancel", help="Cancel strike/homing")
+    sp.add_argument("address", type=int)
+
+    sp = sub.add_parser("strike-status", help="Query strike status")
+    sp.add_argument("address", type=int)
+
+    sp = sub.add_parser("set-strike-param", help="Set strike parameter")
+    sp.add_argument("address", type=int)
+    sp.add_argument("param", choices=["home-offset", "coast-distance", "homing-duty"])
+    sp.add_argument("value", type=int)
+
     sp = sub.add_parser("broadcast", help="Broadcast duty to all devices")
     sp.add_argument("duties", nargs="+", type=int, help="One signed duty per device")
 
@@ -709,6 +808,29 @@ def main() -> int:
 
         elif args.command == "set-ff":
             print(format_status(client.set_ff(args.address, args.gain)))
+
+        elif args.command == "strike":
+            print(format_status(client.strike(args.address, args.duty)))
+
+        elif args.command == "strike-home":
+            print(format_status(client.strike_home(args.address)))
+
+        elif args.command == "strike-cancel":
+            print(format_status(client.strike_cancel(args.address)))
+
+        elif args.command == "strike-status":
+            ss = client.query_strike(args.address)
+            print(f"addr={ss.address} strike={ss.state_name} homed={ss.homed} "
+                  f"drum_pos={ss.drum_position} home_pos={ss.home_position}")
+
+        elif args.command == "set-strike-param":
+            param_map = {
+                "home-offset": STRIKE_PARAM_HOME_OFFSET,
+                "coast-distance": STRIKE_PARAM_COAST_DISTANCE,
+                "homing-duty": STRIKE_PARAM_HOMING_DUTY,
+            }
+            print(format_status(client.set_strike_param(
+                args.address, param_map[args.param], args.value)))
 
         elif args.command == "broadcast":
             if client.device_count is not None and len(args.duties) != client.device_count:

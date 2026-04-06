@@ -17,7 +17,7 @@ typedef struct {
     int16_t kd;
     int32_t integral;
     int32_t int_max;
-    int16_t prev_error;
+    int16_t prev_meas;
     int16_t out_min;
     int16_t out_max;
 } pid_t;

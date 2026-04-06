@@ -75,13 +75,13 @@ int main(void)
         while (handled_sys_ticks != systick_count) {
             handled_sys_ticks++;
 
-            motor_tick_2khz();
-            protocol_tick();
-
             if (++encoder_div >= ENCODER_DIVIDER) {
                 encoder_div = 0;
                 encoder_poll();
             }
+
+            motor_tick_2khz();
+            protocol_tick();
         }
     }
 }

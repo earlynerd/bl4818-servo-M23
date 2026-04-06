@@ -6,20 +6,26 @@ Captures status telemetry before, during, and after a step command,
 then plots velocity, angle, and current vs time.
 
 Examples:
+    # Measure feedforward gain (run first!)
+    python tune_tool.py -p COM7 0 --measure-ff
+
     # Velocity step to 500 RPM, default PID gains
     python tune_tool.py -p COM7 0 --velocity 500
 
     # Set PID gains, then step
     python tune_tool.py -p COM7 0 --velocity 500 --pid 256 32 0
 
+    # Position step to 1/4 turn (4096 counts), with position PID
+    python tune_tool.py -p COM7 0 --position 4096 --pos-pid 16 1 0
+
+    # Position step with velocity PID and feedforward too
+    python tune_tool.py -p COM7 0 --position 4096 --pos-pid 16 1 0 --pid 256 8 0 --ff 102
+
     # Duty step (open-loop) for 1 second
     python tune_tool.py -p COM7 0 --duty 400 --duration 1
 
     # Save raw data to CSV (no plot)
     python tune_tool.py -p COM7 0 --velocity 500 --csv step.csv --no-plot
-
-    # Longer capture with more pre-step baseline
-    python tune_tool.py -p COM7 0 --velocity 500 --duration 5 --pre 1.0
 
 Requires: pyserial, matplotlib (pip install pyserial matplotlib)
 """
@@ -64,7 +70,9 @@ def run_step(
     address: int,
     velocity: int | None,
     duty: int | None,
+    position: int | None,
     pid: tuple[int, int, int] | None,
+    pos_pid: tuple[int, int, int] | None,
     ff_gain: int | None,
     torque_ma: int | None,
     pre_duration: float,
@@ -76,36 +84,52 @@ def run_step(
     Returns (samples, t_step) where t_step is the monotonic time of the step command.
     """
     # 1. Ensure clean state
-    print(f"Stopping motor...")
+    print("Stopping motor...")
     client.stop(address)
     time.sleep(0.05)
 
-    # 2. Optionally set PID gains
+    # 2. For position steps, zero the encoder first
+    if position is not None:
+        print("Zeroing encoder position...")
+        client.zero_position(address)
+        time.sleep(0.02)
+
+    # 3. Optionally set velocity PID gains
     if pid is not None:
         kp, ki, kd = pid
-        print(f"Setting PID: kp={kp} ki={ki} kd={kd}")
+        print(f"Setting vel PID: kp={kp} ki={ki} kd={kd}")
         client.set_pid(address, kp, ki, kd)
 
-    # 3. Optionally set feedforward
+    # 4. Optionally set position PID gains
+    if pos_pid is not None:
+        kp, ki, kd = pos_pid
+        print(f"Setting pos PID: kp={kp} ki={ki} kd={kd}")
+        client.set_pos_pid(address, kp, ki, kd)
+
+    # 5. Optionally set feedforward
     if ff_gain is not None:
         print(f"Setting feedforward: {ff_gain}")
         client.set_ff(address, ff_gain)
 
-    # 4. Optionally set torque limit
+    # 6. Optionally set torque limit
     if torque_ma is not None:
         print(f"Setting torque limit: {torque_ma} mA")
         client.set_torque(address, torque_ma)
 
     all_samples: list[tuple[float, MotorStatus]] = []
 
-    # 4. Pre-step baseline
+    # 7. Pre-step baseline
     if pre_duration > 0:
         print(f"Capturing baseline ({pre_duration:.1f}s)...")
         all_samples.extend(capture_loop(client, address, pre_duration))
 
-    # 5. Step command
+    # 8. Step command
     t_step = time.monotonic()
-    if velocity is not None:
+    if position is not None:
+        print(f"STEP: position={position} counts")
+        s = client.set_position(address, position)
+        all_samples.append((time.monotonic(), s))
+    elif velocity is not None:
         print(f"STEP: velocity={velocity} RPM")
         s = client.set_velocity(address, velocity)
         all_samples.append((time.monotonic(), s))
@@ -132,18 +156,110 @@ def run_step(
     return all_samples, t_step
 
 
+# ── Feedforward measurement ─────────────────────────────────────────────────
+
+def measure_ff(
+    client: RingClientV2,
+    address: int,
+    duty_steps: list[int],
+    settle_s: float,
+    sample_s: float,
+) -> int:
+    """
+    Measure motor Kv by spinning at several open-loop duty levels and
+    capturing steady-state RPM.  Returns the Q8 feedforward gain.
+    """
+    print("Measuring feedforward (Kv)...")
+    print(f"  Duty steps: {duty_steps}")
+    print(f"  Settle: {settle_s:.1f}s, sample: {sample_s:.1f}s per step\n")
+
+    # Disable PID — pure open-loop
+    client.set_pid(address, 0, 0, 0)
+    client.set_ff(address, 0)
+
+    points: list[tuple[int, float]] = []  # (duty, avg_rpm)
+
+    for duty in duty_steps:
+        print(f"  duty={duty:+5d} ... ", end="", flush=True)
+        client.set_duty(address, duty)
+        time.sleep(settle_s)
+
+        # Sample velocity over sample_s seconds
+        samples = capture_loop(client, address, sample_s)
+        if not samples:
+            print("no data")
+            continue
+
+        velocities = [s[1].velocity for s in samples]
+        avg_rpm = sum(velocities) / len(velocities)
+        print(f"avg {avg_rpm:+7.1f} RPM  ({len(velocities)} samples)")
+        points.append((duty, avg_rpm))
+
+    client.stop(address)
+
+    # Filter out points where motor didn't spin (stall / friction zone)
+    valid = [(d, r) for d, r in points if abs(r) > 10]
+    if len(valid) < 2:
+        print("\nERROR: not enough valid data points. Try higher duty values.")
+        return 0
+
+    # Linear regression: duty = Kff_real * rpm + offset
+    # Kff_real = sum(d*r) / sum(r*r)  (force through zero approx)
+    # More robust: least-squares slope
+    n = len(valid)
+    sum_d = sum(d for d, _ in valid)
+    sum_r = sum(r for _, r in valid)
+    sum_dr = sum(d * r for d, r in valid)
+    sum_rr = sum(r * r for _, r in valid)
+
+    denom = n * sum_rr - sum_r * sum_r
+    if abs(denom) < 1e-6:
+        print("\nERROR: degenerate data (all same RPM?)")
+        return 0
+
+    slope = (n * sum_dr - sum_d * sum_r) / denom  # duty per RPM
+    kff_q8 = int(round(slope * 256))
+
+    print(f"\n  Kv = {slope:.4f} duty/RPM")
+    print(f"  Kff (Q8) = {kff_q8}")
+    print(f"\n  Use:  --ff {kff_q8}")
+
+    # Optional: show the fit
+    try:
+        import matplotlib.pyplot as plt
+        rpms = [r for _, r in valid]
+        duties = [d for d, _ in valid]
+        fit_r = [min(rpms) - 50, max(rpms) + 50]
+        fit_d = [slope * r + (sum_d - slope * sum_r) / n for r in fit_r]
+
+        plt.figure(figsize=(7, 4))
+        plt.scatter(rpms, duties, c="blue", zorder=5, label="measured")
+        plt.plot(fit_r, fit_d, "r--", label=f"fit: Kv={slope:.4f}")
+        plt.xlabel("Velocity (RPM)")
+        plt.ylabel("Duty")
+        plt.title(f"Feedforward Measurement: Kff={kff_q8} (Q8)")
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.show()
+    except ImportError:
+        pass
+
+    return kff_q8
+
+
 # ── CSV export ──────────────────────────────────────────────────────────────
 
 def save_csv(path: str, samples: list[tuple[float, MotorStatus]], t_step: float) -> None:
     with open(path, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["t_sec", "state", "fault", "mode", "current_ma", "hall",
-                     "angle", "angle_deg", "velocity_rpm", "target"])
+                     "angle", "angle_deg", "velocity_rpm", "target", "position"])
         for t, s in samples:
             w.writerow([
                 f"{t - t_step:.4f}",
                 s.state, s.fault, s.mode, s.current_ma, s.hall,
-                s.angle, f"{s.angle_deg:.2f}", s.velocity, s.target,
+                s.angle, f"{s.angle_deg:.2f}", s.velocity, s.target, s.position,
             ])
     print(f"Saved {len(samples)} rows to {path}")
 
@@ -154,6 +270,7 @@ def plot_step(
     samples: list[tuple[float, MotorStatus]],
     t_step: float,
     title: str,
+    position_target: int | None = None,
 ) -> None:
     try:
         import matplotlib.pyplot as plt
@@ -168,31 +285,54 @@ def plot_step(
     t = [s[0] - t_step for s in samples]  # time relative to step (seconds)
     vel = [s[1].velocity for s in samples]
     tgt = [s[1].target for s in samples]
+    pos = [s[1].position for s in samples]
     angle = [s[1].angle_deg for s in samples]
     current = [s[1].current_ma for s in samples]
     mode = samples[-1][1].mode  # use last sample's mode for label
+    is_pos_mode = (mode == 2)
 
     fig, axes = plt.subplots(3, 1, figsize=(10, 7), sharex=True)
     fig.suptitle(title, fontsize=12)
 
-    # Velocity
-    ax = axes[0]
-    ax.plot(t, vel, "b-", linewidth=1, label="measured")
-    ax.plot(t, tgt, "r--", linewidth=1, alpha=0.7,
-            label="target (rpm)" if mode == 1 else "target (duty)")
-    ax.axvline(0, color="gray", linestyle=":", linewidth=0.8, label="step")
-    ax.set_ylabel("Velocity (RPM)")
-    ax.legend(loc="upper right", fontsize=8)
-    ax.grid(True, alpha=0.3)
+    if is_pos_mode:
+        # Position (top plot for position mode)
+        ax = axes[0]
+        ax.plot(t, pos, "b-", linewidth=1, label="position")
+        if position_target is not None:
+            ax.axhline(position_target, color="r", linestyle="--",
+                       linewidth=1, alpha=0.7, label=f"target ({position_target})")
+        ax.axvline(0, color="gray", linestyle=":", linewidth=0.8, label="step")
+        ax.set_ylabel("Position (counts)")
+        ax.legend(loc="upper right", fontsize=8)
+        ax.grid(True, alpha=0.3)
 
-    # Angle
-    ax = axes[1]
-    ax.plot(t, angle, "g-", linewidth=1)
-    ax.axvline(0, color="gray", linestyle=":", linewidth=0.8)
-    ax.set_ylabel("Angle (deg)")
-    ax.grid(True, alpha=0.3)
+        # Velocity (shows the cascade's intermediate signal)
+        ax = axes[1]
+        ax.plot(t, vel, "b-", linewidth=1, label="measured")
+        ax.plot(t, tgt, "r--", linewidth=1, alpha=0.7, label="vel setpoint")
+        ax.axvline(0, color="gray", linestyle=":", linewidth=0.8)
+        ax.set_ylabel("Velocity (RPM)")
+        ax.legend(loc="upper right", fontsize=8)
+        ax.grid(True, alpha=0.3)
+    else:
+        # Velocity (top plot for velocity/duty mode)
+        ax = axes[0]
+        ax.plot(t, vel, "b-", linewidth=1, label="measured")
+        ax.plot(t, tgt, "r--", linewidth=1, alpha=0.7,
+                label="target (rpm)" if mode == 1 else "target (duty)")
+        ax.axvline(0, color="gray", linestyle=":", linewidth=0.8, label="step")
+        ax.set_ylabel("Velocity (RPM)")
+        ax.legend(loc="upper right", fontsize=8)
+        ax.grid(True, alpha=0.3)
 
-    # Current
+        # Position
+        ax = axes[1]
+        ax.plot(t, pos, "g-", linewidth=1)
+        ax.axvline(0, color="gray", linestyle=":", linewidth=0.8)
+        ax.set_ylabel("Position (counts)")
+        ax.grid(True, alpha=0.3)
+
+    # Current (always bottom)
     ax = axes[2]
     ax.plot(t, current, "m-", linewidth=1)
     ax.axvline(0, color="gray", linestyle=":", linewidth=0.8)
@@ -226,9 +366,15 @@ def build_parser() -> argparse.ArgumentParser:
                       help="Velocity step target (signed RPM)")
     step.add_argument("--duty", type=int, metavar="DUTY",
                       help="Duty step target (signed, open-loop)")
+    step.add_argument("--position", type=int, metavar="COUNTS",
+                      help="Position step target (encoder counts, auto-zeros first)")
+    step.add_argument("--measure-ff", action="store_true",
+                      help="Measure feedforward gain (Kff) by open-loop sweep")
 
     parser.add_argument("--pid", nargs=3, type=int, metavar=("KP", "KI", "KD"),
-                        help="Set PID gains before step (Q8)")
+                        help="Set velocity PID gains before step (Q8)")
+    parser.add_argument("--pos-pid", nargs=3, type=int, metavar=("KP", "KI", "KD"),
+                        help="Set position PID gains before step (Q8, output=RPM)")
     parser.add_argument("--ff", type=int, metavar="GAIN",
                         help="Set velocity feedforward gain (Q8: duty per RPM)")
     parser.add_argument("--torque", type=int, metavar="MA",
@@ -273,14 +419,24 @@ def main() -> int:
         except RingError as exc:
             print(f"WARNING: enumerate failed ({exc}), proceeding anyway")
 
+        if args.measure_ff:
+            # Sweep several duty levels in both directions
+            duties = [150, 250, 350, 500, 700, -150, -250, -350, -500, -700]
+            measure_ff(client, args.address, duties,
+                       settle_s=1.0, sample_s=0.5)
+            return 0
+
         pid = tuple(args.pid) if args.pid else None
+        pos_pid_arg = tuple(args.pos_pid) if args.pos_pid else None
 
         samples, t_step = run_step(
             client=client,
             address=args.address,
             velocity=args.velocity,
             duty=args.duty,
+            position=args.position,
             pid=pid,
+            pos_pid=pos_pid_arg,
             ff_gain=args.ff,
             torque_ma=args.torque,
             pre_duration=args.pre,
@@ -291,16 +447,19 @@ def main() -> int:
             save_csv(args.csv, samples, t_step)
 
         # Build a descriptive title
-        if args.velocity is not None:
+        if args.position is not None:
+            step_desc = f"position={args.position} counts"
+        elif args.velocity is not None:
             step_desc = f"velocity={args.velocity} RPM"
         else:
             step_desc = f"duty={args.duty}"
-        pid_desc = f"  Kp={pid[0]} Ki={pid[1]} Kd={pid[2]}" if pid else ""
+        pid_desc = f"  vel_pid={pid}" if pid else ""
+        pos_pid_desc = f"  pos_pid={pos_pid_arg}" if pos_pid_arg else ""
         ff_desc = f"  Kff={args.ff}" if args.ff else ""
-        title = f"Step Response: {step_desc}{pid_desc}{ff_desc}"
+        title = f"Step Response: {step_desc}{pid_desc}{pos_pid_desc}{ff_desc}"
 
         if not args.no_plot:
-            plot_step(samples, t_step, title)
+            plot_step(samples, t_step, title, position_target=args.position)
 
         return 0
 

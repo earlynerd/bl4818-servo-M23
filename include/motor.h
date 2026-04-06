@@ -17,7 +17,8 @@ typedef enum {
 
 typedef enum {
     CTRL_DUTY     = 0,
-    CTRL_VELOCITY = 1
+    CTRL_VELOCITY = 1,
+    CTRL_POSITION = 2
 } ctrl_mode_t;
 
 void motor_init(void);
@@ -32,12 +33,16 @@ void motor_set_duty(int16_t duty);
 /* Velocity mode target (signed, RPM) */
 void motor_set_velocity(int16_t rpm);
 
+/* Position mode target (encoder counts, continuous) */
+void motor_set_position(int32_t counts);
+
 /* Torque envelope (applies in all modes) */
 void motor_set_torque_limit(uint16_t ma);
 
 /* PID tuning (Q8 gains) */
 void motor_set_vel_pid(int16_t kp, int16_t ki, int16_t kd);
 void motor_set_vel_ff(int16_t gain);  /* Q8 feedforward: duty per RPM */
+void motor_set_pos_pid(int16_t kp, int16_t ki, int16_t kd);
 
 void motor_start(void);
 void motor_stop(void);

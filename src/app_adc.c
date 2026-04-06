@@ -67,7 +67,10 @@ uint16_t adc_raw_voltage(void)
 
 uint16_t adc_read_current_ma(void)
 {
-    return (uint16_t)(((uint32_t)raw_current * 250000UL) / 4095UL);
+    uint32_t ma = ((uint32_t)raw_current * 250000UL) / 4095UL;
+    if (ma > 65535UL)
+        return 65535U;
+    return (uint16_t)ma;
 }
 
 uint16_t adc_read_voltage_mv(void)

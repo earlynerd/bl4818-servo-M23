@@ -28,21 +28,21 @@ void motor_set_mode(ctrl_mode_t mode);
 ctrl_mode_t motor_get_mode(void);
 
 /* Duty mode target (signed, ±PWM_MAX_DUTY) */
-void motor_set_duty(int16_t duty);
+void motor_set_duty(int32_t duty);
 
 /* Velocity mode target (signed, RPM) */
-void motor_set_velocity(int16_t rpm);
+void motor_set_velocity(int32_t rpm);
 
 /* Position mode target (encoder counts, continuous) */
 void motor_set_position(int32_t counts);
 
 /* Torque envelope (applies in all modes) */
-void motor_set_torque_limit(uint16_t ma);
+void motor_set_torque_limit(uint32_t ma);
 
 /* PID tuning (Q8 gains) */
-void motor_set_vel_pid(int16_t kp, int16_t ki, int16_t kd);
-void motor_set_vel_ff(int16_t gain);  /* Q8 feedforward: duty per RPM */
-void motor_set_pos_pid(int16_t kp, int16_t ki, int16_t kd);
+void motor_set_vel_pid(int32_t kp, int32_t ki, int32_t kd);
+void motor_set_vel_ff(int32_t gain);  /* Q8 feedforward: duty per RPM */
+void motor_set_pos_pid(int32_t kp, int32_t ki, int32_t kd);
 
 void motor_start(void);
 void motor_stop(void);
@@ -53,8 +53,8 @@ void motor_tick_2khz(void);     /* 2kHz tick: control loop */
 
 motor_state_t motor_get_state(void);
 fault_code_t  motor_get_fault(void);
-uint16_t motor_get_current(void);
-int16_t  motor_get_velocity(void);  /* Measured RPM (signed) */
-int16_t  motor_get_target(void);    /* Active target (duty or RPM depending on mode) */
+uint32_t motor_get_current(void);
+int32_t  motor_get_velocity(void);  /* Measured RPM (signed) */
+int32_t  motor_get_target(void);    /* Active target (duty or RPM depending on mode) */
 
 #endif /* MOTOR_H */

@@ -9,8 +9,8 @@
 
 #include "pid.h"
 
-void pid_init(pid_t *pid, int16_t kp, int16_t ki, int16_t kd,
-              int16_t out_min, int16_t out_max)
+void pid_init(pid_t *pid, int32_t kp, int32_t ki, int32_t kd,
+              int32_t out_min, int32_t out_max)
 {
     pid->kp = kp;
     pid->ki = ki;
@@ -19,25 +19,23 @@ void pid_init(pid_t *pid, int16_t kp, int16_t ki, int16_t kd,
     pid->prev_meas = 0;
     pid->out_min = out_min;
     pid->out_max = out_max;
-    pid->int_max = (int32_t)out_max * PID_SCALE;
+    pid->int_max = out_max * PID_SCALE;
 }
 
-int16_t pid_update(pid_t *pid, int16_t setpoint, int16_t measurement)
+int32_t pid_update(pid_t *pid, int32_t error, int32_t measurement)
 {
-    int16_t error = setpoint - measurement;
-
     /* Proportional */
-    int32_t p_term = (int32_t)pid->kp * error;
+    int32_t p_term = pid->kp * error;
 
     /* Tentative integral update */
-    int32_t new_integral = pid->integral + (int32_t)pid->ki * error;
+    int32_t new_integral = pid->integral + pid->ki * error;
     if (new_integral > pid->int_max)
         new_integral = pid->int_max;
     else if (new_integral < -pid->int_max)
         new_integral = -pid->int_max;
 
     /* Derivative on measurement (negated: rising measurement = falling error) */
-    int32_t d_term = -(int32_t)pid->kd * (measurement - pid->prev_meas);
+    int32_t d_term = -pid->kd * (measurement - pid->prev_meas);
     pid->prev_meas = measurement;
 
     /* Sum and scale back from Q8 */
@@ -56,7 +54,7 @@ int16_t pid_update(pid_t *pid, int16_t setpoint, int16_t measurement)
         pid->integral = new_integral;
     }
 
-    return (int16_t)output;
+    return output;
 }
 
 void pid_reset(pid_t *pid)

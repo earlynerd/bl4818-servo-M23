@@ -12,7 +12,7 @@ uint8_t hall_decode_state(uint8_t raw_state);
 uint8_t hall_read(void);
 uint8_t hall_sector(void);
 int8_t hall_direction(void);
-uint16_t hall_period(void);
+uint32_t hall_period(void);
 int32_t hall_count(void);
 void hall_count_reset(void);
 

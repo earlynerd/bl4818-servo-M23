@@ -54,7 +54,7 @@
 #define VEL_PID_KI_DEFAULT  1      /* 0.0625 */
 #define VEL_PID_KD_DEFAULT  10       /* off */
 #define VEL_FF_DEFAULT      27       /* feedforward tuned */
-#define VEL_FILTER_SHIFT    3       /* IIR alpha = 1/(1<<N): 2→1/4, 3→1/8 */
+#define VEL_FILTER_SHIFT    4       /* IIR alpha = 1/(1<<N): 2→1/4, 3→1/8 */
 
 /* Position PID defaults (Q8 — output is velocity RPM)
  * Error is prescaled by POS_ERROR_PRESCALE for finer gain resolution.

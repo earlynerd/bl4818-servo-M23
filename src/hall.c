@@ -18,7 +18,7 @@ static const uint8_t hall_to_sector[8] = { 0xFF, 0, 2, 1, 4, 5, 3, 0xFF };
 static uint8_t prev_hall;
 static int8_t  detected_direction;
 static int32_t hall_position;
-static uint16_t transition_period;
+static uint32_t transition_period;
 static uint32_t last_transition_time;
 static volatile uint8_t hall_irq_hint;
 
@@ -56,7 +56,7 @@ static uint8_t hall_process_transition(uint8_t current)
 
     {
         uint32_t now = TIMER_GetCounter(TIMER1) & HALL_TIMER_MASK;
-        transition_period = (uint16_t)((now - last_transition_time) & HALL_TIMER_MASK);
+        transition_period = (now - last_transition_time) & HALL_TIMER_MASK;
         last_transition_time = now;
     }
 
@@ -95,7 +95,7 @@ void hall_init(void)
     prev_hall = hall_read();
     detected_direction = 0;
     hall_position = 0;
-    transition_period = 0xFFFFu;
+    transition_period = 0xFFFFFFFFu;
     last_transition_time = TIMER_GetCounter(TIMER1) & HALL_TIMER_MASK;
     hall_irq_hint = 1u;
 }
@@ -136,7 +136,7 @@ uint8_t hall_poll(void)
 int8_t hall_direction(void) { return detected_direction; }
 int32_t hall_count(void)     { return hall_position; }
 void hall_count_reset(void) { hall_position = 0; }
-uint16_t hall_period(void)  { return transition_period; }
+uint32_t hall_period(void)  { return transition_period; }
 uint8_t hall_sector(void)   { return hall_to_sector[hall_read() & 0x07u]; }
 
 void GPB_IRQHandler(void)

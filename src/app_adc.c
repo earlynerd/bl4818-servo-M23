@@ -2,7 +2,8 @@
  * ADC Driver for Nuvoton M2003
  *
  * Current sense (CH2, PB.2) and Battery Voltage (CH3, PB.3).
- * Hardware-triggered by PWM at 20kHz. ISR only captures the raw sample.
+ * Hardware-triggered by PWM at 20 kHz.
+ * The ISR accumulates a control-window average and tracks peak current.
  */
 
 #include <stdint.h>
@@ -12,7 +13,10 @@
 
 static volatile uint16_t raw_current;
 static volatile uint16_t raw_voltage;
-static volatile uint8_t  sample_ready;
+static volatile uint32_t current_sum_raw;
+static volatile uint32_t voltage_sum_raw;
+static volatile uint16_t peak_current_raw;
+static volatile uint16_t sample_count;
 
 void adc_init(void)
 {
@@ -37,22 +41,69 @@ void adc_irq_enable(void)
 
 void ADC_IRQHandler(void)
 {
+    uint16_t current_raw;
+    uint16_t voltage_raw;
+
     if (ADC->ADSR0 & ADC_ADSR0_ADF_Msk) {
         ADC->ADSR0 = ADC_ADSR0_ADF_Msk;
     }
-    raw_current = (uint16_t)(ADC->ADDR[ADC_CH_CURRENT] & 0xFFFu);
-    raw_voltage = (uint16_t)(ADC->ADDR[ADC_CH_VOLTAGE] & 0xFFFu);
-    sample_ready = 1u;
+
+    current_raw = (uint16_t)(ADC->ADDR[ADC_CH_CURRENT] & 0xFFFu);
+    voltage_raw = (uint16_t)(ADC->ADDR[ADC_CH_VOLTAGE] & 0xFFFu);
+
+    raw_current = current_raw;
+    raw_voltage = voltage_raw;
+    current_sum_raw += current_raw;
+    voltage_sum_raw += voltage_raw;
+    if ((sample_count == 0u) || (current_raw > peak_current_raw))
+        peak_current_raw = current_raw;
+    sample_count++;
 }
 
-uint8_t adc_sample_ready(void)
+void adc_consume_snapshot(adc_snapshot_t *snapshot)
 {
-    return sample_ready;
-}
+    uint16_t latest_current;
+    uint16_t latest_voltage;
+    uint32_t current_sum;
+    uint32_t voltage_sum;
+    uint16_t peak_current;
+    uint16_t count;
+    uint32_t irq_state;
 
-void adc_sample_clear(void)
-{
-    sample_ready = 0u;
+    irq_state = __get_PRIMASK();
+    __disable_irq();
+
+    latest_current = raw_current;
+    latest_voltage = raw_voltage;
+    current_sum = current_sum_raw;
+    voltage_sum = voltage_sum_raw;
+    peak_current = peak_current_raw;
+    count = sample_count;
+
+    current_sum_raw = 0u;
+    voltage_sum_raw = 0u;
+    peak_current_raw = 0u;
+    sample_count = 0u;
+
+    if (irq_state == 0u)
+        __enable_irq();
+
+    if (count == 0u) {
+        snapshot->latest_current_raw = latest_current;
+        snapshot->latest_voltage_raw = latest_voltage;
+        snapshot->avg_current_raw = latest_current;
+        snapshot->avg_voltage_raw = latest_voltage;
+        snapshot->peak_current_raw = latest_current;
+        snapshot->sample_count = 0u;
+        return;
+    }
+
+    snapshot->latest_current_raw = latest_current;
+    snapshot->latest_voltage_raw = latest_voltage;
+    snapshot->avg_current_raw = (uint16_t)(current_sum / count);
+    snapshot->avg_voltage_raw = (uint16_t)(voltage_sum / count);
+    snapshot->peak_current_raw = peak_current;
+    snapshot->sample_count = count;
 }
 
 uint16_t adc_raw_current(void)
@@ -65,14 +116,14 @@ uint16_t adc_raw_voltage(void)
     return raw_voltage;
 }
 
-uint32_t adc_read_current_ma(void)
+uint32_t adc_current_raw_to_ma(uint16_t raw)
 {
-    uint32_t ma = ((uint32_t)raw_current * 250000UL) / 4095UL;
+    uint32_t ma = ((uint32_t)raw * 250000UL) / 4095UL;
     return ma;
 }
 
-uint16_t adc_read_voltage_mv(void)
+uint16_t adc_voltage_raw_to_mv(uint16_t raw)
 {
-    uint32_t pin_mv = ((uint32_t)raw_voltage * 5000UL) / 4095UL;
+    uint32_t pin_mv = ((uint32_t)raw * 5000UL) / 4095UL;
     return (uint16_t)(pin_mv * 11);
 }

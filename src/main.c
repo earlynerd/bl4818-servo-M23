@@ -21,7 +21,7 @@ extern uint32_t PllClock;
 void Uart0DefaultMPF(void) {}
 
 #define UART_BAUD              250000UL
-#define ENCODER_DIVIDER        1u     /* encoder_poll every tick = 2kHz */
+#define ENCODER_DIVIDER        1u     /* encoder_poll every control tick */
 
 static volatile uint32_t systick_count;
 
@@ -83,7 +83,7 @@ int main(void)
                 encoder_poll();
             }
 
-            motor_tick_2khz();
+            motor_tick_control();
             protocol_tick();
 
             if (++strike_div >= STRIKE_TICK_DIVIDER) {

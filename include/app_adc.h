@@ -3,13 +3,21 @@
 
 #include <stdint.h>
 
+typedef struct {
+    uint16_t latest_current_raw;
+    uint16_t latest_voltage_raw;
+    uint16_t avg_current_raw;
+    uint16_t avg_voltage_raw;
+    uint16_t peak_current_raw;
+    uint16_t sample_count;
+} adc_snapshot_t;
+
 void adc_init(void);
 void adc_irq_enable(void);
-uint8_t adc_sample_ready(void);
-void adc_sample_clear(void);
+void adc_consume_snapshot(adc_snapshot_t *snapshot);
 uint16_t adc_raw_current(void);
 uint16_t adc_raw_voltage(void);
-uint32_t adc_read_current_ma(void);
-uint16_t adc_read_voltage_mv(void);
+uint32_t adc_current_raw_to_ma(uint16_t raw);
+uint16_t adc_voltage_raw_to_mv(uint16_t raw);
 
 #endif /* ADC_H */

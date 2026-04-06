@@ -186,7 +186,7 @@ void UART_EnableInt(UART_T*  uart, uint32_t u32InterruptFlag)
  */
 void UART_Open(UART_T* uart, uint32_t u32baudrate)
 {
-    uint32_t u32UartClkSrcSel, u32UartClkDivNum;
+    uint32_t u32UartClkSrcSel = 0ul, u32UartClkDivNum = 0ul;
     uint32_t u32ClkTbl[5] = { 0ul, 0ul, 0ul, __HIRC, 0ul};
     uint32_t u32BaudDiv = 0ul;
 
@@ -204,6 +204,10 @@ void UART_Open(UART_T* uart, uint32_t u32baudrate)
         u32UartClkSrcSel = (CLK->CLKSEL2 & CLK_CLKSEL2_UART1SEL_Msk) >> CLK_CLKSEL2_UART1SEL_Pos;
         /* Get UART clock divider number */
         u32UartClkDivNum = (CLK->CLKDIV0 & CLK_CLKDIV0_UART1DIV_Msk) >> CLK_CLKDIV0_UART1DIV_Pos;
+    }
+    else
+    {
+        return;
     }
 
     /* Select UART function */

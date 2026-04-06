@@ -53,7 +53,7 @@ uint8_t motor_is_coasting(void);
 void motor_clear_fault(void);
 
 void motor_poll_fast(void);     /* Main loop: commutation on hall transitions */
-void motor_tick_2khz(void);     /* 2kHz tick: control loop */
+void motor_tick_control(void);  /* SysTick-driven control loop at CONTROL_LOOP_HZ */
 
 motor_state_t motor_get_state(void);
 fault_code_t  motor_get_fault(void);

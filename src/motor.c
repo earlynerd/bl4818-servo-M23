@@ -7,7 +7,7 @@
  *   CTRL_POSITION — cascaded: position PID (1 kHz) → velocity PID (5 kHz)
  *
  * Control loop runs from the main loop tick, NOT from ISR.
- * ADC ISR only captures raw samples.
+ * ADC ISR oversamples at PWM rate and hands the control loop an averaged window.
  */
 
 #include <stdint.h>
@@ -343,15 +343,19 @@ void motor_poll_fast(void)
 
 /* ── Control tick ────────────────────────────────────────────────────── */
 
-void motor_tick_2khz(void)
+void motor_tick_control(void)
 {
+    adc_snapshot_t adc_snapshot;
+    uint32_t peak_current_ma;
     int32_t duty;
 
-    /* ADC sample */
-    current_ma = adc_read_current_ma();
+    /* Consume one ADC window accumulated at PWM rate since the previous control tick. */
+    adc_consume_snapshot(&adc_snapshot);
+    current_ma = adc_current_raw_to_ma(adc_snapshot.avg_current_raw);
+    peak_current_ma = adc_current_raw_to_ma(adc_snapshot.peak_current_raw);
 
-    /* Hard overcurrent fault */
-    if (current_ma > CURRENT_LIMIT_MA) {
+    /* Hard overcurrent fault uses the peak sample so short spikes still trip. */
+    if (peak_current_ma > CURRENT_LIMIT_MA) {
         pwm_fault_brake();
         state = MOTOR_FAULT;
         fault = FAULT_OVERCURRENT;

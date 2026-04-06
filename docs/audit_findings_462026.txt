@@ -1,0 +1,30 @@
+Findings
+
+  1. High: SUBCMD_ZERO_POSITION can leave the strike subsystem calibrated to the wrong physical location. The command only resets the encoder accumulator in /abs/path/C:/Users/msylvester/Documents/Bl4818-servo/m2003-motor/src/protocol.c:360 and /
+     abs/path/C:/Users/msylvester/Documents/Bl4818-servo/m2003-motor/src/encoder.c:118, but strike.c keeps homed, drum_position, and home_position as absolute learned counts in /abs/path/C:/Users/msylvester/Documents/Bl4818-servo/m2003-motor/src/
+     strike.c:37 and reuses them later in /abs/path/C:/Users/msylvester/Documents/Bl4818-servo/m2003-motor/src/strike.c:135 and /abs/path/C:/Users/msylvester/Documents/Bl4818-servo/m2003-motor/src/strike.c:185. If the host zeroes position after
+     homing, the next strike/cancel/home-hold can move to the wrong place.
+  2. High: strike_trigger() accepts a duty with either sign even though the rest of the state machine assumes motion “toward drum” is drum_dir. See /abs/path/C:/Users/msylvester/Documents/Bl4818-servo/m2003-motor/src/strike.c:107, /abs/path/C:/
+     Users/msylvester/Documents/Bl4818-servo/m2003-motor/src/strike.c:116, and /abs/path/C:/Users/msylvester/Documents/Bl4818-servo/m2003-motor/src/strike.c:225. A wrong-signed strike command can leave the actuator driving away from the drum
+     indefinitely because the coast threshold and rebound logic never make sense for that direction.
+  3. Medium: The protocol frame timeout is now effectively a total-frame-age timeout of about 2 ms, not an inter-byte-gap timeout. FRAME_TIMEOUT_TICKS is still hard-coded to 10 in /abs/path/C:/Users/msylvester/Documents/Bl4818-servo/m2003-motor/
+     src/protocol.c:28, rx_timeout is started at preamble detect in /abs/path/C:/Users/msylvester/Documents/Bl4818-servo/m2003-motor/src/protocol.c:494, and it is never refreshed while bytes continue arriving in /abs/path/C:/Users/msylvester/
+     Documents/Bl4818-servo/m2003-motor/src/protocol.c:525. At 250 kbaud, a max-size 39-byte frame is already about 1.56 ms on the wire, so this is fragile to jitter.
+  4. Medium: Re-homing does not clear the homed flag at the start of a new homing cycle. strike_home() starts motion in /abs/path/C:/Users/msylvester/Documents/Bl4818-servo/m2003-motor/src/strike.c:87 but only ever sets homed = 1 on success in /
+     abs/path/C:/Users/msylvester/Documents/Bl4818-servo/m2003-motor/src/strike.c:202; it never marks calibration invalid while re-learning. That means strike_is_homed() in /abs/path/C:/Users/msylvester/Documents/Bl4818-servo/m2003-motor/src/
+     strike.c:148 can report “homed” during a re-home, and strike_cancel() in /abs/path/C:/Users/msylvester/Documents/Bl4818-servo/m2003-motor/src/strike.c:130 can jump back to a stale home if homing is interrupted.
+  5. Medium: The claimed “bumpless transfer” is not mathematically implemented. motor_set_mode() relies on pid_preload() for smooth switching in /abs/path/C:/Users/msylvester/Documents/Bl4818-servo/m2003-motor/src/motor.c:165, but pid_preload()
+     in /abs/path/C:/Users/msylvester/Documents/Bl4818-servo/m2003-motor/src/pid.c:81 simply sets integral = current_output * PID_SCALE. It does not subtract the current proportional, derivative, or feedforward contributions, so mode switches
+     with nonzero error or nonzero kf will still step the output.
+  6. Low: The protocol document is materially out of sync with the firmware. The command table in /abs/path/C:/Users/msylvester/Documents/Bl4818-servo/m2003-motor/protocol.md:58 still describes addressed payloads as 2..4 bytes and status replies
+     as 8 payload bytes in /abs/path/C:/Users/msylvester/Documents/Bl4818-servo/m2003-motor/protocol.md:65, while the implementation now has larger status frames and extra commands in /abs/path/C:/Users/msylvester/Documents/Bl4818-servo/m2003-
+     motor/src/protocol.c:152, /abs/path/C:/Users/msylvester/Documents/Bl4818-servo/m2003-motor/src/protocol.c:193, and /abs/path/C:/Users/msylvester/Documents/Bl4818-servo/m2003-motor/src/protocol.c:325. That is a real integration risk for host-
+     side code.
+  7. Low: There are a couple of partial-implementation leftovers in the strike module. strike_duty and prev_velocity are written in /abs/path/C:/Users/msylvester/Documents/Bl4818-servo/m2003-motor/src/strike.c:114 and /abs/path/C:/Users/
+     msylvester/Documents/Bl4818-servo/m2003-motor/src/strike.c:215, but the stored values are never read back from the state in any decision path. That suggests an unfinished rebound/impact heuristic and makes the code harder to trust.
+
+  Assumptions
+  I focused the review on m2003-motor and its protocol boundary, not vendor BSP code or the generated solution/ copies. I also did not run hardware tests in this shell.
+
+  One repo-level consistency risk is that the root README.md / protocol.md / host ring library still describe the older MS51 CRC-8 protocol, while m2003-motor uses a separate CRC-16 framed protocol. That may be intentional, but the split is not
+  obvious unless you already know which firmware branch you are using.

@@ -11,6 +11,7 @@
 #include "hall.h"
 #include "encoder.h"
 #include "motor.h"
+#include "persist.h"
 #include "protocol.h"
 #include "strike.h"
 
@@ -66,6 +67,7 @@ int main(void)
     protocol_init();
     motor_init();
     strike_init();
+    persist_init();
 
     adc_irq_enable();
 

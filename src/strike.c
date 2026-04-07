@@ -45,9 +45,7 @@ static int32_t        coast_distance;   /* counts from drum to cut power */
 static int32_t        homing_duty;      /* signed duty toward drum */
 
 /* Runtime */
-static int32_t        strike_duty;
 static int32_t        coast_threshold;  /* absolute position of coast point */
-static int32_t        prev_velocity;
 static int32_t        brake_target;     /* velocity ramp target during braking */
 static uint16_t       settle_counter;
 static uint16_t       stall_counter;
@@ -81,8 +79,37 @@ void strike_init(void)
 void strike_set_home_offset(int32_t counts)   { home_offset = counts; }
 void strike_set_coast_distance(int32_t counts) { coast_distance = counts; }
 void strike_set_homing_duty(int32_t duty)      { homing_duty = duty; }
+int32_t strike_get_home_offset(void)           { return home_offset; }
+int32_t strike_get_coast_distance(void)        { return coast_distance; }
+int32_t strike_get_homing_duty(void)           { return homing_duty; }
 
 /* ── Commands ────────────────────────────────────────────────────────── */
+
+void strike_shift_position_reference(int32_t delta)
+{
+    if (homed || (state == STRIKE_HOMING && home_phase == HOME_MOVE_HOME)) {
+        drum_position -= delta;
+        home_position -= delta;
+    }
+
+    if (state == STRIKE_HOMING)
+        stall_prev_pos -= delta;
+
+    if (state == STRIKE_DRIVING)
+        coast_threshold -= delta;
+}
+
+void strike_restore_calibration(int32_t drum_pos, int32_t home_pos)
+{
+    if (homing_duty == 0)
+        return;
+
+    drum_position = drum_pos;
+    home_position = home_pos;
+    drum_dir = (homing_duty > 0) ? 1 : -1;
+    homed = 1;
+    state = STRIKE_IDLE;
+}
 
 void strike_home(void)
 {
@@ -92,12 +119,16 @@ void strike_home(void)
         return;
 
     drum_dir = (homing_duty > 0) ? 1 : -1;
+    homed = 0;
+    drum_position = 0;
+    home_position = 0;
 
     motor_set_mode(CTRL_DUTY);
     motor_set_duty(homing_duty);
     motor_start();
 
     stall_counter = 0;
+    settle_counter = 0;
     stall_prev_pos = get_pos();
 
     state = STRIKE_HOMING;
@@ -111,7 +142,8 @@ void strike_trigger(int32_t duty)
     if (duty == 0)
         return;
 
-    strike_duty = duty;
+    if ((duty > 0 && drum_dir < 0) || (duty < 0 && drum_dir > 0))
+        duty = -duty;
 
     /* Coast threshold: coast_distance counts from drum, on the home side */
     coast_threshold = drum_position - drum_dir * coast_distance;
@@ -212,7 +244,6 @@ void strike_tick(void)
         /* Coast is triggered by motor_tick at 5 kHz (motor_arm_coast).
          * We just detect the transition here at 1 kHz. */
         if (motor_is_coasting()) {
-            prev_velocity = vel;
             coast_timeout = 0;
             state = STRIKE_COASTING;
         }
@@ -235,7 +266,6 @@ void strike_tick(void)
                 state = STRIKE_BRAKING;
             }
         }
-        prev_velocity = vel;
         break;
 
     /* ── Braking: ramp velocity toward zero, then position hold ─────── */

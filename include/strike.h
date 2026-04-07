@@ -36,6 +36,11 @@ void strike_cancel(void);           /* abort sequence, return to idle */
 void strike_set_home_offset(int32_t counts);
 void strike_set_coast_distance(int32_t counts);
 void strike_set_homing_duty(int32_t duty);
+int32_t strike_get_home_offset(void);
+int32_t strike_get_coast_distance(void);
+int32_t strike_get_homing_duty(void);
+void strike_restore_calibration(int32_t drum_position, int32_t home_position);
+void strike_shift_position_reference(int32_t delta);
 
 /* Status */
 strike_state_t strike_get_state(void);

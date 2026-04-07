@@ -61,8 +61,8 @@ The first payload byte is the command type.
 | 0x02 | ENTER_CUT_THROUGH | -- | 1 | master -> ring |
 | 0x03 | SET_ADDRESS | `[counter]` | 2 | master -> ring (S&F) |
 | 0x10 | BROADCAST_DUTY | `[duty_hi duty_lo] x N` | 1 + 2*N | master -> ring |
-| 0x20+addr | ADDRESSED_CMD | `[subcmd] [data...]` | 2..4 | master -> ring |
-| 0x40+addr | STATUS_REPLY | `[state] [fault] [cur_hi] [cur_lo] [hall] [angle_hi] [angle_lo]` | 8 | device -> master |
+| 0x20+addr | ADDRESSED_CMD | `[subcmd] [data...]` | 2..8 | master -> ring |
+| 0x40+addr | STATUS_REPLY | query-dependent status payload | 11 or 17 | device -> master |
 
 ### Addressed Sub-Commands
 
@@ -74,7 +74,58 @@ Used with type `0x20 + device_addr`:
 | 0x02 | SET_TORQUE | `[ma_hi] [ma_lo]` | 2 |
 | 0x03 | STOP | -- | 0 |
 | 0x04 | CLEAR_FAULT | -- | 0 |
+| 0x05 | SET_MODE | `[mode]` | 1 |
+| 0x06 | SET_VELOCITY | `[rpm_hi] [rpm_lo]` | 2 |
+| 0x07 | SET_PID | `[kp_hi] [kp_lo] [ki_hi] [ki_lo] [kd_hi] [kd_lo]` | 6 |
+| 0x08 | SET_FF | `[gain_hi] [gain_lo]` | 2 |
+| 0x09 | SET_POSITION | `[pos_b3] [pos_b2] [pos_b1] [pos_b0]` | 4 |
+| 0x0A | SET_POS_PID | `[kp_hi] [kp_lo] [ki_hi] [ki_lo] [kd_hi] [kd_lo]` | 6 |
+| 0x0B | ZERO_POSITION | -- | 0 |
+| 0x0C | STRIKE | `[duty_hi] [duty_lo]` | 2 |
+| 0x0D | STRIKE_HOME | -- | 0 |
+| 0x0E | STRIKE_CANCEL | -- | 0 |
+| 0x0F | SET_STRIKE_PARAM | `[param_id] [value_hi] [value_lo]` | 3 |
 | 0x10 | QUERY_STATUS | -- | 0 |
+| 0x11 | QUERY_STRIKE | -- | 0 |
+| 0x12 | SAVE_SETTINGS | -- | 0 |
+| 0x13 | CLEAR_SETTINGS | -- | 0 |
+
+### Status Replies
+
+`QUERY_STATUS` replies with type `0x40 + addr` and 17 payload bytes:
+
+```
+[type] [state] [fault] [mode] [current_hi] [current_lo]
+[hall] [angle_hi] [angle_lo] [velocity_hi] [velocity_lo]
+[target_hi] [target_lo] [position_b3] [position_b2] [position_b1] [position_b0]
+```
+
+`QUERY_STRIKE` replies with the same type `0x40 + addr` and 11 payload bytes:
+
+```
+[type] [strike_state] [homed]
+[drum_pos_b3] [drum_pos_b2] [drum_pos_b1] [drum_pos_b0]
+[home_pos_b3] [home_pos_b2] [home_pos_b1] [home_pos_b0]
+```
+
+## Persistent Settings
+
+The firmware reserves the last 512-byte APROM page for a CRC-protected
+settings block that is loaded at boot.
+
+Persisted items:
+
+- encoder zero reference, stored as the absolute 14-bit encoder angle
+- strike tuning (`home_offset`, `coast_distance`, `homing_duty`)
+- strike learned calibration (`drum_position`, `home_position`) when homed
+- motor torque limit, velocity PID, velocity feedforward, and position PID
+
+`ZERO_POSITION` updates the logical zero point immediately and also saves the
+new absolute zero reference to flash. The other tunables are only committed
+when `SAVE_SETTINGS` is issued. `CLEAR_SETTINGS` erases the persisted block for
+the next boot; it does not change the current live runtime parameters.
+These flash operations should be treated as at-rest maintenance commands, not
+high-rate control traffic.
 
 ## Enumeration Sequence
 

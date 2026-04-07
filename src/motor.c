@@ -168,20 +168,22 @@ void motor_set_mode(ctrl_mode_t mode)
         case CTRL_VELOCITY:
             if (ctrl_mode == CTRL_DUTY) {
                 /* vel_pid wasn't running — seed it */
-                pid_preload(&vel_pid, last_applied_duty, measured_velocity);
+                pid_preload(&vel_pid, last_applied_duty,
+                            target_velocity, measured_velocity);
             }
             /* else: vel_pid was inner loop, keep its state */
             pid_reset(&pos_pid);
             break;
         case CTRL_POSITION:
+            target_velocity = measured_velocity;
             if (ctrl_mode == CTRL_DUTY) {
                 /* Neither PID was running — seed vel_pid */
-                pid_preload(&vel_pid, last_applied_duty, measured_velocity);
+                pid_preload(&vel_pid, last_applied_duty,
+                            target_velocity, measured_velocity);
             }
-            /* Seed pos_pid to hold current velocity */
-            target_velocity = measured_velocity;
             pid_preload(&pos_pid,
-                        measured_velocity * POS_ERROR_PRESCALE,
+                        target_velocity * POS_ERROR_PRESCALE,
+                        target_position,
                         -encoder_get_position());
             break;
         default:
@@ -203,12 +205,26 @@ ctrl_mode_t motor_get_mode(void) { return ctrl_mode; }
 void motor_set_duty(int32_t duty)        { target_duty = duty; }
 void motor_set_velocity(int32_t rpm)     { target_velocity = rpm; }
 void motor_set_position(int32_t counts)  { target_position = counts; }
+void motor_shift_position_reference(int32_t delta)
+{
+    target_position -= delta;
+    pos_pid.prev_meas -= delta;
+    coast_trip_pos -= delta;
+
+    /* encoder_position moves to encoder_position + delta when re-zeroed */
+    prev_enc_position += delta;
+}
 
 void motor_set_torque_limit(uint32_t ma)
 {
     if (ma > CURRENT_LIMIT_MA)
         ma = CURRENT_LIMIT_MA;
     torque_limit_ma = ma;
+}
+
+uint32_t motor_get_torque_limit(void)
+{
+    return torque_limit_ma;
 }
 
 void motor_set_vel_pid(int32_t kp, int32_t ki, int32_t kd)
@@ -222,12 +238,37 @@ void motor_set_vel_ff(int32_t gain)
     vel_pid.kf = gain;
 }
 
+void motor_get_vel_pid(int32_t *kp, int32_t *ki, int32_t *kd)
+{
+    if (kp != 0)
+        *kp = vel_pid.kp;
+    if (ki != 0)
+        *ki = vel_pid.ki;
+    if (kd != 0)
+        *kd = vel_pid.kd;
+}
+
+int32_t motor_get_vel_ff(void)
+{
+    return vel_pid.kf;
+}
+
 void motor_set_pos_pid(int32_t kp, int32_t ki, int32_t kd)
 {
     pid_init(&pos_pid, kp, ki, kd, 0,
              -(int32_t)(POS_MAX_VEL_RPM * POS_ERROR_PRESCALE),
              (int32_t)(POS_MAX_VEL_RPM * POS_ERROR_PRESCALE));
     pos_pid.int_max = (int64_t)POS_INT_MAX_RPM * POS_ERROR_PRESCALE * PID_SCALE;
+}
+
+void motor_get_pos_pid(int32_t *kp, int32_t *ki, int32_t *kd)
+{
+    if (kp != 0)
+        *kp = pos_pid.kp;
+    if (ki != 0)
+        *ki = pos_pid.ki;
+    if (kd != 0)
+        *kd = pos_pid.kd;
 }
 
 void motor_start(void)

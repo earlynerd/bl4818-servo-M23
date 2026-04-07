@@ -78,9 +78,24 @@ void pid_reset(pid_t *pid)
     pid->prev_d_term = 0;
 }
 
-void pid_preload(pid_t *pid, int32_t current_output, int32_t current_meas)
+void pid_preload(pid_t *pid, int32_t current_output,
+                 int32_t setpoint, int32_t current_meas)
 {
-    pid->integral = (int64_t)current_output * PID_SCALE;
+    int32_t error = setpoint - current_meas;
+    int64_t integral = (int64_t)current_output * PID_SCALE;
+
+    /* Seed the integrator so the next update reproduces current_output
+     * with the live proportional/feedforward terms already accounted for.
+     * D is intentionally reset by aligning prev_meas with current_meas. */
+    integral -= (int64_t)pid->kp * error;
+    integral -= (int64_t)pid->kf * setpoint;
+
+    if (integral > pid->int_max)
+        integral = pid->int_max;
+    else if (integral < -pid->int_max)
+        integral = -pid->int_max;
+
+    pid->integral = integral;
     pid->prev_meas = current_meas;
     pid->prev_d_term = 0;
 }

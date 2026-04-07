@@ -35,14 +35,19 @@ void motor_set_velocity(int32_t rpm);
 
 /* Position mode target (encoder counts, continuous) */
 void motor_set_position(int32_t counts);
+void motor_shift_position_reference(int32_t delta);
 
 /* Torque envelope (applies in all modes) */
 void motor_set_torque_limit(uint32_t ma);
+uint32_t motor_get_torque_limit(void);
 
 /* PID tuning (Q8 gains) */
 void motor_set_vel_pid(int32_t kp, int32_t ki, int32_t kd);
 void motor_set_vel_ff(int32_t gain);  /* Q8 feedforward: duty per RPM */
 void motor_set_pos_pid(int32_t kp, int32_t ki, int32_t kd);
+void motor_get_vel_pid(int32_t *kp, int32_t *ki, int32_t *kd);
+int32_t motor_get_vel_ff(void);
+void motor_get_pos_pid(int32_t *kp, int32_t *ki, int32_t *kd);
 
 void motor_start(void);
 void motor_stop(void);

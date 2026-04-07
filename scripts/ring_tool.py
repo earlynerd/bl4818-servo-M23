@@ -7,6 +7,8 @@ Examples:
     python ring_tool.py -p COM7 status 0
     python ring_tool.py -p COM7 set-duty 0 400
     python ring_tool.py -p COM7 set-velocity 0 500
+    python ring_tool.py -p COM7 zero-pos 0
+    python ring_tool.py -p COM7 save-settings 0
     python ring_tool.py -p COM7 set-pid 0 128 16 0
     python ring_tool.py -p COM7 set-mode 0 1
     python ring_tool.py -p COM7 torque 0 2500
@@ -70,6 +72,8 @@ SUBCMD_STRIKE_CANCEL = 0x0E
 SUBCMD_SET_STRIKE_PARAM = 0x0F
 SUBCMD_QUERY_STATUS = 0x10
 SUBCMD_QUERY_STRIKE = 0x11
+SUBCMD_SAVE_SETTINGS = 0x12
+SUBCMD_CLEAR_SETTINGS = 0x13
 
 # ── Strike parameter IDs ───────────────────────────────────────────────────
 
@@ -443,6 +447,18 @@ class RingClientV2:
         self._send_frame(bytes([CMD_ADDR_BASE | address, SUBCMD_ZERO_POS]))
         return self._recv_status_reply()
 
+    def save_settings(self, address: int) -> MotorStatus:
+        self._check_address(address)
+        self._flush_rx()
+        self._send_frame(bytes([CMD_ADDR_BASE | address, SUBCMD_SAVE_SETTINGS]))
+        return self._recv_status_reply()
+
+    def clear_settings(self, address: int) -> MotorStatus:
+        self._check_address(address)
+        self._flush_rx()
+        self._send_frame(bytes([CMD_ADDR_BASE | address, SUBCMD_CLEAR_SETTINGS]))
+        return self._recv_status_reply()
+
     def set_pid(self, address: int, kp: int, ki: int, kd: int) -> MotorStatus:
         self._check_address(address)
         for name, val in [("kp", kp), ("ki", ki), ("kd", kd)]:
@@ -681,7 +697,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("ki", type=int, help="Integral gain (Q8)")
     sp.add_argument("kd", type=int, help="Derivative gain (Q8)")
 
-    sp = sub.add_parser("zero-pos", help="Zero the encoder position counter")
+    sp = sub.add_parser("zero-pos", help="Set the current absolute encoder angle as logical zero and save it")
+    sp.add_argument("address", type=int)
+
+    sp = sub.add_parser("save-settings", help="Save current runtime settings/calibration to flash")
+    sp.add_argument("address", type=int)
+
+    sp = sub.add_parser("clear-settings", help="Erase persisted settings from flash for next boot")
     sp.add_argument("address", type=int)
 
     sp = sub.add_parser("set-mode", help="Set control mode (0=DUTY, 1=VELOCITY, 2=POSITION)")
@@ -796,6 +818,12 @@ def main() -> int:
 
         elif args.command == "zero-pos":
             print(format_status(client.zero_position(args.address)))
+
+        elif args.command == "save-settings":
+            print(format_status(client.save_settings(args.address)))
+
+        elif args.command == "clear-settings":
+            print(format_status(client.clear_settings(args.address)))
 
         elif args.command == "set-mode":
             print(format_status(client.set_mode(args.address, args.mode)))

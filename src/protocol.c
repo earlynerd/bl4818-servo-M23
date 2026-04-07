@@ -14,6 +14,7 @@
 #include "motor.h"
 #include "hall.h"
 #include "encoder.h"
+#include "persist.h"
 #include "strike.h"
 /* Enable for parser state tracing: #define DBG(c) uart_putc(c) */
 #define DBG(c) ((void)0)
@@ -25,7 +26,7 @@
 #define FRAME_BUF_SIZE          (1u + MAX_PAYLOAD + 2u) /* LEN + payload + CRC */
 #define ADDR_UNASSIGNED         0xFFu
 #define MAX_DEVICES             16u
-#define FRAME_TIMEOUT_TICKS     10u   /* 5 ms at 2 kHz */
+#define FRAME_TIMEOUT_TICKS     25u   /* 5 ms at 5 kHz, refreshed on every byte */
 #define POLL_BYTE_BUDGET        48u
 
 /* ── Command types ────────────────────────────────────────────────────── */
@@ -56,6 +57,8 @@
 #define SUBCMD_SET_STRIKE_PARAM 0x0Fu
 #define SUBCMD_QUERY_STATUS     0x10u
 #define SUBCMD_QUERY_STRIKE     0x11u
+#define SUBCMD_SAVE_SETTINGS    0x12u
+#define SUBCMD_CLEAR_SETTINGS   0x13u
 
 /* ── Forwarding mode ──────────────────────────────────────────────────── */
 typedef enum {
@@ -134,8 +137,8 @@ static uint8_t prepare_set_velocity(int16_t rpm)
     if (motor_get_state() == MOTOR_FAULT)
         return 0u;
 
-    motor_set_mode(CTRL_VELOCITY);
     motor_set_velocity(rpm);
+    motor_set_mode(CTRL_VELOCITY);
     return 1u;
 }
 
@@ -144,8 +147,8 @@ static uint8_t prepare_set_position(int32_t counts)
     if (motor_get_state() == MOTOR_FAULT)
         return 0u;
 
-    motor_set_mode(CTRL_POSITION);
     motor_set_position(counts);
+    motor_set_mode(CTRL_POSITION);
     return 1u;
 }
 
@@ -358,9 +361,16 @@ static void handle_addressed_cmd(uint8_t cmd_type, const uint8_t *payload, uint8
         send_status_reply();
         break;
     case SUBCMD_ZERO_POSITION:
+    {
+        int32_t current_pos = -encoder_get_position();
+        motor_shift_position_reference(current_pos);
+        strike_shift_position_reference(current_pos);
         encoder_reset_position();
+        /* Persist the logical zero point so absolute angle reconstructs it. */
+        persist_save_runtime();
         send_status_reply();
         break;
+    }
     case SUBCMD_STRIKE:
         if (len >= 4u) {
             int16_t duty = (int16_t)(((uint16_t)payload[2] << 8) | payload[3]);
@@ -401,6 +411,14 @@ static void handle_addressed_cmd(uint8_t cmd_type, const uint8_t *payload, uint8
         break;
     case SUBCMD_QUERY_STRIKE:
         send_strike_status_reply();
+        break;
+    case SUBCMD_SAVE_SETTINGS:
+        persist_save_runtime();
+        send_status_reply();
+        break;
+    case SUBCMD_CLEAR_SETTINGS:
+        persist_clear();
+        send_status_reply();
         break;
     default:
         break;
@@ -502,9 +520,11 @@ void protocol_poll(void)
                 frame_pos = 0;
                 frame_expected = 0;
                 frame_start_mode = fwd_mode;
+                rx_timeout = FRAME_TIMEOUT_TICKS;
                 DBG('B');
             } else if (c == PREAMBLE_0) {
                 /* could be start of a new preamble, stay in SCAN_1 */
+                rx_timeout = FRAME_TIMEOUT_TICKS;
             } else {
                 rx_phase = RX_SCAN_0;
                 rx_timeout = 0;
@@ -515,6 +535,7 @@ void protocol_poll(void)
             if (frame_pos < FRAME_BUF_SIZE)
                 frame_buf[frame_pos] = c;
             frame_pos++;
+            rx_timeout = FRAME_TIMEOUT_TICKS;
 
             if (frame_pos == 1u) {
                 uint8_t len = frame_buf[0];

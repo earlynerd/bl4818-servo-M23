@@ -11,8 +11,33 @@
 static uint32_t encoder_raw = 0;
 static uint16_t encoder_angle = 0;
 static uint16_t encoder_prev_angle = 0;
-static int32_t  encoder_position = 0;   /* continuous unwrapped position */
+static uint16_t encoder_zero_angle = 0;
+static int32_t  encoder_position_raw = 0;      /* continuous unwrapped position */
+static int32_t  encoder_position_offset = 0;   /* logical zero reference */
 static uint8_t  encoder_initialized = 0;
+static uint8_t  encoder_zero_valid = 0;
+
+static int16_t angle_delta(uint16_t current, uint16_t reference)
+{
+    int16_t delta = (int16_t)(current - reference);
+
+    if (delta > 8192)
+        delta -= 16384;
+    else if (delta < -8192)
+        delta += 16384;
+
+    return delta;
+}
+
+static void recompute_position_offset(void)
+{
+    if (!encoder_initialized || !encoder_zero_valid)
+        return;
+
+    encoder_position_offset =
+        (int32_t)angle_delta(encoder_angle, encoder_zero_angle) -
+        encoder_position_raw;
+}
 
 /* Simple delay using NOPs */
 static inline void delay_nop(uint32_t n)
@@ -24,6 +49,14 @@ static inline void delay_nop(uint32_t n)
 
 void encoder_init(void)
 {
+    encoder_raw = 0;
+    encoder_angle = 0;
+    encoder_prev_angle = 0;
+    encoder_position_raw = 0;
+    encoder_position_offset = 0;
+    encoder_initialized = 0;
+    encoder_zero_valid = 0;
+
     /* Ensure GPIOB clock is enabled */
     CLK->AHBCLK |= CLK_AHBCLK_GPBCKEN_Msk;
 
@@ -88,14 +121,9 @@ void encoder_poll(void)
     if (!encoder_initialized) {
         encoder_prev_angle = encoder_angle;
         encoder_initialized = 1;
+        recompute_position_offset();
     } else {
-        int16_t delta = (int16_t)(encoder_angle - encoder_prev_angle);
-        /* Handle 14-bit wrap: if jump > half revolution, it wrapped */
-        if (delta > 8192)
-            delta -= 16384;
-        else if (delta < -8192)
-            delta += 16384;
-        encoder_position += delta;
+        encoder_position_raw += angle_delta(encoder_angle, encoder_prev_angle);
         encoder_prev_angle = encoder_angle;
     }
 }
@@ -112,10 +140,32 @@ uint16_t encoder_get_angle(void)
 
 int32_t encoder_get_position(void)
 {
-    return encoder_position;
+    return encoder_position_raw + encoder_position_offset;
+}
+
+void encoder_set_zero_reference(uint16_t angle)
+{
+    encoder_zero_angle = (uint16_t)(angle & 0x3FFFu);
+    encoder_zero_valid = 1;
+    recompute_position_offset();
+}
+
+uint8_t encoder_has_zero_reference(void)
+{
+    return encoder_zero_valid;
+}
+
+uint16_t encoder_get_zero_reference(void)
+{
+    return encoder_zero_angle;
 }
 
 void encoder_reset_position(void)
 {
-    encoder_position = 0;
+    if (!encoder_initialized)
+        return;
+
+    encoder_zero_angle = encoder_angle;
+    encoder_zero_valid = 1;
+    recompute_position_offset();
 }

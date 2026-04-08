@@ -15,6 +15,8 @@ Examples:
     python ring_tool.py -p COM7 stop 0
     python ring_tool.py -p COM7 broadcast 200 0 0
     python ring_tool.py -p COM7 monitor 0 --hz 10
+    python ring_tool.py -p COM7 measure-strike-timing 0 --start 100 --stop 800 --step 100 --csv strike.csv
+    python ring_tool.py -p COM7 measure-strike-timing 0 --sweep-param home-offset --start 1200 --stop 2200 --step 200 --strike-duty 500
 
 Requires: pyserial (pip install pyserial)
 """
@@ -22,6 +24,7 @@ Requires: pyserial (pip install pyserial)
 from __future__ import annotations
 
 import argparse
+import csv
 import dataclasses
 import struct
 import sys
@@ -52,6 +55,8 @@ CMD_ADDR_BASE       = 0x20
 CMD_ADDR_END        = 0x30
 CMD_STATUS_BASE     = 0x40
 CMD_STATUS_END      = 0x50
+CMD_ACK_BASE        = 0x50
+CMD_ACK_END         = 0x60
 
 # ── Addressed sub-commands ───────────────────────────────────────────────────
 
@@ -74,12 +79,35 @@ SUBCMD_QUERY_STATUS = 0x10
 SUBCMD_QUERY_STRIKE = 0x11
 SUBCMD_SAVE_SETTINGS = 0x12
 SUBCMD_CLEAR_SETTINGS = 0x13
+SUBCMD_MASK         = 0x3F
+SUBCMD_REPLY_FULL   = 0x00
+SUBCMD_REPLY_ACK    = 0x40
+SUBCMD_REPLY_NONE   = 0x80
+
+REPLY_MODE_FULL = "full"
+REPLY_MODE_ACK = "ack"
+REPLY_MODE_NONE = "none"
+
+ACK_RESULT_OK               = 0x00
+ACK_RESULT_OK_RETRIGGERED   = 0x01
+ACK_RESULT_REJECT_NOT_HOMED = 0x02
+ACK_RESULT_REJECT_FAULT     = 0x03
+ACK_RESULT_REJECT_ZERO      = 0x04
+ACK_RESULT_INVALID_ARGUMENT = 0x05
 
 # ── Strike parameter IDs ───────────────────────────────────────────────────
 
 STRIKE_PARAM_HOME_OFFSET    = 0x01
 STRIKE_PARAM_COAST_DISTANCE = 0x02
 STRIKE_PARAM_HOMING_DUTY    = 0x03
+
+STRIKE_TIMING_COAST_VALID     = 0x01
+STRIKE_TIMING_REBOUND_VALID   = 0x02
+STRIKE_TIMING_READY_VALID     = 0x04
+STRIKE_TIMING_ACTIVE          = 0x08
+STRIKE_TIMING_RETRIGGERED     = 0x10
+STRIKE_TIMING_REBOUND_TIMEOUT = 0x20
+STRIKE_TIMING_VELOCITY_VALID  = 0x40
 
 # ── Timing defaults ─────────────────────────────────────────────────────────
 
@@ -108,6 +136,35 @@ MOTOR_STATES  = {0: "IDLE", 1: "RUN", 2: "FAULT"}
 FAULT_CODES   = {0: "NONE", 1: "OVERCURRENT", 2: "HALL_INVALID"}
 CTRL_MODES    = {0: "DUTY", 1: "VELOCITY", 2: "POSITION"}
 STRIKE_STATES = {0: "IDLE", 1: "HOMING", 2: "DRIVING", 3: "COASTING", 4: "BRAKING", 5: "CATCHING"}
+SUBCMD_NAMES  = {
+    SUBCMD_SET_DUTY: "SET_DUTY",
+    SUBCMD_SET_TORQUE: "SET_TORQUE",
+    SUBCMD_STOP: "STOP",
+    SUBCMD_CLEAR_FAULT: "CLEAR_FAULT",
+    SUBCMD_SET_MODE: "SET_MODE",
+    SUBCMD_SET_VELOCITY: "SET_VELOCITY",
+    SUBCMD_SET_PID: "SET_PID",
+    SUBCMD_SET_FF: "SET_FF",
+    SUBCMD_SET_POSITION: "SET_POSITION",
+    SUBCMD_SET_POS_PID: "SET_POS_PID",
+    SUBCMD_ZERO_POS: "ZERO_POSITION",
+    SUBCMD_STRIKE: "STRIKE",
+    SUBCMD_STRIKE_HOME: "STRIKE_HOME",
+    SUBCMD_STRIKE_CANCEL: "STRIKE_CANCEL",
+    SUBCMD_SET_STRIKE_PARAM: "SET_STRIKE_PARAM",
+    SUBCMD_QUERY_STATUS: "QUERY_STATUS",
+    SUBCMD_QUERY_STRIKE: "QUERY_STRIKE",
+    SUBCMD_SAVE_SETTINGS: "SAVE_SETTINGS",
+    SUBCMD_CLEAR_SETTINGS: "CLEAR_SETTINGS",
+}
+ACK_RESULT_NAMES = {
+    ACK_RESULT_OK: "OK",
+    ACK_RESULT_OK_RETRIGGERED: "OK_RETRIGGERED",
+    ACK_RESULT_REJECT_NOT_HOMED: "REJECT_NOT_HOMED",
+    ACK_RESULT_REJECT_FAULT: "REJECT_FAULT",
+    ACK_RESULT_REJECT_ZERO: "REJECT_ZERO",
+    ACK_RESULT_INVALID_ARGUMENT: "INVALID_ARGUMENT",
+}
 
 
 @dataclasses.dataclass
@@ -141,16 +198,93 @@ class MotorStatus:
 
 
 @dataclasses.dataclass
+class CommandAck:
+    address: int
+    subcmd: int
+    result: int
+    detail: int
+
+    @property
+    def subcmd_name(self) -> str:
+        return SUBCMD_NAMES.get(self.subcmd, f"UNKNOWN(0x{self.subcmd:02X})")
+
+    @property
+    def result_name(self) -> str:
+        return ACK_RESULT_NAMES.get(self.result, f"UNKNOWN(0x{self.result:02X})")
+
+    @property
+    def accepted(self) -> bool:
+        return self.result in (ACK_RESULT_OK, ACK_RESULT_OK_RETRIGGERED)
+
+
+@dataclasses.dataclass
 class StrikeStatus:
     address: int
-    state: int          # strike_state_t: 0=IDLE..4=CATCHING
+    state: int          # strike_state_t: 0=IDLE..5=CATCHING
     homed: int
-    drum_position: int  # int32
-    home_position: int  # int32
+    flags: int = 0
+    sequence: int = 0
+    last_duty: int = 0
+    trigger_to_coast_ms: int = 0
+    trigger_to_rebound_ms: int = 0
+    trigger_to_ready_ms: int = 0
+    estimated_strike_velocity_dps: Optional[int] = None
+    drum_position: int = 0  # int32
+    home_position: int = 0  # int32
+    home_offset: Optional[int] = None
+    coast_distance: Optional[int] = None
+    homing_duty: Optional[int] = None
 
     @property
     def state_name(self) -> str:
         return STRIKE_STATES.get(self.state, f"UNKNOWN({self.state})")
+
+    @property
+    def active(self) -> bool:
+        return bool(self.flags & STRIKE_TIMING_ACTIVE)
+
+    @property
+    def retriggered(self) -> bool:
+        return bool(self.flags & STRIKE_TIMING_RETRIGGERED)
+
+    @property
+    def rebound_timeout(self) -> bool:
+        return bool(self.flags & STRIKE_TIMING_REBOUND_TIMEOUT)
+
+    @property
+    def coast_valid(self) -> bool:
+        return bool(self.flags & STRIKE_TIMING_COAST_VALID)
+
+    @property
+    def rebound_valid(self) -> bool:
+        return bool(self.flags & STRIKE_TIMING_REBOUND_VALID)
+
+    @property
+    def ready_valid(self) -> bool:
+        return bool(self.flags & STRIKE_TIMING_READY_VALID)
+
+    @property
+    def velocity_valid(self) -> bool:
+        return bool(self.flags & STRIKE_TIMING_VELOCITY_VALID)
+
+
+@dataclasses.dataclass
+class StrikeTimingSample:
+    sweep_param: str
+    sweep_value: int
+    requested_duty: int
+    applied_duty: int
+    configured_home_offset: Optional[int]
+    repeat_index: int
+    sequence: int
+    coast_ms: Optional[int]
+    rebound_ms: Optional[int]
+    ready_ms: Optional[int]
+    estimated_strike_velocity_dps: Optional[int]
+    retriggered: bool
+    rebound_timeout: bool
+    drum_position: int
+    home_position: int
 
 
 # ── Exceptions ───────────────────────────────────────────────────────────────
@@ -339,6 +473,26 @@ class RingClientV2:
 
         return self.device_count
 
+    def _encode_reply_mode(self, reply_mode: str) -> int:
+        mode = reply_mode.lower()
+        if mode == REPLY_MODE_FULL:
+            return SUBCMD_REPLY_FULL
+        if mode == REPLY_MODE_ACK:
+            return SUBCMD_REPLY_ACK
+        if mode == REPLY_MODE_NONE:
+            return SUBCMD_REPLY_NONE
+        raise RingError(f"reply_mode must be one of: {REPLY_MODE_FULL}, {REPLY_MODE_ACK}, {REPLY_MODE_NONE}")
+
+    def _build_addressed_payload(
+        self,
+        address: int,
+        subcmd: int,
+        data: bytes = b"",
+        reply_mode: str = REPLY_MODE_FULL,
+    ) -> bytes:
+        encoded_subcmd = (subcmd & SUBCMD_MASK) | self._encode_reply_mode(reply_mode)
+        return bytes([CMD_ADDR_BASE | address, encoded_subcmd]) + data
+
     def _recv_status_reply(self) -> MotorStatus:
         """Read frames until we get a STATUS_REPLY, skipping stale frames."""
         deadline = time.monotonic() + self.timeout_ms / 1000.0
@@ -350,175 +504,274 @@ class RingClientV2:
                 return self._parse_status(payload)
             self._trace("skip", bytes([cmd]))
 
+    def _recv_ack_reply(self, address: int, subcmd: int) -> CommandAck:
+        deadline = time.monotonic() + self.timeout_ms / 1000.0
+        expected_cmd = CMD_ACK_BASE | address
+        expected_subcmd = subcmd & SUBCMD_MASK
+
+        while True:
+            remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
+            payload = self._recv_frame(timeout_ms=remaining_ms)
+            cmd = payload[0] if payload else 0
+            if cmd == expected_cmd and len(payload) == 5 and (payload[1] & SUBCMD_MASK) == expected_subcmd:
+                return CommandAck(
+                    address=address,
+                    subcmd=payload[1] & SUBCMD_MASK,
+                    result=payload[2],
+                    detail=struct.unpack(">H", payload[3:5])[0],
+                )
+            self._trace("skip", bytes([cmd]))
+
+    def _addressed_command(
+        self,
+        address: int,
+        subcmd: int,
+        data: bytes = b"",
+        reply_mode: str = REPLY_MODE_FULL,
+    ) -> MotorStatus | CommandAck | None:
+        # "none" suppresses the device-generated reply, but the addressed
+        # frame still circulates through the cut-through ring and will return
+        # to the master RX path. Callers that burst fire-and-forget commands
+        # should keep draining RX between bursts instead of assuming silence.
+        self._check_address(address)
+        self._flush_rx()
+        self._send_frame(self._build_addressed_payload(address, subcmd, data, reply_mode))
+
+        encoded_reply_mode = self._encode_reply_mode(reply_mode)
+        if encoded_reply_mode == SUBCMD_REPLY_NONE:
+            return None
+        if encoded_reply_mode == SUBCMD_REPLY_ACK:
+            return self._recv_ack_reply(address, subcmd)
+        return self._recv_status_reply()
+
     def query_status(self, address: int) -> MotorStatus:
         self._check_address(address)
         self._flush_rx()
-        self._send_frame(bytes([CMD_ADDR_BASE | address, SUBCMD_QUERY_STATUS]))
+        self._send_frame(self._build_addressed_payload(address, SUBCMD_QUERY_STATUS))
         return self._recv_status_reply()
 
-    def set_duty(self, address: int, duty: int) -> MotorStatus:
-        self._check_address(address)
+    def set_duty(
+        self,
+        address: int,
+        duty: int,
+        reply_mode: str = REPLY_MODE_FULL,
+    ) -> MotorStatus | CommandAck | None:
         if duty < -32768 or duty > 32767:
             raise RingError("duty must fit in int16")
-        self._flush_rx()
-        self._send_frame(
-            bytes([CMD_ADDR_BASE | address, SUBCMD_SET_DUTY])
-            + struct.pack(">h", duty)
-        )
-        return self._recv_status_reply()
+        return self._addressed_command(address, SUBCMD_SET_DUTY, struct.pack(">h", duty), reply_mode)
 
-    def set_torque(self, address: int, torque_ma: int) -> MotorStatus:
-        self._check_address(address)
+    def set_torque(
+        self,
+        address: int,
+        torque_ma: int,
+        reply_mode: str = REPLY_MODE_FULL,
+    ) -> MotorStatus | CommandAck | None:
         if torque_ma < 0 or torque_ma > 0xFFFF:
             raise RingError("torque must fit in uint16")
-        self._flush_rx()
-        self._send_frame(
-            bytes([CMD_ADDR_BASE | address, SUBCMD_SET_TORQUE])
-            + struct.pack(">H", torque_ma)
-        )
-        return self._recv_status_reply()
+        return self._addressed_command(address, SUBCMD_SET_TORQUE, struct.pack(">H", torque_ma), reply_mode)
 
-    def stop(self, address: int) -> MotorStatus:
-        self._check_address(address)
-        self._flush_rx()
-        self._send_frame(bytes([CMD_ADDR_BASE | address, SUBCMD_STOP]))
-        return self._recv_status_reply()
+    def stop(
+        self,
+        address: int,
+        reply_mode: str = REPLY_MODE_FULL,
+    ) -> MotorStatus | CommandAck | None:
+        return self._addressed_command(address, SUBCMD_STOP, reply_mode=reply_mode)
 
-    def clear_fault(self, address: int) -> MotorStatus:
-        self._check_address(address)
-        self._flush_rx()
-        self._send_frame(bytes([CMD_ADDR_BASE | address, SUBCMD_CLEAR_FAULT]))
-        return self._recv_status_reply()
+    def clear_fault(
+        self,
+        address: int,
+        reply_mode: str = REPLY_MODE_FULL,
+    ) -> MotorStatus | CommandAck | None:
+        return self._addressed_command(address, SUBCMD_CLEAR_FAULT, reply_mode=reply_mode)
 
-    def set_mode(self, address: int, mode: int) -> MotorStatus:
-        self._check_address(address)
-        self._flush_rx()
-        self._send_frame(
-            bytes([CMD_ADDR_BASE | address, SUBCMD_SET_MODE, mode & 0xFF])
-        )
-        return self._recv_status_reply()
+    def set_mode(
+        self,
+        address: int,
+        mode: int,
+        reply_mode: str = REPLY_MODE_FULL,
+    ) -> MotorStatus | CommandAck | None:
+        return self._addressed_command(address, SUBCMD_SET_MODE, bytes([mode & 0xFF]), reply_mode)
 
-    def set_velocity(self, address: int, rpm: int) -> MotorStatus:
-        self._check_address(address)
+    def set_velocity(
+        self,
+        address: int,
+        rpm: int,
+        reply_mode: str = REPLY_MODE_FULL,
+    ) -> MotorStatus | CommandAck | None:
         if rpm < -32768 or rpm > 32767:
             raise RingError("velocity must fit in int16")
-        self._flush_rx()
-        self._send_frame(
-            bytes([CMD_ADDR_BASE | address, SUBCMD_SET_VELOCITY])
-            + struct.pack(">h", rpm)
-        )
-        return self._recv_status_reply()
+        return self._addressed_command(address, SUBCMD_SET_VELOCITY, struct.pack(">h", rpm), reply_mode)
 
-    def set_ff(self, address: int, gain: int) -> MotorStatus:
-        self._check_address(address)
+    def set_ff(
+        self,
+        address: int,
+        gain: int,
+        reply_mode: str = REPLY_MODE_FULL,
+    ) -> MotorStatus | CommandAck | None:
         if gain < -32768 or gain > 32767:
             raise RingError("ff gain must fit in int16")
-        self._flush_rx()
-        self._send_frame(
-            bytes([CMD_ADDR_BASE | address, SUBCMD_SET_FF])
-            + struct.pack(">h", gain)
-        )
-        return self._recv_status_reply()
+        return self._addressed_command(address, SUBCMD_SET_FF, struct.pack(">h", gain), reply_mode)
 
-    def set_position(self, address: int, counts: int) -> MotorStatus:
-        self._check_address(address)
-        self._flush_rx()
-        self._send_frame(
-            bytes([CMD_ADDR_BASE | address, SUBCMD_SET_POSITION])
-            + struct.pack(">i", counts)
-        )
-        return self._recv_status_reply()
+    def set_position(
+        self,
+        address: int,
+        counts: int,
+        reply_mode: str = REPLY_MODE_FULL,
+    ) -> MotorStatus | CommandAck | None:
+        return self._addressed_command(address, SUBCMD_SET_POSITION, struct.pack(">i", counts), reply_mode)
 
-    def set_pos_pid(self, address: int, kp: int, ki: int, kd: int) -> MotorStatus:
-        self._check_address(address)
+    def set_pos_pid(
+        self,
+        address: int,
+        kp: int,
+        ki: int,
+        kd: int,
+        reply_mode: str = REPLY_MODE_FULL,
+    ) -> MotorStatus | CommandAck | None:
         for name, val in [("kp", kp), ("ki", ki), ("kd", kd)]:
             if val < -32768 or val > 32767:
                 raise RingError(f"{name} must fit in int16")
-        self._flush_rx()
-        self._send_frame(
-            bytes([CMD_ADDR_BASE | address, SUBCMD_SET_POS_PID])
-            + struct.pack(">hhh", kp, ki, kd)
-        )
-        return self._recv_status_reply()
+        return self._addressed_command(address, SUBCMD_SET_POS_PID, struct.pack(">hhh", kp, ki, kd), reply_mode)
 
-    def zero_position(self, address: int) -> MotorStatus:
-        self._check_address(address)
-        self._flush_rx()
-        self._send_frame(bytes([CMD_ADDR_BASE | address, SUBCMD_ZERO_POS]))
-        return self._recv_status_reply()
+    def zero_position(
+        self,
+        address: int,
+        reply_mode: str = REPLY_MODE_FULL,
+    ) -> MotorStatus | CommandAck | None:
+        return self._addressed_command(address, SUBCMD_ZERO_POS, reply_mode=reply_mode)
 
-    def save_settings(self, address: int) -> MotorStatus:
-        self._check_address(address)
-        self._flush_rx()
-        self._send_frame(bytes([CMD_ADDR_BASE | address, SUBCMD_SAVE_SETTINGS]))
-        return self._recv_status_reply()
+    def save_settings(
+        self,
+        address: int,
+        reply_mode: str = REPLY_MODE_FULL,
+    ) -> MotorStatus | CommandAck | None:
+        return self._addressed_command(address, SUBCMD_SAVE_SETTINGS, reply_mode=reply_mode)
 
-    def clear_settings(self, address: int) -> MotorStatus:
-        self._check_address(address)
-        self._flush_rx()
-        self._send_frame(bytes([CMD_ADDR_BASE | address, SUBCMD_CLEAR_SETTINGS]))
-        return self._recv_status_reply()
+    def clear_settings(
+        self,
+        address: int,
+        reply_mode: str = REPLY_MODE_FULL,
+    ) -> MotorStatus | CommandAck | None:
+        return self._addressed_command(address, SUBCMD_CLEAR_SETTINGS, reply_mode=reply_mode)
 
-    def set_pid(self, address: int, kp: int, ki: int, kd: int) -> MotorStatus:
-        self._check_address(address)
+    def set_pid(
+        self,
+        address: int,
+        kp: int,
+        ki: int,
+        kd: int,
+        reply_mode: str = REPLY_MODE_FULL,
+    ) -> MotorStatus | CommandAck | None:
         for name, val in [("kp", kp), ("ki", ki), ("kd", kd)]:
             if val < -32768 or val > 32767:
                 raise RingError(f"{name} must fit in int16")
-        self._flush_rx()
-        self._send_frame(
-            bytes([CMD_ADDR_BASE | address, SUBCMD_SET_PID])
-            + struct.pack(">hhh", kp, ki, kd)
-        )
-        return self._recv_status_reply()
+        return self._addressed_command(address, SUBCMD_SET_PID, struct.pack(">hhh", kp, ki, kd), reply_mode)
 
     # ── Strike commands ────────────────────────────────────────────────
 
-    def strike(self, address: int, duty: int) -> MotorStatus:
-        self._check_address(address)
-        self._flush_rx()
-        self._send_frame(
-            bytes([CMD_ADDR_BASE | address, SUBCMD_STRIKE])
-            + struct.pack(">h", duty)
+    def strike(
+        self,
+        address: int,
+        duty: int,
+        reply_mode: str = REPLY_MODE_FULL,
+    ) -> MotorStatus | CommandAck | None:
+        return self._addressed_command(address, SUBCMD_STRIKE, struct.pack(">h", duty), reply_mode)
+
+    def strike_home(
+        self,
+        address: int,
+        reply_mode: str = REPLY_MODE_FULL,
+    ) -> MotorStatus | CommandAck | None:
+        return self._addressed_command(address, SUBCMD_STRIKE_HOME, reply_mode=reply_mode)
+
+    def strike_cancel(
+        self,
+        address: int,
+        reply_mode: str = REPLY_MODE_FULL,
+    ) -> MotorStatus | CommandAck | None:
+        return self._addressed_command(address, SUBCMD_STRIKE_CANCEL, reply_mode=reply_mode)
+
+    def set_strike_param(
+        self,
+        address: int,
+        param_id: int,
+        value: int,
+        reply_mode: str = REPLY_MODE_FULL,
+    ) -> MotorStatus | CommandAck | None:
+        return self._addressed_command(
+            address,
+            SUBCMD_SET_STRIKE_PARAM,
+            bytes([param_id & 0xFF]) + struct.pack(">h", value),
+            reply_mode,
         )
-        return self._recv_status_reply()
-
-    def strike_home(self, address: int) -> MotorStatus:
-        self._check_address(address)
-        self._flush_rx()
-        self._send_frame(bytes([CMD_ADDR_BASE | address, SUBCMD_STRIKE_HOME]))
-        return self._recv_status_reply()
-
-    def strike_cancel(self, address: int) -> MotorStatus:
-        self._check_address(address)
-        self._flush_rx()
-        self._send_frame(bytes([CMD_ADDR_BASE | address, SUBCMD_STRIKE_CANCEL]))
-        return self._recv_status_reply()
-
-    def set_strike_param(self, address: int, param_id: int, value: int) -> MotorStatus:
-        self._check_address(address)
-        self._flush_rx()
-        self._send_frame(
-            bytes([CMD_ADDR_BASE | address, SUBCMD_SET_STRIKE_PARAM, param_id])
-            + struct.pack(">h", value)
-        )
-        return self._recv_status_reply()
 
     def query_strike(self, address: int) -> StrikeStatus:
         self._check_address(address)
         self._flush_rx()
-        self._send_frame(bytes([CMD_ADDR_BASE | address, SUBCMD_QUERY_STRIKE]))
+        self._send_frame(self._build_addressed_payload(address, SUBCMD_QUERY_STRIKE))
         deadline = time.monotonic() + self.timeout_ms / 1000.0
         while True:
             remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
             payload = self._recv_frame(timeout_ms=remaining_ms)
             cmd = payload[0] if payload else 0
-            if CMD_STATUS_BASE <= cmd < CMD_STATUS_END and len(payload) == 11:
+            if CMD_STATUS_BASE <= cmd < CMD_STATUS_END and len(payload) in (11, 22, 24, 30):
                 return self._parse_strike_status(payload)
             self._trace("skip", bytes([cmd]))
 
     def _parse_strike_status(self, payload: bytes) -> StrikeStatus:
         cmd = payload[0]
         address = cmd & 0x0F
+        if len(payload) == 30:
+            return StrikeStatus(
+                address=address,
+                state=payload[1],
+                homed=payload[2],
+                flags=payload[3],
+                sequence=struct.unpack(">H", payload[4:6])[0],
+                last_duty=struct.unpack(">h", payload[6:8])[0],
+                trigger_to_coast_ms=struct.unpack(">H", payload[8:10])[0],
+                trigger_to_rebound_ms=struct.unpack(">H", payload[10:12])[0],
+                trigger_to_ready_ms=struct.unpack(">H", payload[12:14])[0],
+                estimated_strike_velocity_dps=struct.unpack(">H", payload[14:16])[0],
+                drum_position=struct.unpack(">i", payload[16:20])[0],
+                home_position=struct.unpack(">i", payload[20:24])[0],
+                home_offset=struct.unpack(">h", payload[24:26])[0],
+                coast_distance=struct.unpack(">h", payload[26:28])[0],
+                homing_duty=struct.unpack(">h", payload[28:30])[0],
+            )
+
+        if len(payload) == 24:
+            return StrikeStatus(
+                address=address,
+                state=payload[1],
+                homed=payload[2],
+                flags=payload[3],
+                sequence=struct.unpack(">H", payload[4:6])[0],
+                last_duty=struct.unpack(">h", payload[6:8])[0],
+                trigger_to_coast_ms=struct.unpack(">H", payload[8:10])[0],
+                trigger_to_rebound_ms=struct.unpack(">H", payload[10:12])[0],
+                trigger_to_ready_ms=struct.unpack(">H", payload[12:14])[0],
+                estimated_strike_velocity_dps=struct.unpack(">H", payload[14:16])[0],
+                drum_position=struct.unpack(">i", payload[16:20])[0],
+                home_position=struct.unpack(">i", payload[20:24])[0],
+            )
+
+        if len(payload) == 22:
+            return StrikeStatus(
+                address=address,
+                state=payload[1],
+                homed=payload[2],
+                flags=payload[3],
+                sequence=struct.unpack(">H", payload[4:6])[0],
+                last_duty=struct.unpack(">h", payload[6:8])[0],
+                trigger_to_coast_ms=struct.unpack(">H", payload[8:10])[0],
+                trigger_to_rebound_ms=struct.unpack(">H", payload[10:12])[0],
+                trigger_to_ready_ms=struct.unpack(">H", payload[12:14])[0],
+                estimated_strike_velocity_dps=None,
+                drum_position=struct.unpack(">i", payload[14:18])[0],
+                home_position=struct.unpack(">i", payload[18:22])[0],
+            )
+
         return StrikeStatus(
             address=address,
             state=payload[1],
@@ -609,6 +862,364 @@ def format_status(s: MotorStatus) -> str:
         f"angle={s.angle} ({s.angle_deg:.1f}\u00b0) pos={s.position} "
         f"vel={s.velocity}rpm target_{target_label}={s.target}"
     )
+
+
+def build_sweep_values(start: int, stop: int, step: int) -> list[int]:
+    values: list[int] = []
+
+    if step == 0:
+        raise RingError("sweep step must be non-zero")
+
+    if start != stop and (stop - start) * step < 0:
+        raise RingError("sweep step sign does not move start toward stop")
+
+    current = start
+    if step > 0:
+        while current <= stop:
+            values.append(current)
+            current += step
+    else:
+        while current >= stop:
+            values.append(current)
+            current += step
+
+    if not values:
+        raise RingError("no sweep values generated")
+
+    return values
+
+
+def measurement_sweep_label(sweep_param: str) -> str:
+    if sweep_param == "home-offset":
+        return "home_offset"
+    return "duty"
+
+
+def measurement_sweep_axis_label(sweep_param: str) -> str:
+    if sweep_param == "home-offset":
+        return "Home offset above drum (encoder counts)"
+    return "Requested strike duty"
+
+
+def resolve_measurement_sweep_values(args: argparse.Namespace) -> list[int]:
+    if args.values and args.duties:
+        raise RingError("--values and --duties cannot be used together")
+    if args.sweep_param != "duty" and args.duties:
+        raise RingError("--duties can only be used when --sweep-param=duty")
+
+    values = list(args.values) if args.values else list(args.duties) if args.duties else build_sweep_values(args.start, args.stop, args.step)
+
+    if args.sweep_param == "duty" and any(value == 0 for value in values):
+        raise RingError("duty sweep must not include 0 because STRIKE 0 is ignored")
+
+    return values
+
+
+def wait_for_strike_idle(
+    client: RingClientV2,
+    address: int,
+    timeout_ms: int,
+    poll_ms: int,
+) -> StrikeStatus:
+    deadline = time.monotonic() + timeout_ms / 1000.0
+    last_status: Optional[StrikeStatus] = None
+    poll_s = max(poll_ms, 0) / 1000.0
+
+    while True:
+        last_status = client.query_strike(address)
+        if last_status.state == 0 and not last_status.active:
+            return last_status
+        if time.monotonic() >= deadline:
+            break
+        if poll_s > 0:
+            time.sleep(poll_s)
+
+    state_name = last_status.state_name if last_status is not None else "UNKNOWN"
+    raise RingTimeout(f"timed out waiting for strike idle (last strike state: {state_name})")
+
+
+def collect_strike_timing_sample(
+    client: RingClientV2,
+    address: int,
+    sweep_param: str,
+    sweep_value: int,
+    strike_duty: int,
+    repeat_index: int,
+    poll_ms: int,
+    idle_timeout_ms: int,
+    strike_timeout_ms: int,
+) -> StrikeTimingSample:
+    baseline = wait_for_strike_idle(client, address, idle_timeout_ms, poll_ms)
+    poll_s = max(poll_ms, 0) / 1000.0
+
+    if not baseline.homed:
+        raise RingError("strike actuator is not homed; run strike-home first")
+
+    if sweep_param == "home-offset":
+        response = client.set_strike_param(address, STRIKE_PARAM_HOME_OFFSET, sweep_value)
+        if response.fault != 0:
+            raise RingError(f"set home-offset faulted the motor: {format_status(response)}")
+        baseline = wait_for_strike_idle(client, address, idle_timeout_ms, poll_ms)
+        if baseline.home_offset is not None and baseline.home_offset != sweep_value:
+            raise RingError(
+                f"home_offset verification failed: expected {sweep_value}, got {baseline.home_offset}"
+            )
+        requested_duty = strike_duty
+    else:
+        requested_duty = sweep_value
+
+    prev_sequence = baseline.sequence
+    response = client.strike(address, requested_duty)
+    if response.fault != 0:
+        raise RingError(f"strike command faulted the motor: {format_status(response)}")
+
+    deadline = time.monotonic() + strike_timeout_ms / 1000.0
+    accepted_status: Optional[StrikeStatus] = None
+
+    while time.monotonic() < deadline:
+        status = client.query_strike(address)
+        if status.sequence != prev_sequence:
+            accepted_status = status
+            break
+        if poll_s > 0:
+            time.sleep(poll_s)
+
+    if accepted_status is None:
+        raise RingTimeout(
+            "strike sequence did not advance; the strike was rejected or the firmware "
+            "does not expose timing telemetry"
+        )
+
+    accepted_sequence = accepted_status.sequence
+    final_status = accepted_status
+
+    while time.monotonic() < deadline:
+        if final_status.sequence != accepted_sequence:
+            raise RingError(
+                f"strike sequence changed from {accepted_sequence} to {final_status.sequence} "
+                "while waiting for completion"
+            )
+        if not final_status.active and final_status.ready_valid:
+            return StrikeTimingSample(
+                sweep_param=sweep_param,
+                sweep_value=sweep_value,
+                requested_duty=requested_duty,
+                applied_duty=final_status.last_duty,
+                configured_home_offset=final_status.home_offset,
+                repeat_index=repeat_index,
+                sequence=final_status.sequence,
+                coast_ms=final_status.trigger_to_coast_ms if final_status.coast_valid else None,
+                rebound_ms=final_status.trigger_to_rebound_ms if final_status.rebound_valid else None,
+                ready_ms=final_status.trigger_to_ready_ms if final_status.ready_valid else None,
+                estimated_strike_velocity_dps=(
+                    final_status.estimated_strike_velocity_dps if final_status.velocity_valid else None
+                ),
+                retriggered=final_status.retriggered,
+                rebound_timeout=final_status.rebound_timeout,
+                drum_position=final_status.drum_position,
+                home_position=final_status.home_position,
+            )
+        if poll_s > 0:
+            time.sleep(poll_s)
+        final_status = client.query_strike(address)
+
+    raise RingTimeout(
+        f"timed out waiting for strike sequence {accepted_sequence} to finish and report ready timing"
+    )
+
+
+def write_strike_timing_csv(samples: list[StrikeTimingSample], path: str) -> None:
+    fieldnames = [
+        "sweep_param",
+        "sweep_value",
+        "requested_duty",
+        "applied_duty",
+        "configured_home_offset",
+        "repeat_index",
+        "sequence",
+        "coast_ms",
+        "rebound_ms",
+        "ready_ms",
+        "estimated_strike_velocity_dps",
+        "retriggered",
+        "rebound_timeout",
+        "drum_position",
+        "home_position",
+    ]
+
+    with open(path, "w", newline="") as csv_file:
+        writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+        writer.writeheader()
+        for sample in samples:
+            writer.writerow(
+                {
+                    "sweep_param": sample.sweep_param,
+                    "sweep_value": sample.sweep_value,
+                    "requested_duty": sample.requested_duty,
+                    "applied_duty": sample.applied_duty,
+                    "configured_home_offset": (
+                        "" if sample.configured_home_offset is None else sample.configured_home_offset
+                    ),
+                    "repeat_index": sample.repeat_index,
+                    "sequence": sample.sequence,
+                    "coast_ms": "" if sample.coast_ms is None else sample.coast_ms,
+                    "rebound_ms": "" if sample.rebound_ms is None else sample.rebound_ms,
+                    "ready_ms": "" if sample.ready_ms is None else sample.ready_ms,
+                    "estimated_strike_velocity_dps": (
+                        "" if sample.estimated_strike_velocity_dps is None else sample.estimated_strike_velocity_dps
+                    ),
+                    "retriggered": int(sample.retriggered),
+                    "rebound_timeout": int(sample.rebound_timeout),
+                    "drum_position": sample.drum_position,
+                    "home_position": sample.home_position,
+                }
+            )
+
+
+def mean_or_none(values: list[Optional[int]]) -> Optional[float]:
+    filtered = [value for value in values if value is not None]
+    if not filtered:
+        return None
+    return sum(filtered) / len(filtered)
+
+
+def print_strike_timing_summary(samples: list[StrikeTimingSample]) -> None:
+    grouped: dict[int, list[StrikeTimingSample]] = {}
+    sweep_param = samples[0].sweep_param if samples else "duty"
+    value_label = measurement_sweep_label(sweep_param)
+
+    for sample in samples:
+        grouped.setdefault(sample.sweep_value, []).append(sample)
+
+    print("Strike timing summary:")
+    for sweep_value, sweep_samples in grouped.items():
+        coast_mean = mean_or_none([sample.coast_ms for sample in sweep_samples])
+        rebound_mean = mean_or_none([sample.rebound_ms for sample in sweep_samples])
+        ready_mean = mean_or_none([sample.ready_ms for sample in sweep_samples])
+        velocity_mean = mean_or_none([sample.estimated_strike_velocity_dps for sample in sweep_samples])
+        timeout_count = sum(1 for sample in sweep_samples if sample.rebound_timeout)
+        retrigger_count = sum(1 for sample in sweep_samples if sample.retriggered)
+        duty_mean = mean_or_none([sample.requested_duty for sample in sweep_samples])
+
+        coast_text = "n/a" if coast_mean is None else f"{coast_mean:.1f}"
+        rebound_text = "n/a" if rebound_mean is None else f"{rebound_mean:.1f}"
+        ready_text = "n/a" if ready_mean is None else f"{ready_mean:.1f}"
+        velocity_text = "n/a" if velocity_mean is None else f"{velocity_mean:.1f}"
+        duty_text = "n/a" if duty_mean is None else f"{duty_mean:.1f}"
+
+        print(
+            f"  {value_label}={sweep_value} n={len(sweep_samples)} "
+            f"strike_duty_mean={duty_text} "
+            f"coast_mean_ms={coast_text} rebound_mean_ms={rebound_text} "
+            f"ready_mean_ms={ready_text} strike_vel_mean_dps={velocity_text} "
+            f"rebound_timeouts={timeout_count} "
+            f"retriggered={retrigger_count}"
+        )
+
+
+def plot_strike_timing_samples(
+    samples: list[StrikeTimingSample],
+    title: str,
+    plot_path: Optional[str],
+    show_plot: bool,
+) -> None:
+    try:
+        if not show_plot:
+            import matplotlib
+            matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError as exc:
+        raise RingError("matplotlib is required for strike timing plots. Install with: pip install matplotlib") from exc
+
+    grouped: dict[int, list[StrikeTimingSample]] = {}
+    sweep_param = samples[0].sweep_param if samples else "duty"
+    for sample in samples:
+        grouped.setdefault(sample.sweep_value, []).append(sample)
+
+    duties = sorted(grouped.keys())
+    time_series = [
+        ("coast_ms", "Trigger to coast", "tab:blue"),
+        ("rebound_ms", "Trigger to rebound", "tab:orange"),
+        ("ready_ms", "Trigger to ready", "tab:green"),
+    ]
+    velocity_series = ("estimated_strike_velocity_dps", "Strike velocity", "tab:red")
+
+    fig, ax = plt.subplots(figsize=(9, 5))
+
+    for attr_name, label, color in time_series:
+        raw_x: list[int] = []
+        raw_y: list[int] = []
+        mean_x: list[int] = []
+        mean_y: list[float] = []
+
+        for duty in duties:
+            values = [
+                getattr(sample, attr_name)
+                for sample in grouped[duty]
+                if getattr(sample, attr_name) is not None
+            ]
+            raw_x.extend([duty] * len(values))
+            raw_y.extend(values)
+            if values:
+                mean_x.append(duty)
+                mean_y.append(sum(values) / len(values))
+
+        if raw_y:
+            ax.scatter(raw_x, raw_y, s=24, alpha=0.35, color=color)
+            ax.plot(mean_x, mean_y, marker="o", linewidth=2, label=label, color=color)
+
+    velocity_attr_name, velocity_label, velocity_color = velocity_series
+    velocity_raw_x: list[int] = []
+    velocity_raw_y: list[int] = []
+    velocity_mean_x: list[int] = []
+    velocity_mean_y: list[float] = []
+
+    for duty in duties:
+        values = [
+            getattr(sample, velocity_attr_name)
+            for sample in grouped[duty]
+            if getattr(sample, velocity_attr_name) is not None
+        ]
+        velocity_raw_x.extend([duty] * len(values))
+        velocity_raw_y.extend(values)
+        if values:
+            velocity_mean_x.append(duty)
+            velocity_mean_y.append(sum(values) / len(values))
+
+    velocity_ax = None
+    if velocity_raw_y:
+        velocity_ax = ax.twinx()
+        velocity_ax.scatter(velocity_raw_x, velocity_raw_y, s=24, alpha=0.35, color=velocity_color)
+        velocity_ax.plot(
+            velocity_mean_x,
+            velocity_mean_y,
+            marker="s",
+            linewidth=2,
+            label=velocity_label,
+            color=velocity_color,
+        )
+        velocity_ax.set_ylabel("Degrees per second", color=velocity_color)
+        velocity_ax.tick_params(axis="y", labelcolor=velocity_color)
+
+    ax.set_title(title)
+    ax.set_xlabel(measurement_sweep_axis_label(sweep_param))
+    ax.set_ylabel("Milliseconds")
+    ax.grid(True, alpha=0.3)
+    handles, labels = ax.get_legend_handles_labels()
+    if velocity_ax is not None:
+        velocity_handles, velocity_labels = velocity_ax.get_legend_handles_labels()
+        handles += velocity_handles
+        labels += velocity_labels
+    ax.legend(handles, labels)
+    fig.tight_layout()
+
+    if plot_path:
+        fig.savefig(plot_path, dpi=160)
+
+    if show_plot:
+        plt.show()
+    else:
+        plt.close(fig)
 
 
 # ── Port detection ───────────────────────────────────────────────────────────
@@ -744,6 +1355,40 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("param", choices=["home-offset", "coast-distance", "homing-duty"])
     sp.add_argument("value", type=int)
 
+    sp = sub.add_parser("measure-strike-timing", help="Sweep strike timing versus duty or home-offset")
+    sp.add_argument("address", type=int)
+    sp.add_argument("--sweep-param", choices=["duty", "home-offset"], default="duty",
+                    help="Parameter to sweep (default: duty)")
+    sp.add_argument("--values", nargs="+", type=int,
+                    help="Explicit sweep values; overrides --start/--stop/--step")
+    sp.add_argument("--duties", nargs="+", type=int,
+                    help="Explicit duty sweep values; duty sweep only, overrides --start/--stop/--step")
+    sp.add_argument("--start", type=int, default=100,
+                    help="Start value for generated sweep (default: 100)")
+    sp.add_argument("--stop", type=int, default=1000,
+                    help="Stop value for generated sweep, inclusive (default: 1000)")
+    sp.add_argument("--step", type=int, default=100,
+                    help="Step for generated sweep (default: 100)")
+    sp.add_argument("--strike-duty", type=int, default=400,
+                    help="Strike duty to use when sweeping non-duty parameters (default: 400)")
+    sp.add_argument("--repeats", type=int, default=3,
+                    help="Samples to collect per sweep value (default: 3)")
+    sp.add_argument("--poll-ms", type=int, default=10,
+                    help="Strike-status polling interval in ms (default: 10)")
+    sp.add_argument("--idle-timeout-ms", type=int, default=3000,
+                    help="Timeout waiting for idle before each strike (default: 3000)")
+    sp.add_argument("--strike-timeout-ms", type=int, default=3000,
+                    help="Timeout waiting for each strike to finish (default: 3000)")
+    sp.add_argument("--pause-ms", type=int, default=100,
+                    help="Pause after each completed strike sample (default: 100)")
+    sp.add_argument("--csv", help="Write raw per-strike timing samples to CSV")
+    sp.add_argument("--plot-out", help="Save the generated plot image to this path")
+    sp.add_argument("--no-show", action="store_true",
+                    help="Do not open the plot window")
+    sp.add_argument("--no-plot", action="store_true",
+                    help="Collect data without plotting")
+    sp.add_argument("--title", help="Custom plot title")
+
     sp = sub.add_parser("broadcast", help="Broadcast duty to all devices")
     sp.add_argument("duties", nargs="+", type=int, help="One signed duty per device")
 
@@ -849,7 +1494,17 @@ def main() -> int:
         elif args.command == "strike-status":
             ss = client.query_strike(args.address)
             print(f"addr={ss.address} strike={ss.state_name} homed={ss.homed} "
-                  f"drum_pos={ss.drum_position} home_pos={ss.home_position}")
+                  f"seq={ss.sequence} flags=0x{ss.flags:02X} duty={ss.last_duty} "
+                  f"coast_ms={ss.trigger_to_coast_ms if ss.coast_valid else -1} "
+                  f"rebound_ms={ss.trigger_to_rebound_ms if ss.rebound_valid else -1} "
+                  f"ready_ms={ss.trigger_to_ready_ms if ss.ready_valid else -1} "
+                  f"strike_vel_dps={ss.estimated_strike_velocity_dps if ss.velocity_valid and ss.estimated_strike_velocity_dps is not None else -1} "
+                  f"active={int(ss.active)} retriggered={int(ss.retriggered)} "
+                  f"rebound_timeout={int(ss.rebound_timeout)} "
+                  f"drum_pos={ss.drum_position} home_pos={ss.home_position} "
+                  f"home_offset={ss.home_offset if ss.home_offset is not None else 'n/a'} "
+                  f"coast_distance={ss.coast_distance if ss.coast_distance is not None else 'n/a'} "
+                  f"homing_duty={ss.homing_duty if ss.homing_duty is not None else 'n/a'}")
 
         elif args.command == "set-strike-param":
             param_map = {
@@ -859,6 +1514,84 @@ def main() -> int:
             }
             print(format_status(client.set_strike_param(
                 args.address, param_map[args.param], args.value)))
+            ss = client.query_strike(args.address)
+            print(f"strike params: home_offset={ss.home_offset if ss.home_offset is not None else 'n/a'} "
+                  f"coast_distance={ss.coast_distance if ss.coast_distance is not None else 'n/a'} "
+                  f"homing_duty={ss.homing_duty if ss.homing_duty is not None else 'n/a'}")
+
+        elif args.command == "measure-strike-timing":
+            if args.repeats < 1:
+                raise RingError("--repeats must be at least 1")
+            if args.poll_ms < 0 or args.idle_timeout_ms < 1 or args.strike_timeout_ms < 1 or args.pause_ms < 0:
+                raise RingError("poll/timeout/pause values must be non-negative, and timeouts must be at least 1 ms")
+            if args.no_plot and args.plot_out:
+                raise RingError("--plot-out cannot be used together with --no-plot")
+            if args.sweep_param != "duty" and args.strike_duty == 0:
+                raise RingError("--strike-duty must be non-zero when sweeping non-duty parameters")
+
+            sweep_values = resolve_measurement_sweep_values(args)
+            sweep_label = measurement_sweep_label(args.sweep_param)
+            total_samples = len(sweep_values) * args.repeats
+            samples: list[StrikeTimingSample] = []
+            completed = 0
+
+            print(
+                f"Collecting strike timing for addr={args.address} "
+                f"{sweep_label}s={sweep_values} repeats={args.repeats} "
+                f"strike_duty={args.strike_duty if args.sweep_param != 'duty' else 'swept'}"
+            )
+
+            for sweep_value in sweep_values:
+                for repeat_index in range(1, args.repeats + 1):
+                    completed += 1
+                    print(f"[{completed}/{total_samples}] {sweep_label}={sweep_value} repeat={repeat_index}")
+                    sample = collect_strike_timing_sample(
+                        client=client,
+                        address=args.address,
+                        sweep_param=args.sweep_param,
+                        sweep_value=sweep_value,
+                        strike_duty=args.strike_duty,
+                        repeat_index=repeat_index,
+                        poll_ms=args.poll_ms,
+                        idle_timeout_ms=args.idle_timeout_ms,
+                        strike_timeout_ms=args.strike_timeout_ms,
+                    )
+                    samples.append(sample)
+                    coast_text = "n/a" if sample.coast_ms is None else str(sample.coast_ms)
+                    rebound_text = "n/a" if sample.rebound_ms is None else str(sample.rebound_ms)
+                    ready_text = "n/a" if sample.ready_ms is None else str(sample.ready_ms)
+                    velocity_text = (
+                        "n/a" if sample.estimated_strike_velocity_dps is None
+                        else str(sample.estimated_strike_velocity_dps)
+                    )
+                    print(
+                        f"  seq={sample.sequence} {sweep_label}={sample.sweep_value} "
+                        f"requested_duty={sample.requested_duty} applied_duty={sample.applied_duty} "
+                        f"home_offset={sample.configured_home_offset if sample.configured_home_offset is not None else 'n/a'} "
+                        f"coast_ms={coast_text} rebound_ms={rebound_text} ready_ms={ready_text} "
+                        f"strike_vel_dps={velocity_text} "
+                        f"rebound_timeout={int(sample.rebound_timeout)} retriggered={int(sample.retriggered)}"
+                    )
+                    if args.pause_ms > 0:
+                        time.sleep(args.pause_ms / 1000.0)
+
+            print_strike_timing_summary(samples)
+
+            if args.csv:
+                write_strike_timing_csv(samples, args.csv)
+                print(f"CSV saved to {args.csv}")
+
+            if not args.no_plot:
+                plot_strike_timing_samples(
+                    samples=samples,
+                    title=args.title or (
+                        f"Strike timing sweep addr {args.address} vs {sweep_label}"
+                    ),
+                    plot_path=args.plot_out,
+                    show_plot=not args.no_show,
+                )
+                if args.plot_out:
+                    print(f"Plot saved to {args.plot_out}")
 
         elif args.command == "broadcast":
             if client.device_count is not None and len(args.duties) != client.device_count:

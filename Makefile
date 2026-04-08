@@ -16,6 +16,7 @@ CPU_FLAGS = -mcpu=cortex-m23 -mthumb -mfloat-abi=soft
 # Compilation flags
 CFLAGS = $(CPU_FLAGS) -O2 -Wall -g -ffunction-sections -fdata-sections
 CFLAGS += -Iinclude -ICMSIS -ILibrary/StdDriver/inc
+CFLAGS += -MMD -MP
 
 # Linker flags
 LDFLAGS = $(CPU_FLAGS) -Wl,--gc-sections -T m2003.ld
@@ -40,6 +41,7 @@ SRCS = src/main.c \
 BSP_SRCS = $(wildcard Library/StdDriver/src/*.c)
 
 OBJS = $(addprefix $(BUILD_DIR)/, $(SRCS:.c=.o)) $(addprefix $(BUILD_DIR)/, $(BSP_SRCS:.c=.o))
+DEPS = $(OBJS:.o=.d)
 
 # ── Targets ──────────────────────────────────────────────────────────────────
 all: $(BUILD_DIR)/$(PROJECT).bin size
@@ -63,6 +65,8 @@ size: $(BUILD_DIR)/$(PROJECT).elf
 	$(SIZE) $<
 
 clean:
-	rm -rf $(BUILD_DIR)
+	powershell -NoProfile -Command "if (Test-Path '$(BUILD_DIR)') { Remove-Item -LiteralPath '$(BUILD_DIR)' -Recurse -Force }"
 
 .PHONY: all clean size jlink-script build-jlink
+
+-include $(DEPS)

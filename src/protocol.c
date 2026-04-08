@@ -38,6 +38,8 @@
 #define CMD_ADDR_END            0x30u
 #define CMD_STATUS_BASE         0x40u
 #define CMD_STATUS_END          0x50u
+#define CMD_ACK_BASE            0x50u
+#define CMD_ACK_END             0x60u
 
 /* ── Addressed sub-commands ───────────────────────────────────────────── */
 #define SUBCMD_SET_DUTY         0x01u
@@ -59,6 +61,19 @@
 #define SUBCMD_QUERY_STRIKE     0x11u
 #define SUBCMD_SAVE_SETTINGS    0x12u
 #define SUBCMD_CLEAR_SETTINGS   0x13u
+#define SUBCMD_MASK             0x3Fu
+#define SUBCMD_REPLY_MASK       0xC0u
+#define SUBCMD_REPLY_FULL       0x00u
+#define SUBCMD_REPLY_ACK        0x40u
+#define SUBCMD_REPLY_NONE       0x80u
+
+/* ── Minimal ACK result codes ─────────────────────────────────────────── */
+#define ACK_RESULT_OK               0x00u
+#define ACK_RESULT_OK_RETRIGGERED   0x01u
+#define ACK_RESULT_REJECT_NOT_HOMED 0x02u
+#define ACK_RESULT_REJECT_FAULT     0x03u
+#define ACK_RESULT_REJECT_ZERO      0x04u
+#define ACK_RESULT_INVALID_ARGUMENT 0x05u
 
 /* ── Forwarding mode ──────────────────────────────────────────────────── */
 typedef enum {
@@ -193,31 +208,122 @@ static void send_status_reply(void)
 #define STRIKE_PARAM_COAST_DISTANCE  0x02u
 #define STRIKE_PARAM_HOMING_DUTY     0x03u
 
+#define FULL_REPLY_STATUS            0u
+#define FULL_REPLY_STRIKE_STATUS     1u
+
 static void send_strike_status_reply(void)
 {
     int32_t drum_pos = strike_get_drum_position();
     int32_t home_pos = strike_get_home_position();
-    uint8_t buf[14];
+    strike_metrics_t metrics;
+    uint8_t buf[33];
     uint16_t crc;
 
-    buf[0]  = 11u;                                  /* LEN */
+    strike_get_metrics(&metrics);
+
+    buf[0]  = 30u;                                  /* LEN */
     buf[1]  = CMD_STATUS_BASE | device_addr;
     buf[2]  = (uint8_t)strike_get_state();
     buf[3]  = strike_is_homed();
-    buf[4]  = (uint8_t)((uint32_t)drum_pos >> 24);
-    buf[5]  = (uint8_t)((uint32_t)drum_pos >> 16);
-    buf[6]  = (uint8_t)((uint32_t)drum_pos >> 8);
-    buf[7]  = (uint8_t)((uint32_t)drum_pos & 0xFFu);
-    buf[8]  = (uint8_t)((uint32_t)home_pos >> 24);
-    buf[9]  = (uint8_t)((uint32_t)home_pos >> 16);
-    buf[10] = (uint8_t)((uint32_t)home_pos >> 8);
-    buf[11] = (uint8_t)((uint32_t)home_pos & 0xFFu);
+    buf[4]  = metrics.flags;
+    buf[5]  = (uint8_t)(metrics.sequence >> 8);
+    buf[6]  = (uint8_t)(metrics.sequence & 0xFFu);
+    buf[7]  = (uint8_t)((uint16_t)metrics.last_duty >> 8);
+    buf[8]  = (uint8_t)((uint16_t)metrics.last_duty & 0xFFu);
+    buf[9]  = (uint8_t)(metrics.trigger_to_coast_ms >> 8);
+    buf[10] = (uint8_t)(metrics.trigger_to_coast_ms & 0xFFu);
+    buf[11] = (uint8_t)(metrics.trigger_to_rebound_ms >> 8);
+    buf[12] = (uint8_t)(metrics.trigger_to_rebound_ms & 0xFFu);
+    buf[13] = (uint8_t)(metrics.trigger_to_ready_ms >> 8);
+    buf[14] = (uint8_t)(metrics.trigger_to_ready_ms & 0xFFu);
+    buf[15] = (uint8_t)(metrics.estimated_strike_velocity_dps >> 8);
+    buf[16] = (uint8_t)(metrics.estimated_strike_velocity_dps & 0xFFu);
+    buf[17] = (uint8_t)((uint32_t)drum_pos >> 24);
+    buf[18] = (uint8_t)((uint32_t)drum_pos >> 16);
+    buf[19] = (uint8_t)((uint32_t)drum_pos >> 8);
+    buf[20] = (uint8_t)((uint32_t)drum_pos & 0xFFu);
+    buf[21] = (uint8_t)((uint32_t)home_pos >> 24);
+    buf[22] = (uint8_t)((uint32_t)home_pos >> 16);
+    buf[23] = (uint8_t)((uint32_t)home_pos >> 8);
+    buf[24] = (uint8_t)((uint32_t)home_pos & 0xFFu);
+    buf[25] = (uint8_t)((uint16_t)metrics.home_offset >> 8);
+    buf[26] = (uint8_t)((uint16_t)metrics.home_offset & 0xFFu);
+    buf[27] = (uint8_t)((uint16_t)metrics.coast_distance >> 8);
+    buf[28] = (uint8_t)((uint16_t)metrics.coast_distance & 0xFFu);
+    buf[29] = (uint8_t)((uint16_t)metrics.homing_duty >> 8);
+    buf[30] = (uint8_t)((uint16_t)metrics.homing_duty & 0xFFu);
 
-    crc = crc16_ccitt(buf, 12);
-    buf[12] = (uint8_t)(crc >> 8);
-    buf[13] = (uint8_t)(crc & 0xFFu);
+    crc = crc16_ccitt(buf, 31);
+    buf[31] = (uint8_t)(crc >> 8);
+    buf[32] = (uint8_t)(crc & 0xFFu);
 
-    send_frame(buf, 14);
+    send_frame(buf, 33);
+}
+
+static void send_ack_reply(uint8_t subcmd, uint8_t result, uint16_t detail)
+{
+    uint8_t buf[8];
+    uint16_t crc;
+
+    buf[0] = 5u;
+    buf[1] = CMD_ACK_BASE | device_addr;
+    buf[2] = subcmd;
+    buf[3] = result;
+    buf[4] = (uint8_t)(detail >> 8);
+    buf[5] = (uint8_t)(detail & 0xFFu);
+
+    crc = crc16_ccitt(buf, 6);
+    buf[6] = (uint8_t)(crc >> 8);
+    buf[7] = (uint8_t)(crc & 0xFFu);
+
+    send_frame(buf, 8);
+}
+
+static uint8_t ack_result_from_strike_trigger(strike_trigger_result_t result)
+{
+    switch (result) {
+    case STRIKE_TRIGGER_ACCEPTED:
+        return ACK_RESULT_OK;
+    case STRIKE_TRIGGER_RETRIGGERED:
+        return ACK_RESULT_OK_RETRIGGERED;
+    case STRIKE_TRIGGER_REJECT_NOT_HOMED:
+        return ACK_RESULT_REJECT_NOT_HOMED;
+    case STRIKE_TRIGGER_REJECT_FAULT:
+        return ACK_RESULT_REJECT_FAULT;
+    case STRIKE_TRIGGER_REJECT_ZERO:
+    default:
+        return ACK_RESULT_REJECT_ZERO;
+    }
+}
+
+static uint8_t sanitize_reply_mode(uint8_t reply_mode)
+{
+    if (reply_mode == SUBCMD_REPLY_ACK || reply_mode == SUBCMD_REPLY_NONE)
+        return reply_mode;
+
+    return SUBCMD_REPLY_FULL;
+}
+
+static void send_addressed_reply(
+    uint8_t reply_mode,
+    uint8_t subcmd,
+    uint8_t ack_result,
+    uint16_t ack_detail,
+    uint8_t full_reply_kind
+)
+{
+    if (reply_mode == SUBCMD_REPLY_NONE)
+        return;
+
+    if (reply_mode == SUBCMD_REPLY_ACK) {
+        send_ack_reply(subcmd, ack_result, ack_detail);
+        return;
+    }
+
+    if (full_reply_kind == FULL_REPLY_STRIKE_STATUS)
+        send_strike_status_reply();
+    else
+        send_status_reply();
 }
 
 /* ── Command handlers ─────────────────────────────────────────────────── */
@@ -276,7 +382,11 @@ static void handle_broadcast_duty(const uint8_t *payload, uint8_t len)
 static void handle_addressed_cmd(uint8_t cmd_type, const uint8_t *payload, uint8_t len)
 {
     uint8_t target = cmd_type & 0x0Fu;
+    uint8_t raw_subcmd;
     uint8_t subcmd;
+    uint8_t reply_mode;
+    uint8_t ack_result;
+    uint16_t ack_detail;
     uint8_t start_after;
 
     if (device_addr == ADDR_UNASSIGNED || target != device_addr) {
@@ -285,80 +395,118 @@ static void handle_addressed_cmd(uint8_t cmd_type, const uint8_t *payload, uint8
         return;
     }
 
-    subcmd = (len >= 2u) ? payload[1] : 0u;
+    raw_subcmd = (len >= 2u) ? payload[1] : 0u;
+    subcmd = raw_subcmd & SUBCMD_MASK;
+    reply_mode = sanitize_reply_mode(raw_subcmd & SUBCMD_REPLY_MASK);
+
+    if (subcmd == SUBCMD_QUERY_STATUS || subcmd == SUBCMD_QUERY_STRIKE)
+        reply_mode = SUBCMD_REPLY_FULL;
 
     switch (subcmd) {
     case SUBCMD_SET_DUTY:
+        ack_result = ACK_RESULT_INVALID_ARGUMENT;
         if (len >= 4u) {
             int16_t duty = (int16_t)(((uint16_t)payload[2] << 8) | payload[3]);
-            start_after = prepare_set_duty(duty);
-            send_status_reply();
-            if (start_after) motor_start();
+            if (duty < -(int16_t)PWM_MAX_DUTY || duty > (int16_t)PWM_MAX_DUTY) {
+                ack_result = ACK_RESULT_INVALID_ARGUMENT;
+            } else if (duty == 0) {
+                motor_stop();
+                ack_result = ACK_RESULT_OK;
+            } else if (motor_get_state() == MOTOR_FAULT) {
+                ack_result = ACK_RESULT_REJECT_FAULT;
+            } else {
+                start_after = prepare_set_duty(duty);
+                ack_result = ACK_RESULT_OK;
+                if (start_after) motor_start();
+            }
         }
+        send_addressed_reply(reply_mode, subcmd, ack_result, 0u, FULL_REPLY_STATUS);
         break;
     case SUBCMD_SET_TORQUE:
+        ack_result = ACK_RESULT_INVALID_ARGUMENT;
         if (len >= 4u) {
             uint16_t ma = ((uint16_t)payload[2] << 8) | payload[3];
             motor_set_torque_limit(ma);
+            ack_result = ACK_RESULT_OK;
         }
-        send_status_reply();
+        send_addressed_reply(reply_mode, subcmd, ack_result, 0u, FULL_REPLY_STATUS);
         break;
     case SUBCMD_STOP:
         motor_stop();
-        send_status_reply();
+        send_addressed_reply(reply_mode, subcmd, ACK_RESULT_OK, 0u, FULL_REPLY_STATUS);
         break;
     case SUBCMD_CLEAR_FAULT:
         motor_clear_fault();
-        send_status_reply();
+        send_addressed_reply(reply_mode, subcmd, ACK_RESULT_OK, 0u, FULL_REPLY_STATUS);
         break;
     case SUBCMD_SET_MODE:
+        ack_result = ACK_RESULT_INVALID_ARGUMENT;
         if (len >= 3u) {
             motor_set_mode((ctrl_mode_t)payload[2]);
+            ack_result = ACK_RESULT_OK;
         }
-        send_status_reply();
+        send_addressed_reply(reply_mode, subcmd, ack_result, 0u, FULL_REPLY_STATUS);
         break;
     case SUBCMD_SET_VELOCITY:
+        ack_result = ACK_RESULT_INVALID_ARGUMENT;
         if (len >= 4u) {
             int16_t rpm = (int16_t)(((uint16_t)payload[2] << 8) | payload[3]);
-            start_after = prepare_set_velocity(rpm);
-            send_status_reply();
-            if (start_after) motor_start();
+            if (motor_get_state() == MOTOR_FAULT) {
+                ack_result = ACK_RESULT_REJECT_FAULT;
+            } else {
+                start_after = prepare_set_velocity(rpm);
+                ack_result = ACK_RESULT_OK;
+                if (start_after) motor_start();
+            }
         }
+        send_addressed_reply(reply_mode, subcmd, ack_result, 0u, FULL_REPLY_STATUS);
         break;
     case SUBCMD_SET_PID:
+        ack_result = ACK_RESULT_INVALID_ARGUMENT;
         if (len >= 8u) {
             int16_t kp = (int16_t)(((uint16_t)payload[2] << 8) | payload[3]);
             int16_t ki = (int16_t)(((uint16_t)payload[4] << 8) | payload[5]);
             int16_t kd = (int16_t)(((uint16_t)payload[6] << 8) | payload[7]);
             motor_set_vel_pid(kp, ki, kd);
+            ack_result = ACK_RESULT_OK;
         }
-        send_status_reply();
+        send_addressed_reply(reply_mode, subcmd, ack_result, 0u, FULL_REPLY_STATUS);
         break;
     case SUBCMD_SET_FF:
+        ack_result = ACK_RESULT_INVALID_ARGUMENT;
         if (len >= 4u) {
             int16_t gain = (int16_t)(((uint16_t)payload[2] << 8) | payload[3]);
             motor_set_vel_ff(gain);
+            ack_result = ACK_RESULT_OK;
         }
-        send_status_reply();
+        send_addressed_reply(reply_mode, subcmd, ack_result, 0u, FULL_REPLY_STATUS);
         break;
     case SUBCMD_SET_POSITION:
+        ack_result = ACK_RESULT_INVALID_ARGUMENT;
         if (len >= 6u) {
             int32_t pos = (int32_t)(
                 ((uint32_t)payload[2] << 24) | ((uint32_t)payload[3] << 16) |
                 ((uint32_t)payload[4] << 8)  |  (uint32_t)payload[5]);
-            start_after = prepare_set_position(pos);
-            send_status_reply();
-            if (start_after) motor_start();
+            if (motor_get_state() == MOTOR_FAULT) {
+                ack_result = ACK_RESULT_REJECT_FAULT;
+            } else {
+                start_after = prepare_set_position(pos);
+                ack_result = ACK_RESULT_OK;
+                if (start_after) motor_start();
+            }
         }
+        send_addressed_reply(reply_mode, subcmd, ack_result, 0u, FULL_REPLY_STATUS);
         break;
     case SUBCMD_SET_POS_PID:
+        ack_result = ACK_RESULT_INVALID_ARGUMENT;
         if (len >= 8u) {
             int16_t kp = (int16_t)(((uint16_t)payload[2] << 8) | payload[3]);
             int16_t ki = (int16_t)(((uint16_t)payload[4] << 8) | payload[5]);
             int16_t kd = (int16_t)(((uint16_t)payload[6] << 8) | payload[7]);
             motor_set_pos_pid(kp, ki, kd);
+            ack_result = ACK_RESULT_OK;
         }
-        send_status_reply();
+        send_addressed_reply(reply_mode, subcmd, ack_result, 0u, FULL_REPLY_STATUS);
         break;
     case SUBCMD_ZERO_POSITION:
     {
@@ -368,57 +516,65 @@ static void handle_addressed_cmd(uint8_t cmd_type, const uint8_t *payload, uint8
         encoder_reset_position();
         /* Persist the logical zero point so absolute angle reconstructs it. */
         persist_save_runtime();
-        send_status_reply();
+        send_addressed_reply(reply_mode, subcmd, ACK_RESULT_OK, 0u, FULL_REPLY_STATUS);
         break;
     }
     case SUBCMD_STRIKE:
+        ack_result = ACK_RESULT_INVALID_ARGUMENT;
+        ack_detail = strike_get_sequence();
         if (len >= 4u) {
             int16_t duty = (int16_t)(((uint16_t)payload[2] << 8) | payload[3]);
-            strike_trigger((int32_t)duty);
+            ack_result = ack_result_from_strike_trigger(strike_trigger((int32_t)duty));
+            ack_detail = strike_get_sequence();
         }
-        send_status_reply();
+        send_addressed_reply(reply_mode, subcmd, ack_result, ack_detail, FULL_REPLY_STATUS);
         break;
     case SUBCMD_STRIKE_HOME:
         strike_home();
-        send_status_reply();
+        send_addressed_reply(reply_mode, subcmd, ACK_RESULT_OK, strike_get_sequence(), FULL_REPLY_STATUS);
         break;
     case SUBCMD_STRIKE_CANCEL:
         strike_cancel();
-        send_status_reply();
+        send_addressed_reply(reply_mode, subcmd, ACK_RESULT_OK, strike_get_sequence(), FULL_REPLY_STATUS);
         break;
     case SUBCMD_SET_STRIKE_PARAM:
+        ack_result = ACK_RESULT_INVALID_ARGUMENT;
         if (len >= 5u) {
             uint8_t param_id = payload[2];
             int16_t value = (int16_t)(((uint16_t)payload[3] << 8) | payload[4]);
             switch (param_id) {
             case STRIKE_PARAM_HOME_OFFSET:
                 strike_set_home_offset((int32_t)value);
+                ack_result = ACK_RESULT_OK;
                 break;
             case STRIKE_PARAM_COAST_DISTANCE:
                 strike_set_coast_distance((int32_t)value);
+                ack_result = ACK_RESULT_OK;
                 break;
             case STRIKE_PARAM_HOMING_DUTY:
                 strike_set_homing_duty((int32_t)value);
+                ack_result = ACK_RESULT_OK;
                 break;
             default:
+                ack_result = ACK_RESULT_INVALID_ARGUMENT;
                 break;
             }
         }
-        send_status_reply();
+        send_addressed_reply(reply_mode, subcmd, ack_result, strike_get_sequence(), FULL_REPLY_STATUS);
         break;
     case SUBCMD_QUERY_STATUS:
-        send_status_reply();
+        send_addressed_reply(reply_mode, subcmd, ACK_RESULT_OK, 0u, FULL_REPLY_STATUS);
         break;
     case SUBCMD_QUERY_STRIKE:
-        send_strike_status_reply();
+        send_addressed_reply(reply_mode, subcmd, ACK_RESULT_OK, strike_get_sequence(), FULL_REPLY_STRIKE_STATUS);
         break;
     case SUBCMD_SAVE_SETTINGS:
         persist_save_runtime();
-        send_status_reply();
+        send_addressed_reply(reply_mode, subcmd, ACK_RESULT_OK, 0u, FULL_REPLY_STATUS);
         break;
     case SUBCMD_CLEAR_SETTINGS:
         persist_clear();
-        send_status_reply();
+        send_addressed_reply(reply_mode, subcmd, ACK_RESULT_OK, 0u, FULL_REPLY_STATUS);
         break;
     default:
         break;
@@ -457,7 +613,8 @@ static void dispatch(uint8_t cmd, const uint8_t *payload, uint8_t len)
     default:
         if (cmd >= CMD_ADDR_BASE && cmd < CMD_ADDR_END) {
             handle_addressed_cmd(cmd, payload, len);
-        } else if (cmd >= CMD_STATUS_BASE && cmd < CMD_STATUS_END) {
+        } else if ((cmd >= CMD_STATUS_BASE && cmd < CMD_STATUS_END) ||
+                   (cmd >= CMD_ACK_BASE && cmd < CMD_ACK_END)) {
             if (fwd_mode == FWD_STORE_AND_FORWARD)
                 forward_frame_verbatim();
         }

@@ -9,7 +9,8 @@
 
 #include <stdint.h>
 
-#define PID_SCALE 256  /* Q8 */
+#define PID_SCALE 256      /* Q8 */
+#define PID_SCALE_SHIFT 8
 
 typedef struct {
     int32_t kp;

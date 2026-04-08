@@ -47,9 +47,6 @@ static pid_t         vel_pid;
 static pid_t         pos_pid;
 static uint8_t       pos_div;            /* divider counter for 1 kHz position loop */
 
-#define DEFAULT_TORQUE_LIMIT_MA 800
-#define CURRENT_LIMIT_MA        5000
-
 /*
  * Encoder-based velocity:
  *   RPM = delta_counts * 60 * CONTROL_LOOP_HZ / ENCODER_COUNTS_PER_REV
@@ -73,11 +70,11 @@ static int32_t estimate_velocity(void)
     int32_t raw_rpm = -(delta * VEL_CONV_NUM) / ENCODER_COUNTS_PER_REV;
 
     /* First-order IIR in Q8 for sub-RPM precision */
-    int32_t raw_q8 = raw_rpm << 8;
+    int32_t raw_q8 = raw_rpm << PID_SCALE_SHIFT;
     /* Use division to avoid asymmetric deadband and -1 RPM stuck state with signed shift */
     vel_filt_q8 += (raw_q8 - vel_filt_q8) / (1 << VEL_FILTER_SHIFT);
 
-    return vel_filt_q8 / 256;
+    return vel_filt_q8 / PID_SCALE;
 }
 
 static int32_t run_velocity_loop(void)

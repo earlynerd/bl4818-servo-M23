@@ -1,0 +1,69 @@
+The cleanest version is an HTML frontend on top of a local Python serial service, not a pure browser-only rewrite.
+
+  The reason is straightforward: the current UI already has useful player ideas, but the ring side already exists in Python and the serial timing is the hard part. Reuse the ring
+  client and strike sweep logic, and keep the browser focused on file loading, visualization, calibration editing, and transport controls.
+
+  Recommended Architecture
+
+  - Keep the UI in player/ as an HTML app.
+  - Add a local Python service in scripts/ that owns the serial port, ring framing, scheduling, calibration sweeps, and persistence.
+  - Use the existing ring client as the transport layer instead of reimplementing CRC/framing/parsing in JS.
+  - Use a proper MIDI library for file parsing. Do not extend the current hand-written parser for production timing; it is fine for simple files but not for tempo-map-accurate
+    playback.
+  - Treat hardware playback as note-on only. Note durations are still useful for piano-roll display, but the mallets only need onset time and velocity.
+
+  Core Runtime Model
+
+  - Startup: connect serial, enumerate the ring, verify 10 devices, load a mallet profile, query homing state, and offer Home All.
+  - Build a PerformancePlan from the MIDI file:
+      - impact_time_ms
+      - mallet addr
+      - requested midi velocity
+      - resolved duty
+      - resolved lead_ms
+      - resolved ready_ms
+      - send_deadline_ms = impact_time_ms - lead_ms
+  - Run a scheduler with a lookahead window, for example 100 ms.
+  - Feed a single serial worker that sends one ring transaction at a time and waits for the reply before sending the next.
+  - During playback, disable background polling except fault handling. Every extra query burns bus time.
+
+  Calibration Model
+
+  - Store one profile per instrument, with one entry per mallet:
+      - ring address
+      - MIDI pitch
+      - home/coast/homing parameters
+      - duty-to-strike-velocity samples
+      - duty-to-lead-ms samples
+      - duty-to-ready-ms samples
+  - Calibration flow:
+      - home the mallet
+      - sweep strike duty over a range, repeat each point 3-5 times
+      - record median estimated_strike_velocity_dps, trigger_to_rebound_ms, and trigger_to_ready_ms
+      - fit monotonic piecewise-linear curves
+  - Playback lookup:
+      - MIDI velocity -> target strike velocity proxy
+      - invert the fitted curve -> duty
+      - interpolate lead time and ready time from the same calibration set
+  - Use trigger_to_rebound_ms as the impact-time proxy for now. It is the closest thing the firmware exposes, but it is still an inferred contact time.
+
+  Important Constraint
+
+  - With the current firmware, every addressed STRIKE produces a status reply.
+  - At 250 kbaud, one strike transaction is about 1.24 ms on the wire.
+  - A 4-note chord is therefore roughly 5 ms of bus occupancy, and a 10-note chord is roughly 12 ms.
+  - That means host-side lookahead can compensate mechanical delay, but it cannot make large simultaneous chords perfectly synchronous if the bus has to serialize them.
+
+  What I Would Build First
+
+  1. Headless Python prototype: load MIDI, load profile JSON, print a dry-run schedule, then play a simple scale over serial.
+  2. Calibration tool: reuse the existing strike timing sweep logic and write profile JSON.
+  3. Playback scheduler: single serial worker, lookahead queue, late-event logging, retrigger protection based on ready_ms.
+  4. HTML frontend: transport, MIDI file upload, piano roll, profile editor, calibration workflow, live logs.
+  5. Firmware enhancement only if needed: add BROADCAST_STRIKE or QUEUE_STRIKE_AT if chord simultaneity is not good enough.
+
+  Decisions To Make Early
+
+  - Whether 4-8 ms of chord skew is acceptable.
+  - Whether MIDI velocity should map to the firmware’s velocity proxy, or to measured acoustic loudness.
+  - Whether pitches are fixed to addresses, or user-remappable in the profile.

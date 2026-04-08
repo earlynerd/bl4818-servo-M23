@@ -8,6 +8,7 @@
  */
 
 #include "pid.h"
+#include "m2003_config.h"
 
 void pid_init(pid_t *pid, int32_t kp, int32_t ki, int32_t kd, int32_t kf,
               int32_t out_min, int32_t out_max)
@@ -39,15 +40,15 @@ int32_t pid_update(pid_t *pid, int32_t setpoint, int32_t measurement)
         new_integral = -pid->int_max;
 
     /* Derivative on measurement (negated: rising measurement = falling error)
-     * Filtered with a simple first-order IIR (alpha = 0.25).
-     * The internal state is kept in Q8 (* 256) to eliminate the integer 
+     * Filtered with a simple first-order IIR.
+     * The internal state is kept in Q8 (* PID_SCALE) to eliminate the integer
      * truncation deadband that causes the D-term to get stuck. */
     int32_t raw_d_term = -pid->kd * (measurement - pid->prev_meas);
-    int32_t raw_d_q8 = raw_d_term * 256;
-    pid->prev_d_term += (raw_d_q8 - pid->prev_d_term) / 4;
+    int32_t raw_d_q8 = raw_d_term * PID_SCALE;
+    pid->prev_d_term += (raw_d_q8 - pid->prev_d_term) / (1 << PID_D_FILTER_SHIFT);
     pid->prev_meas = measurement;
     
-    int32_t d_term = pid->prev_d_term / 256;
+    int32_t d_term = pid->prev_d_term / PID_SCALE;
 
     /* Feedforward */
     int32_t ff_term = pid->kf * setpoint;

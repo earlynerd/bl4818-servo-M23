@@ -61,12 +61,14 @@ The first payload byte is the command type.
 | 0x02 | ENTER_CUT_THROUGH | -- | 1 | master -> ring |
 | 0x03 | SET_ADDRESS | `[counter]` | 2 | master -> ring (S&F) |
 | 0x10 | BROADCAST_DUTY | `[duty_hi duty_lo] x N` | 1 + 2*N | master -> ring |
-| 0x20+addr | ADDRESSED_CMD | `[subcmd] [data...]` | 2..8 | master -> ring |
+| 0x20+addr | ADDRESSED_CMD | `[subcmd_flags] [data...]` | 2..8 | master -> ring |
 | 0x40+addr | STATUS_REPLY | query-dependent status payload | 11 or 17 | device -> master |
+| 0x50+addr | ACK_REPLY | `[subcmd] [result] [detail_hi] [detail_lo]` | 5 | device -> master |
 
 ### Addressed Sub-Commands
 
-Used with type `0x20 + device_addr`:
+Used with type `0x20 + device_addr`. The low 6 bits of `subcmd_flags` select the
+sub-command ID; the top 2 bits select reply policy.
 
 | Sub-Cmd | Name | Data | Data LEN |
 |---------|------|------|----------|
@@ -90,6 +92,55 @@ Used with type `0x20 + device_addr`:
 | 0x12 | SAVE_SETTINGS | -- | 0 |
 | 0x13 | CLEAR_SETTINGS | -- | 0 |
 
+### Addressed Reply Modes
+
+`subcmd_flags` layout:
+
+```text
+bits 7:6 = reply mode
+bits 5:0 = sub-command ID
+```
+
+| Bits 7:6 | Mode | Behavior |
+|----------|------|----------|
+| `00` | FULL | Current/default behavior. Device emits the normal full reply. |
+| `01` | ACK | Device emits a compact `ACK_REPLY`. |
+| `10` | NONE | Device suppresses the device-generated reply. |
+| `11` | Reserved | Must not be sent. Current firmware treats it as `FULL`. |
+
+Notes:
+
+- `QUERY_STATUS` and `QUERY_STRIKE` always return their full reply payloads.
+- `NONE` only suppresses the device-generated reply. In cut-through mode the
+  command frame itself still propagates around the ring and returns to the
+  master RX path.
+
+### ACK Replies
+
+Addressed commands sent with reply mode `ACK` reply with type `0x50 + addr` and
+5 payload bytes:
+
+```text
+[type] [subcmd] [result] [detail_hi] [detail_lo]
+```
+
+`subcmd` is the low-6-bit sub-command ID without the reply-mode bits.
+
+`result` codes currently used by firmware:
+
+| Result | Meaning |
+|--------|---------|
+| `0x00` | OK |
+| `0x01` | OK_RETRIGGERED |
+| `0x02` | REJECT_NOT_HOMED |
+| `0x03` | REJECT_FAULT |
+| `0x04` | REJECT_ZERO |
+| `0x05` | INVALID_ARGUMENT |
+
+`detail` is command-specific. For `STRIKE`, `STRIKE_HOME`, `STRIKE_CANCEL`, and
+`SET_STRIKE_PARAM`, it reports the current 16-bit strike sequence. Other
+commands currently return `detail = 0`.
+
 ### Status Replies
 
 `QUERY_STATUS` replies with type `0x40 + addr` and 17 payload bytes:
@@ -100,13 +151,48 @@ Used with type `0x20 + device_addr`:
 [target_hi] [target_lo] [position_b3] [position_b2] [position_b1] [position_b0]
 ```
 
-`QUERY_STRIKE` replies with the same type `0x40 + addr` and 11 payload bytes:
+`QUERY_STRIKE` replies with the same type `0x40 + addr` and 30 payload bytes:
 
 ```
-[type] [strike_state] [homed]
+[type] [strike_state] [homed] [timing_flags]
+[seq_hi] [seq_lo] [duty_hi] [duty_lo]
+[t_coast_hi] [t_coast_lo] [t_rebound_hi] [t_rebound_lo]
+[t_ready_hi] [t_ready_lo] [vel_dps_hi] [vel_dps_lo]
 [drum_pos_b3] [drum_pos_b2] [drum_pos_b1] [drum_pos_b0]
 [home_pos_b3] [home_pos_b2] [home_pos_b1] [home_pos_b0]
+[home_offset_hi] [home_offset_lo]
+[coast_distance_hi] [coast_distance_lo]
+[homing_duty_hi] [homing_duty_lo]
 ```
+
+`timing_flags` bits:
+
+- `0x01` trigger-to-coast time valid
+- `0x02` trigger-to-rebound time valid
+- `0x04` trigger-to-ready time valid
+- `0x08` strike currently active
+- `0x10` most recent strike was accepted as a retrigger while already active
+- `0x20` rebound timing was produced by coast timeout rather than detected reversal
+- `0x40` strike velocity estimate valid
+
+Timing fields are reported in milliseconds for the most recently accepted
+strike. `t_rebound` is an approximate impact proxy derived from rebound
+detection or coast timeout, not a direct drum-contact sensor.
+
+`vel_dps` is an estimated strike approach speed in degrees per second,
+computed as the peak toward-drum angular velocity observed during the
+DRIVING and COASTING phases. It is a useful proxy for strike intensity,
+not a direct velocity measurement at the exact instant of contact.
+
+The final three signed 16-bit fields report the current live strike
+configuration: `home_offset`, `coast_distance`, and `homing_duty`.
+When `home_offset` is changed while the actuator is homed and not in the
+strike approach, the parked home target is updated immediately.
+
+If a `STRIKE` command arrives while the actuator is already in DRIVING,
+COASTING, BRAKING, or CATCHING, the current recovery is aborted and a new
+strike attempt starts immediately. A compact `ACK_REPLY` for `STRIKE` reports
+`OK_RETRIGGERED` in that case.
 
 ## Persistent Settings
 

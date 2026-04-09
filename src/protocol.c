@@ -73,7 +73,8 @@
 #define ACK_RESULT_REJECT_NOT_HOMED 0x02u
 #define ACK_RESULT_REJECT_FAULT     0x03u
 #define ACK_RESULT_REJECT_ZERO      0x04u
-#define ACK_RESULT_INVALID_ARGUMENT 0x05u
+#define ACK_RESULT_REJECT_NOT_READY 0x05u
+#define ACK_RESULT_INVALID_ARGUMENT 0x06u
 
 /* ── Forwarding mode ──────────────────────────────────────────────────── */
 typedef enum {
@@ -216,12 +217,12 @@ static void send_strike_status_reply(void)
     int32_t drum_pos = strike_get_drum_position();
     int32_t home_pos = strike_get_home_position();
     strike_metrics_t metrics;
-    uint8_t buf[33];
+    uint8_t buf[35];
     uint16_t crc;
 
     strike_get_metrics(&metrics);
 
-    buf[0]  = 30u;                                  /* LEN */
+    buf[0]  = 32u;                                  /* LEN */
     buf[1]  = CMD_STATUS_BASE | device_addr;
     buf[2]  = (uint8_t)strike_get_state();
     buf[3]  = strike_is_homed();
@@ -234,30 +235,32 @@ static void send_strike_status_reply(void)
     buf[10] = (uint8_t)(metrics.trigger_to_coast_ms & 0xFFu);
     buf[11] = (uint8_t)(metrics.trigger_to_rebound_ms >> 8);
     buf[12] = (uint8_t)(metrics.trigger_to_rebound_ms & 0xFFu);
-    buf[13] = (uint8_t)(metrics.trigger_to_ready_ms >> 8);
-    buf[14] = (uint8_t)(metrics.trigger_to_ready_ms & 0xFFu);
-    buf[15] = (uint8_t)(metrics.estimated_strike_velocity_dps >> 8);
-    buf[16] = (uint8_t)(metrics.estimated_strike_velocity_dps & 0xFFu);
-    buf[17] = (uint8_t)((uint32_t)drum_pos >> 24);
-    buf[18] = (uint8_t)((uint32_t)drum_pos >> 16);
-    buf[19] = (uint8_t)((uint32_t)drum_pos >> 8);
-    buf[20] = (uint8_t)((uint32_t)drum_pos & 0xFFu);
-    buf[21] = (uint8_t)((uint32_t)home_pos >> 24);
-    buf[22] = (uint8_t)((uint32_t)home_pos >> 16);
-    buf[23] = (uint8_t)((uint32_t)home_pos >> 8);
-    buf[24] = (uint8_t)((uint32_t)home_pos & 0xFFu);
-    buf[25] = (uint8_t)((uint16_t)metrics.home_offset >> 8);
-    buf[26] = (uint8_t)((uint16_t)metrics.home_offset & 0xFFu);
-    buf[27] = (uint8_t)((uint16_t)metrics.coast_distance >> 8);
-    buf[28] = (uint8_t)((uint16_t)metrics.coast_distance & 0xFFu);
-    buf[29] = (uint8_t)((uint16_t)metrics.homing_duty >> 8);
-    buf[30] = (uint8_t)((uint16_t)metrics.homing_duty & 0xFFu);
+    buf[13] = (uint8_t)(metrics.trigger_to_retrigger_ready_ms >> 8);
+    buf[14] = (uint8_t)(metrics.trigger_to_retrigger_ready_ms & 0xFFu);
+    buf[15] = (uint8_t)(metrics.trigger_to_ready_ms >> 8);
+    buf[16] = (uint8_t)(metrics.trigger_to_ready_ms & 0xFFu);
+    buf[17] = (uint8_t)(metrics.estimated_strike_velocity_dps >> 8);
+    buf[18] = (uint8_t)(metrics.estimated_strike_velocity_dps & 0xFFu);
+    buf[19] = (uint8_t)((uint32_t)drum_pos >> 24);
+    buf[20] = (uint8_t)((uint32_t)drum_pos >> 16);
+    buf[21] = (uint8_t)((uint32_t)drum_pos >> 8);
+    buf[22] = (uint8_t)((uint32_t)drum_pos & 0xFFu);
+    buf[23] = (uint8_t)((uint32_t)home_pos >> 24);
+    buf[24] = (uint8_t)((uint32_t)home_pos >> 16);
+    buf[25] = (uint8_t)((uint32_t)home_pos >> 8);
+    buf[26] = (uint8_t)((uint32_t)home_pos & 0xFFu);
+    buf[27] = (uint8_t)((uint16_t)metrics.home_offset >> 8);
+    buf[28] = (uint8_t)((uint16_t)metrics.home_offset & 0xFFu);
+    buf[29] = (uint8_t)((uint16_t)metrics.coast_distance >> 8);
+    buf[30] = (uint8_t)((uint16_t)metrics.coast_distance & 0xFFu);
+    buf[31] = (uint8_t)((uint16_t)metrics.homing_duty >> 8);
+    buf[32] = (uint8_t)((uint16_t)metrics.homing_duty & 0xFFu);
 
-    crc = crc16_ccitt(buf, 31);
-    buf[31] = (uint8_t)(crc >> 8);
-    buf[32] = (uint8_t)(crc & 0xFFu);
+    crc = crc16_ccitt(buf, 33);
+    buf[33] = (uint8_t)(crc >> 8);
+    buf[34] = (uint8_t)(crc & 0xFFu);
 
-    send_frame(buf, 33);
+    send_frame(buf, 35);
 }
 
 static void send_ack_reply(uint8_t subcmd, uint8_t result, uint16_t detail)
@@ -291,8 +294,11 @@ static uint8_t ack_result_from_strike_trigger(strike_trigger_result_t result)
     case STRIKE_TRIGGER_REJECT_FAULT:
         return ACK_RESULT_REJECT_FAULT;
     case STRIKE_TRIGGER_REJECT_ZERO:
-    default:
         return ACK_RESULT_REJECT_ZERO;
+    case STRIKE_TRIGGER_REJECT_NOT_READY:
+        return ACK_RESULT_REJECT_NOT_READY;
+    default:
+        return ACK_RESULT_INVALID_ARGUMENT;
     }
 }
 

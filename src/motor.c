@@ -33,6 +33,9 @@ static int32_t       measured_velocity;  /* signed RPM */
 static int8_t        drive_dir;          /* +1 / -1, commutation direction */
 static uint32_t      torque_limit_ma;
 static uint32_t      current_ma;
+static int32_t       current_filt_q8;    /* filtered current estimate in Q8 mA */
+static uint8_t       current_filt_initialized;
+static uint16_t      overcurrent_ticks;
 
 static int32_t       prev_enc_position;
 static int32_t       vel_filt_q8;       /* IIR-filtered velocity in Q8 */
@@ -118,6 +121,19 @@ static int32_t torque_clamp(int32_t duty)
     return (duty * (int32_t)torque_limit_ma) / (int32_t)current_ma;
 }
 
+static void enter_fault(fault_code_t code)
+{
+    target_duty = 0;
+    target_velocity = 0;
+    pid_reset(&vel_pid);
+    pid_reset(&pos_pid);
+    coasting = 0;
+    coast_armed = 0;
+    overcurrent_ticks = 0;
+    state = MOTOR_FAULT;
+    fault = code;
+}
+
 /* ── Public API ──────────────────────────────────────────────────────── */
 
 void motor_init(void)
@@ -132,6 +148,9 @@ void motor_init(void)
     drive_dir = 1;
     torque_limit_ma = DEFAULT_TORQUE_LIMIT_MA;
     current_ma = 0;
+    current_filt_q8 = 0;
+    current_filt_initialized = 0;
+    overcurrent_ticks = 0;
     prev_enc_position = 0;
     vel_filt_q8 = 0;
     vel_initialized = 0;
@@ -172,16 +191,19 @@ void motor_set_mode(ctrl_mode_t mode)
             pid_reset(&pos_pid);
             break;
         case CTRL_POSITION:
-            target_velocity = measured_velocity;
             if (ctrl_mode == CTRL_DUTY) {
                 /* Neither PID was running — seed vel_pid */
+                target_velocity = measured_velocity;
                 pid_preload(&vel_pid, last_applied_duty,
                             target_velocity, measured_velocity);
             }
-            pid_preload(&pos_pid,
-                        target_velocity * POS_ERROR_PRESCALE,
-                        target_position,
-                        -encoder_get_position());
+            /* Do not carry the incoming velocity-mode bias into the outer
+             * position loop. Near-home capture behaves better when the
+             * position controller starts from a clean state instead of
+             * inheriting a large homeward integrator/preload. */
+            pid_reset(&pos_pid);
+            pos_pid.prev_meas = -encoder_get_position();
+            target_velocity = 0;
             break;
         default:
             pid_reset(&vel_pid);
@@ -283,6 +305,9 @@ void motor_start(void)
     pid_reset(&pos_pid);
     pos_div = 0;
     coasting = 0;
+    current_filt_q8 = 0;
+    current_filt_initialized = 0;
+    overcurrent_ticks = 0;
     state = MOTOR_RUN;
 
     /* Set initial commutation direction */
@@ -307,6 +332,9 @@ void motor_stop(void)
     pid_reset(&pos_pid);
     coasting = 0;
     coast_armed = 0;
+    current_filt_q8 = 0;
+    current_filt_initialized = 0;
+    overcurrent_ticks = 0;
     state = MOTOR_IDLE;
 }
 
@@ -345,6 +373,9 @@ void motor_clear_fault(void)
     pwm_disable();
     coasting = 0;
     coast_armed = 0;
+    current_filt_q8 = 0;
+    current_filt_initialized = 0;
+    overcurrent_ticks = 0;
     state = MOTOR_IDLE;
 }
 
@@ -384,20 +415,48 @@ void motor_poll_fast(void)
 void motor_tick_control(void)
 {
     adc_snapshot_t adc_snapshot;
+    uint32_t avg_current_ma;
     uint32_t peak_current_ma;
     int32_t duty;
 
     /* Consume one ADC window accumulated at PWM rate since the previous control tick. */
     adc_consume_snapshot(&adc_snapshot);
-    current_ma = adc_current_raw_to_ma(adc_snapshot.avg_current_raw);
+    avg_current_ma = adc_current_raw_to_ma(adc_snapshot.avg_current_raw);
     peak_current_ma = adc_current_raw_to_ma(adc_snapshot.peak_current_raw);
 
-    /* Hard overcurrent fault uses the peak sample so short spikes still trip. */
-    if (peak_current_ma > CURRENT_LIMIT_MA) {
-        pwm_fault_brake();
-        state = MOTOR_FAULT;
-        fault = FAULT_OVERCURRENT;
-        return;
+    if (!current_filt_initialized) {
+        current_filt_q8 = (int32_t)(avg_current_ma << PID_SCALE_SHIFT);
+        current_filt_initialized = 1u;
+    } else {
+        int32_t avg_current_q8 = (int32_t)(avg_current_ma << PID_SCALE_SHIFT);
+        current_filt_q8 += (avg_current_q8 - current_filt_q8) / (1 << CURRENT_FILTER_SHIFT);
+    }
+    current_ma = (uint32_t)(current_filt_q8 / PID_SCALE);
+
+    /* Use a sustained peak-current detector for normal overcurrent trips so
+     * brief motion spikes do not fault immediately, while still preserving a
+     * higher instantaneous ceiling for real shoot-through / stall events. */
+    if (state == MOTOR_RUN) {
+        if (peak_current_ma > CURRENT_PEAK_LIMIT_MA) {
+            pwm_fault_brake();
+            enter_fault(FAULT_OVERCURRENT);
+            return;
+        }
+
+        if (peak_current_ma > CURRENT_LIMIT_MA) {
+            if (overcurrent_ticks < 0xFFFFu)
+                overcurrent_ticks++;
+        } else {
+            overcurrent_ticks = 0u;
+        }
+
+        if (overcurrent_ticks >= OVERCURRENT_FAULT_TICKS) {
+            pwm_fault_brake();
+            enter_fault(FAULT_OVERCURRENT);
+            return;
+        }
+    } else {
+        overcurrent_ticks = 0u;
     }
 
     /* Always update measured velocity (useful for status reporting) */

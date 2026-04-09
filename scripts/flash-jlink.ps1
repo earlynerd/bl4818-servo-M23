@@ -1,7 +1,7 @@
 param(
     [switch]$SkipBuild,
     [string]$JLinkExe,
-    [int]$Speed = 1000
+    [int]$Speed = 4000
 )
 
 Set-StrictMode -Version Latest

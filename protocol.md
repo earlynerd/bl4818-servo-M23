@@ -62,7 +62,7 @@ The first payload byte is the command type.
 | 0x03 | SET_ADDRESS | `[counter]` | 2 | master -> ring (S&F) |
 | 0x10 | BROADCAST_DUTY | `[duty_hi duty_lo] x N` | 1 + 2*N | master -> ring |
 | 0x20+addr | ADDRESSED_CMD | `[subcmd_flags] [data...]` | 2..8 | master -> ring |
-| 0x40+addr | STATUS_REPLY | query-dependent status payload | 11 or 17 | device -> master |
+| 0x40+addr | STATUS_REPLY | query-dependent status payload | 11, 17, or 32 | device -> master |
 | 0x50+addr | ACK_REPLY | `[subcmd] [result] [detail_hi] [detail_lo]` | 5 | device -> master |
 
 ### Addressed Sub-Commands
@@ -135,7 +135,8 @@ Addressed commands sent with reply mode `ACK` reply with type `0x50 + addr` and
 | `0x02` | REJECT_NOT_HOMED |
 | `0x03` | REJECT_FAULT |
 | `0x04` | REJECT_ZERO |
-| `0x05` | INVALID_ARGUMENT |
+| `0x05` | REJECT_NOT_READY |
+| `0x06` | INVALID_ARGUMENT |
 
 `detail` is command-specific. For `STRIKE`, `STRIKE_HOME`, `STRIKE_CANCEL`, and
 `SET_STRIKE_PARAM`, it reports the current 16-bit strike sequence. Other
@@ -151,12 +152,17 @@ commands currently return `detail = 0`.
 [target_hi] [target_lo] [position_b3] [position_b2] [position_b1] [position_b0]
 ```
 
-`QUERY_STRIKE` replies with the same type `0x40 + addr` and 30 payload bytes:
+`current` is the filtered control-window average current in mA. Firmware uses a
+separate sustained peak-current detector plus a higher instantaneous ceiling
+for `FAULT_OVERCURRENT`; the raw peak sample is not reported in this reply.
+
+`QUERY_STRIKE` replies with the same type `0x40 + addr` and 32 payload bytes:
 
 ```
 [type] [strike_state] [homed] [timing_flags]
 [seq_hi] [seq_lo] [duty_hi] [duty_lo]
 [t_coast_hi] [t_coast_lo] [t_rebound_hi] [t_rebound_lo]
+[t_retrigger_ready_hi] [t_retrigger_ready_lo]
 [t_ready_hi] [t_ready_lo] [vel_dps_hi] [vel_dps_lo]
 [drum_pos_b3] [drum_pos_b2] [drum_pos_b1] [drum_pos_b0]
 [home_pos_b3] [home_pos_b2] [home_pos_b1] [home_pos_b0]
@@ -174,10 +180,16 @@ commands currently return `detail = 0`.
 - `0x10` most recent strike was accepted as a retrigger while already active
 - `0x20` rebound timing was produced by coast timeout rather than detected reversal
 - `0x40` strike velocity estimate valid
+- `0x80` trigger-to-retrigger-ready time valid
 
 Timing fields are reported in milliseconds for the most recently accepted
 strike. `t_rebound` is an approximate impact proxy derived from rebound
 detection or coast timeout, not a direct drum-contact sensor.
+
+`t_retrigger_ready` is earlier than `t_ready`. It marks the first moment when
+the mallet is both near the configured home position and moving slowly enough
+that a new strike can be accepted with predictable timing. Firmware rejects a
+retrigger attempt before this point with `REJECT_NOT_READY`.
 
 `vel_dps` is an estimated strike approach speed in degrees per second,
 computed as the peak toward-drum angular velocity observed during the
@@ -190,9 +202,11 @@ When `home_offset` is changed while the actuator is homed and not in the
 strike approach, the parked home target is updated immediately.
 
 If a `STRIKE` command arrives while the actuator is already in DRIVING,
-COASTING, BRAKING, or CATCHING, the current recovery is aborted and a new
-strike attempt starts immediately. A compact `ACK_REPLY` for `STRIKE` reports
-`OK_RETRIGGERED` in that case.
+COASTING, RETURNING, or CATCHING, firmware only accepts it once
+`t_retrigger_ready` has become valid. Before that point the compact
+`ACK_REPLY` returns `REJECT_NOT_READY`. Once accepted, the current recovery is
+aborted and a new strike attempt starts immediately, and the `ACK_REPLY`
+reports `OK_RETRIGGERED`.
 
 ## Persistent Settings
 

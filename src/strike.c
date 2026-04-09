@@ -2,9 +2,10 @@
  * Strike Module — Mallet strike, rebound, and catch sequencer
  *
  * Orchestrates the motor control layer through a strike cycle:
- *   1. DRIVING  — open-loop duty toward drum (loudness control)
- *   2. COASTING — phases floating, momentum carries mallet to drum
- *   3. CATCHING — position servo returns mallet to home
+ *   1. DRIVING   — open-loop duty toward drum (loudness control)
+ *   2. COASTING  — phases floating, momentum carries mallet to drum
+ *   3. RETURNING — closed-loop velocity back toward home
+ *   4. CATCHING  — position servo settles onto home
  *
  * A new strike command received during an active cycle aborts the current
  * recovery path and immediately launches a fresh strike attempt.
@@ -61,6 +62,7 @@ static uint8_t        timing_flags;
 static int16_t        last_duty;
 static uint16_t       trigger_to_coast_ms;
 static uint16_t       trigger_to_rebound_ms;
+static uint16_t       trigger_to_retrigger_ready_ms;
 static uint16_t       trigger_to_ready_ms;
 static uint16_t       estimated_strike_velocity_dps;
 
@@ -87,6 +89,27 @@ static int32_t orient_strike_duty(int32_t duty)
         return -duty;
 
     return duty;
+}
+
+static int32_t home_direction_velocity(int32_t magnitude_rpm)
+{
+    return -drum_dir * magnitude_rpm;
+}
+
+static int32_t home_side_error(int32_t pos)
+{
+    return drum_dir * (pos - home_position);
+}
+
+static uint8_t retrigger_ready_now(int32_t pos, int32_t vel)
+{
+    if (abs_i32(pos - home_position) > STRIKE_RETRIGGER_DEADBAND)
+        return 0u;
+
+    if (abs_i32(vel) > STRIKE_RETRIGGER_VEL_THRESHOLD)
+        return 0u;
+
+    return 1u;
 }
 
 static uint16_t rpm_to_dps_clamped(int32_t rpm)
@@ -117,8 +140,8 @@ static void command_home_position_if_safe(void)
         return;
 
     if (state == STRIKE_HOMING && home_phase == HOME_MOVE_HOME) {
-        motor_set_mode(CTRL_POSITION);
         motor_set_position(home_position);
+        motor_set_mode(CTRL_POSITION);
         settle_counter = 0;
         return;
     }
@@ -127,12 +150,42 @@ static void command_home_position_if_safe(void)
         return;
 
     if (state == STRIKE_IDLE || state == STRIKE_CATCHING) {
-        motor_set_mode(CTRL_POSITION);
         motor_set_position(home_position);
+        motor_set_mode(CTRL_POSITION);
         motor_start();
         settle_counter = 0;
         state = STRIKE_CATCHING;
     }
+}
+
+static void start_catching(void)
+{
+    motor_set_position(home_position);
+    motor_set_mode(CTRL_POSITION);
+    settle_counter = 0;
+    state = STRIKE_CATCHING;
+}
+
+static void force_home_capture(void)
+{
+    motor_stop();
+    motor_set_position(home_position);
+    motor_set_mode(CTRL_POSITION);
+    motor_start();
+    settle_counter = 0;
+    state = STRIKE_CATCHING;
+}
+
+static void maybe_mark_retrigger_ready(int32_t pos, int32_t vel)
+{
+    if ((timing_flags & STRIKE_TIMING_RETRIGGER_READY_VALID) != 0u)
+        return;
+
+    if (!retrigger_ready_now(pos, vel))
+        return;
+
+    trigger_to_retrigger_ready_ms = elapsed_ms_since(active_start_ms);
+    timing_flags |= STRIKE_TIMING_RETRIGGER_READY_VALID;
 }
 
 static void begin_strike(int32_t duty, uint8_t retriggered)
@@ -147,6 +200,7 @@ static void begin_strike(int32_t duty, uint8_t retriggered)
     last_duty = (int16_t)duty;
     trigger_to_coast_ms = 0;
     trigger_to_rebound_ms = 0;
+    trigger_to_retrigger_ready_ms = 0;
     trigger_to_ready_ms = 0;
     estimated_strike_velocity_dps = 0;
     timing_flags |= STRIKE_TIMING_VELOCITY_VALID;
@@ -187,6 +241,7 @@ void strike_init(void)
     last_duty = 0;
     trigger_to_coast_ms = 0;
     trigger_to_rebound_ms = 0;
+    trigger_to_retrigger_ready_ms = 0;
     trigger_to_ready_ms = 0;
     estimated_strike_velocity_dps = 0;
 }
@@ -262,6 +317,8 @@ void strike_home(void)
 
 strike_trigger_result_t strike_trigger(int32_t duty)
 {
+    int32_t pos;
+    int32_t vel;
     uint8_t retriggered;
 
     if (!homed || state == STRIKE_HOMING)
@@ -272,6 +329,18 @@ strike_trigger_result_t strike_trigger(int32_t duty)
         return STRIKE_TRIGGER_REJECT_ZERO;
 
     retriggered = (state != STRIKE_IDLE);
+    pos = get_pos();
+    vel = motor_get_velocity();
+
+    if (retriggered) {
+        if (!retrigger_ready_now(pos, vel))
+            return STRIKE_TRIGGER_REJECT_NOT_READY;
+
+        if ((timing_flags & STRIKE_TIMING_RETRIGGER_READY_VALID) == 0u) {
+            trigger_to_retrigger_ready_ms = elapsed_ms_since(active_start_ms);
+            timing_flags |= STRIKE_TIMING_RETRIGGER_READY_VALID;
+        }
+    }
 
     motor_disarm_coast();
     if (retriggered)
@@ -285,8 +354,8 @@ void strike_cancel(void)
 {
     motor_disarm_coast();
     if (homed) {
-        motor_set_mode(CTRL_POSITION);
         motor_set_position(home_position);
+        motor_set_mode(CTRL_POSITION);
         motor_start();
     } else {
         motor_stop();
@@ -312,6 +381,7 @@ void strike_get_metrics(strike_metrics_t *metrics)
     metrics->last_duty = last_duty;
     metrics->trigger_to_coast_ms = trigger_to_coast_ms;
     metrics->trigger_to_rebound_ms = trigger_to_rebound_ms;
+    metrics->trigger_to_retrigger_ready_ms = trigger_to_retrigger_ready_ms;
     metrics->trigger_to_ready_ms = trigger_to_ready_ms;
     metrics->estimated_strike_velocity_dps = estimated_strike_velocity_dps;
     metrics->home_offset = (int16_t)home_offset;
@@ -326,6 +396,7 @@ void strike_tick(void)
     int32_t pos = get_pos();
     int32_t vel = motor_get_velocity();
     int32_t toward_drum_rpm = vel * drum_dir;
+    int32_t home_error = home_side_error(pos);
 
     timebase_ms++;
 
@@ -360,8 +431,8 @@ void strike_tick(void)
                 /* Home is opposite the drum direction by home_offset */
                 update_home_position_target();
 
-                motor_set_mode(CTRL_POSITION);
                 motor_set_position(home_position);
+                motor_set_mode(CTRL_POSITION);
 
                 settle_counter = 0;
                 home_phase = HOME_MOVE_HOME;
@@ -423,37 +494,53 @@ void strike_tick(void)
                 else
                     timing_flags &= (uint8_t)~STRIKE_TIMING_REBOUND_TIMEOUT;
 
-                /* Start braking from current velocity to avoid slamming
-                 * full reverse duty on a spinning motor (overcurrent) */
+                /* Re-enter control in velocity mode first, then hand off to
+                 * position hold once the mallet is close to home. This avoids
+                 * the immediate position-mode current spike that used to fault. */
                 brake_target = vel;
-                motor_set_mode(CTRL_VELOCITY);
                 motor_set_velocity(brake_target);
-                state = STRIKE_BRAKING;
+                motor_set_mode(CTRL_VELOCITY);
+                state = STRIKE_RETURNING;
             }
         }
         break;
 
-    /* ── Braking: ramp velocity toward zero, then position hold ─────── */
-    case STRIKE_BRAKING:
-        /* Ramp brake_target toward zero */
-        if (brake_target > STRIKE_BRAKE_RAMP_RATE)
-            brake_target -= STRIKE_BRAKE_RAMP_RATE;
-        else if (brake_target < -STRIKE_BRAKE_RAMP_RATE)
-            brake_target += STRIKE_BRAKE_RAMP_RATE;
+    /* ── Returning: ramp into an aggressive homeward velocity target ── */
+    case STRIKE_RETURNING:
+    {
+        int32_t desired_home_vel = home_direction_velocity(STRIKE_RETURN_VELOCITY_RPM);
+
+        if (brake_target < desired_home_vel - STRIKE_RETURN_RAMP_RATE)
+            brake_target += STRIKE_RETURN_RAMP_RATE;
+        else if (brake_target > desired_home_vel + STRIKE_RETURN_RAMP_RATE)
+            brake_target -= STRIKE_RETURN_RAMP_RATE;
         else
-            brake_target = 0;
+            brake_target = desired_home_vel;
+
         motor_set_velocity(brake_target);
 
-        if (abs_i32(vel) < STRIKE_BRAKE_VEL_THRESHOLD) {
-            motor_set_mode(CTRL_POSITION);
-            motor_set_position(home_position);
-            settle_counter = 0;
-            state = STRIKE_CATCHING;
+        /* The 1 kHz strike tick can skip over a small catch window. Once the
+         * mallet reaches or passes home, switch to position capture instead of
+         * continuing to drive away from home in velocity mode. */
+        if (home_error < -STRIKE_MAX_REBOUND_OVERSHOOT &&
+            toward_drum_rpm < 0) {
+            force_home_capture();
+        } else if (home_error <= STRIKE_CATCH_ENTRY_WINDOW) {
+            start_catching();
         }
         break;
+    }
 
     /* ── Catching: position hold at home ─────────────────────────────── */
     case STRIKE_CATCHING:
+        if (home_error < -STRIKE_MAX_REBOUND_OVERSHOOT &&
+            toward_drum_rpm < 0) {
+            force_home_capture();
+            break;
+        }
+
+        maybe_mark_retrigger_ready(pos, vel);
+
         if (abs_i32(pos - home_position) < STRIKE_SETTLE_DEADBAND)
             settle_counter++;
         else

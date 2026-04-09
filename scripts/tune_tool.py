@@ -38,9 +38,9 @@ import os
 import sys
 import time
 
-# Import the ring bus client from ring_tool.py in the same directory
+# Import the reusable ring bus client module from the same directory
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from ring_tool import (
+from ring_bus import (
     RingClientV2,
     MotorStatus,
     StrikeStatus,

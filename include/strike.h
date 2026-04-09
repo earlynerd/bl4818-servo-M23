@@ -20,7 +20,7 @@ typedef enum {
     STRIKE_HOMING   = 1,
     STRIKE_DRIVING  = 2,
     STRIKE_COASTING = 3,
-    STRIKE_BRAKING  = 4,
+    STRIKE_RETURNING = 4,
     STRIKE_CATCHING = 5
 } strike_state_t;
 
@@ -30,6 +30,7 @@ typedef enum {
     STRIKE_TRIGGER_REJECT_NOT_HOMED,
     STRIKE_TRIGGER_REJECT_FAULT,
     STRIKE_TRIGGER_REJECT_ZERO,
+    STRIKE_TRIGGER_REJECT_NOT_READY,
 } strike_trigger_result_t;
 
 #define STRIKE_TIMING_COAST_VALID      0x01u
@@ -39,6 +40,7 @@ typedef enum {
 #define STRIKE_TIMING_RETRIGGERED      0x10u
 #define STRIKE_TIMING_REBOUND_TIMEOUT  0x20u
 #define STRIKE_TIMING_VELOCITY_VALID   0x40u
+#define STRIKE_TIMING_RETRIGGER_READY_VALID 0x80u
 
 typedef struct {
     uint8_t  flags;
@@ -46,6 +48,7 @@ typedef struct {
     int16_t  last_duty;
     uint16_t trigger_to_coast_ms;
     uint16_t trigger_to_rebound_ms;
+    uint16_t trigger_to_retrigger_ready_ms;
     uint16_t trigger_to_ready_ms;
     uint16_t estimated_strike_velocity_dps;
     int16_t  home_offset;

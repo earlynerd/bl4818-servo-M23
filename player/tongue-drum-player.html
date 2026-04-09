@@ -1,0 +1,892 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RobotDrum Control</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Crimson+Pro:wght@300;400;600&family=JetBrains+Mono:wght@300;400&display=swap');
+  :root {
+    --bg: #121010; --surface: #1c1816; --surface-alt: #231f1b;
+    --border: #302a24; --border-light: #3d352d;
+    --accent: #c89640; --accent-dim: #8a6830; --accent-bright: #e8b850;
+    --text: #e4dbd0; --text-muted: #8a7e72; --text-dim: #5a5048;
+    --error: #c45050; --success: #6a9955; --blue: #5588cc;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: 'Crimson Pro', Georgia, serif; min-height: 100vh; }
+  ::selection { background: #c8964060; }
+  textarea:focus, input:focus, select:focus { outline: none; }
+
+  .label { font-size: 11px; text-transform: uppercase; letter-spacing: 1.5px; color: var(--text-muted); display: block; margin-bottom: 8px; font-family: 'JetBrains Mono', monospace; }
+  .pill {
+    background: var(--surface-alt); border: 1px solid var(--border); border-radius: 4px;
+    padding: 5px 10px; color: var(--text-muted); font-size: 12px; cursor: pointer;
+    font-family: 'Crimson Pro', serif; transition: all 0.15s;
+  }
+  .pill:hover { border-color: var(--accent); color: var(--text); }
+  .pill.active { background: var(--accent-dim); border-color: var(--accent); color: var(--accent-bright); }
+  .panel { background: var(--surface-alt); border-radius: 6px; padding: 14px; border: 1px solid var(--border); }
+
+  .header { border-bottom: 1px solid var(--border); padding: 20px 28px; }
+  .header h1 { font-family: 'Crimson Pro', Georgia, serif; font-weight: 300; font-size: 28px; color: var(--accent); letter-spacing: 1px; }
+  .header p { margin-top: 4px; font-size: 13px; color: var(--text-muted); }
+
+  .layout { display: flex; min-height: calc(100vh - 80px); }
+  .sidebar { width: 370px; flex-shrink: 0; padding: 24px; border-right: 1px solid var(--border); background: var(--surface); display: flex; flex-direction: column; gap: 18px; overflow-y: auto; }
+  .main { flex: 1; padding: 24px; display: flex; flex-direction: column; gap: 16px; overflow: hidden; }
+
+  .drop-zone {
+    border: 2px dashed var(--border); border-radius: 8px; padding: 28px; text-align: center;
+    cursor: pointer; transition: all 0.2s; background: var(--surface-alt);
+  }
+  .drop-zone:hover, .drop-zone.dragover { border-color: var(--accent); background: rgba(200,150,64,0.05); }
+  .drop-zone input { display: none; }
+
+  .play-btn, .stop-btn, .dl-btn {
+    border-radius: 6px; padding: 10px 24px; font-size: 15px; cursor: pointer;
+    font-family: 'Crimson Pro', serif; font-weight: 600; transition: all 0.15s;
+  }
+  .play-btn {
+    background: linear-gradient(135deg, var(--accent), var(--accent-dim));
+    border: none; color: var(--bg);
+  }
+  .play-btn:disabled { opacity: 0.4; cursor: default; }
+  .play-btn.playing { background: var(--accent); }
+  .stop-btn { background: var(--surface-alt); border: 1px solid var(--border); color: var(--text); }
+
+  .piano-roll { flex: 1; min-height: 200px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; display: flex; }
+  .piano-labels { width: 44px; flex-shrink: 0; border-right: 1px solid var(--border); display: flex; flex-direction: column; }
+  .piano-label { flex: 1; display: flex; align-items: center; justify-content: center; font-size: 10px; font-family: 'JetBrains Mono', monospace; }
+  .piano-grid { flex: 1; overflow-x: auto; position: relative; }
+  .note-bar { position: absolute; border-radius: 2px; transition: opacity 0.1s; }
+  .note-bar:hover { filter: brightness(1.3); }
+
+  .progress-bar { height: 4px; background: var(--border); border-radius: 2px; }
+  .progress-fill { height: 100%; background: var(--accent); border-radius: 2px; transition: width 0.05s linear; }
+
+  .output-modes { display: flex; gap: 6px; margin-bottom: 12px; }
+  .output-modes .pill { flex: 1; text-align: center; }
+  .midi-device-btn { display: block; width: 100%; text-align: left; margin-bottom: 4px; }
+  .refresh-btn { background: none; border: 1px solid var(--border); border-radius: 4px; padding: 3px 8px; color: var(--text-muted); font-size: 11px; cursor: pointer; font-family: 'JetBrains Mono', monospace; margin-left: 8px; }
+  .refresh-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .error-box { background: #2a1515; border: 1px solid var(--error); border-radius: 6px; padding: 12px; font-size: 13px; color: var(--error); }
+  .success-box { background: #1a2a15; border: 1px solid var(--success); border-radius: 6px; padding: 12px; font-size: 13px; color: var(--success); }
+  .stats { display: flex; gap: 20px; font-size: 12px; font-family: 'JetBrains Mono', monospace; color: var(--text-muted); flex-wrap: wrap; }
+
+  .tab-bar { display: flex; gap: 0; margin-bottom: 12px; }
+  .tab { flex: 1; text-align: center; padding: 8px 12px; background: var(--surface-alt); border: 1px solid var(--border); color: var(--text-muted); cursor: pointer; font-size: 13px; font-family: 'Crimson Pro', serif; transition: all 0.15s; }
+  .tab:first-child { border-radius: 6px 0 0 6px; }
+  .tab:last-child { border-radius: 0 6px 6px 0; }
+  .tab.active { background: var(--accent-dim); border-color: var(--accent); color: var(--accent-bright); }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @keyframes slideIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+  .slide-in { animation: slideIn 0.3s ease; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>RobotDrum Control</h1>
+  <p>MIDI player, calibration, and control panel for RobotDrum over BLE</p>
+</div>
+
+<div class="layout">
+  <div class="sidebar">
+
+    <!-- LOAD COMPOSITION -->
+    <div>
+      <label class="label">Load Composition</label>
+      <div class="tab-bar">
+        <div class="tab active" data-tab="paste">Paste JSON</div>
+        <div class="tab" data-tab="file">Load MIDI File</div>
+      </div>
+
+      <div id="tab-paste">
+        <textarea id="jsonInput" rows="6" placeholder='Paste the JSON from the artifact here, e.g.:&#10;{"title":"...","notes":[[pitch,beat,dur,vel],...],"tempo":92}'
+          style="width:100%;background:var(--surface-alt);border:1px solid var(--border);border-radius:6px;padding:10px;color:var(--text);font-size:12px;font-family:'JetBrains Mono',monospace;resize:vertical;line-height:1.4"></textarea>
+        <button id="loadJson" class="pill" style="width:100%;text-align:center;margin-top:8px;padding:8px;font-size:13px">Load JSON</button>
+      </div>
+
+      <div id="tab-file" style="display:none">
+        <div class="drop-zone" id="dropZone">
+          <div style="font-size:28px;margin-bottom:8px;opacity:0.4">🎵</div>
+          <div style="color:var(--text-muted);font-size:14px">Drop a .mid file here or click to browse</div>
+          <input type="file" id="fileInput" accept=".mid,.midi">
+        </div>
+      </div>
+    </div>
+
+    <div id="errorBox" class="error-box" style="display:none"></div>
+    <div id="successBox" class="success-box" style="display:none"></div>
+
+    <!-- OUTPUT ROUTING -->
+    <div class="panel">
+      <label class="label">Output Routing</label>
+      <div class="output-modes" id="outputModes"></div>
+      <div id="midiSection" style="display:none">
+        <div style="margin-bottom:10px">
+          <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;font-family:'JetBrains Mono',monospace;display:flex;align-items:center">
+            USB / System MIDI
+            <button class="refresh-btn" id="refreshMidi">↻ Refresh</button>
+          </div>
+          <div id="midiDevices"><span style="font-size:12px;color:var(--text-dim);font-style:italic">Scanning...</span></div>
+        </div>
+        <div>
+          <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;font-family:'JetBrains Mono',monospace">BLE MIDI (direct)</div>
+          <div id="bleSection"></div>
+        </div>
+      </div>
+      <div id="midiWarning" style="display:none;margin-top:8px;font-size:11px;color:var(--accent);font-style:italic">No MIDI output selected</div>
+    </div>
+
+    <!-- TEMPO OVERRIDE -->
+    <div>
+      <label class="label">Tempo Override</label>
+      <div style="display:flex;align-items:center;gap:12px">
+        <input type="checkbox" id="tempoOverride" style="accent-color:var(--accent)">
+        <input type="range" id="tempoSlider" min="40" max="160" value="92" disabled style="flex:1;-webkit-appearance:none;appearance:none;height:4px;border-radius:2px;background:var(--border);cursor:pointer">
+        <span id="tempoDisplay" style="font-family:'JetBrains Mono',monospace;font-size:14px;color:var(--accent);min-width:60px">—</span>
+      </div>
+    </div>
+
+    <!-- VELOCITY -->
+    <div>
+      <label class="label">Velocity</label>
+      <div style="display:flex;align-items:center;gap:12px">
+        <input type="range" id="velocitySlider" min="10" max="150" value="100" style="flex:1;-webkit-appearance:none;appearance:none;height:4px;border-radius:2px;background:var(--border);cursor:pointer">
+        <span id="velocityDisplay" style="font-family:'JetBrains Mono',monospace;font-size:14px;color:var(--accent);min-width:40px">100%</span>
+      </div>
+    </div>
+
+    <!-- TIMING -->
+    <div class="panel">
+      <label class="label">Mallet Constraints</label>
+      <div id="timingGrid" style="display:grid;grid-template-columns:1fr 1fr;gap:3px 12px"></div>
+    </div>
+
+    <!-- CONTROL PANEL -->
+    <div class="panel">
+      <label class="label">Control Panel</label>
+      <div id="ctrlContent"><div style="font-size:12px;color:var(--text-dim);font-style:italic">Connect BLE to enable controls</div></div>
+    </div>
+
+    <!-- COMMAND LOG -->
+    <div>
+      <label class="label">Command Log</label>
+      <pre id="cmdLog" style="background:var(--surface-alt);border:1px solid var(--border);border-radius:6px;padding:8px;font-size:11px;font-family:'JetBrains Mono',monospace;color:var(--text-muted);height:120px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;margin:0"></pre>
+    </div>
+  </div>
+
+  <!-- MAIN PANEL -->
+  <div class="main">
+    <div id="emptyState" style="flex:1;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:12px;opacity:0.4">
+      <div style="font-size:48px">🎵</div>
+      <p style="font-size:16px;color:var(--text-muted)">Load a composition from the sidebar</p>
+    </div>
+
+    <div id="resultPanel" style="display:none;flex-direction:column;gap:16px;flex:1;min-height:0">
+      <div style="display:flex;align-items:flex-end;justify-content:space-between;flex-wrap:wrap;gap:12px">
+        <div>
+          <h2 id="pieceTitle" style="font-family:'Crimson Pro',serif;font-weight:300;font-size:26px;color:var(--accent-bright)"></h2>
+          <p id="pieceInfo" style="margin-top:4px;font-size:12px;color:var(--text-muted);font-family:'JetBrains Mono',monospace"></p>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button class="play-btn" id="playBtn" disabled>▶ Play</button>
+          <button class="stop-btn" id="stopBtn" style="display:none">■ Stop</button>
+        </div>
+      </div>
+      <div id="progressContainer" class="progress-bar" style="display:none"><div id="progressFill" class="progress-fill" style="width:0%"></div></div>
+      <div class="piano-roll">
+        <div class="piano-labels" id="pianoLabels"></div>
+        <div class="piano-grid" id="pianoGrid"></div>
+      </div>
+      <div class="stats" id="statsBar"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ─── Data ────────────────────────────────────────────────────
+// How far ahead (ms) to send BLE MIDI notes so the ESP32 can buffer and
+// lag-compensate them. Must match kMidiLeadTimeMs on the firmware side.
+const MIDI_LEAD_MS = 1000;
+
+const NOTES = [
+  { midi: 52, name: "E3", cycle: 397 }, { midi: 55, name: "G3", cycle: 385 },
+  { midi: 57, name: "A3", cycle: 462 }, { midi: 60, name: "C4", cycle: 411 },
+  { midi: 62, name: "D4", cycle: 431 }, { midi: 64, name: "E4", cycle: 369 },
+  { midi: 65, name: "F4", cycle: 329 }, { midi: 67, name: "G4", cycle: 246 },
+  { midi: 69, name: "A4", cycle: 384 }, { midi: 72, name: "C5", cycle: 261 },
+];
+const PADDING = 0.8;
+const VALID = new Set(NOTES.map(n => n.midi));
+const CYCLE = {}, PNAME = {}, PIDX = {};
+NOTES.forEach((n, i) => { CYCLE[n.midi] = Math.ceil(n.cycle * PADDING); PNAME[n.midi] = n.name; PIDX[n.midi] = i; });
+const PCOL = { 52:"#8B5E3C",55:"#9B6B42",57:"#A87D50",60:"#B8915E",62:"#C4A46E",64:"#D4B87E",65:"#DCBE70",67:"#E8CC78",69:"#E8C050",72:"#F0D060" };
+
+const MIDI_SERVICE = "03b80e5a-ede8-4b33-a751-6ce34ec4c700";
+const MIDI_CHAR    = "7772e5db-3868-4112-a1a9-f2669d106bf3";
+const CMD_SERVICE  = "e3a10001-ede8-4b33-a751-6ce34ec4c700";
+const CMD_CHAR     = "e3a10002-ede8-4b33-a751-6ce34ec4c700";
+
+// ─── State ───────────────────────────────────────────────────
+let S = {
+  outputMode: "both", selectedMidiId: null, midiAccess: null, midiOutputs: [],
+  bleChar: null, cmdChar: null, bleDevice: null, bleStatus: "disconnected",
+  composition: null, playing: false, synth: null, timeouts: [], animFrame: null,
+  cmdResponseBuf: "", cmdResponseTimer: null,
+};
+
+// ─── BLE write queue ─────────────────────────────────────────
+// Serializes BLE writes so a note-off in flight can't cause a
+// subsequent note-on group write to fail silently.
+let bleWriteQueue = [];
+let bleWriting = false;
+async function queueBleWrite(packet) {
+  bleWriteQueue.push(packet);
+  if (bleWriting) return;
+  bleWriting = true;
+  while (bleWriteQueue.length > 0) {
+    const data = bleWriteQueue.shift();
+    if (S.bleChar) {
+      try { await S.bleChar.writeValueWithoutResponse(new Uint8Array(data)); }
+      catch (e) { console.warn("BLE write failed:", e); }
+    }
+  }
+  bleWriting = false;
+}
+
+// ─── MIDI Output ─────────────────────────────────────────────
+function bleMidiPacket(messages) {
+  const ts = performance.now() & 0x1fff;
+  const packet = [0x80 | ((ts >> 7) & 0x3f)];
+  const tsLow = 0x80 | (ts & 0x7f);
+  for (const msg of messages) packet.push(tsLow, ...msg);
+  return packet;
+}
+
+function scaleVelocity(v) {
+  return Math.max(1, Math.min(127, Math.round(v * (+document.getElementById("velocitySlider").value) / 100)));
+}
+
+function sendNoteOn(p, v) {
+  v = scaleVelocity(v);
+  if (S.selectedMidiId && S.midiAccess) { const port = S.midiAccess.outputs.get(S.selectedMidiId); if (port) port.send([0x90, p, v]); }
+  if (S.bleChar) queueBleWrite(bleMidiPacket([[0x90, p, v]]));
+}
+function sendNoteOff(p) {
+  if (S.selectedMidiId && S.midiAccess) { const port = S.midiAccess.outputs.get(S.selectedMidiId); if (port) port.send([0x80, p, 0]); }
+  if (S.bleChar) queueBleWrite(bleMidiPacket([[0x80, p, 0]]));
+}
+// Send multiple note-ons in a single BLE MIDI packet so simultaneous notes
+// from different tracks don't overwhelm the BLE connection with rapid writes.
+function sendNoteOnGroup(notes) {
+  if (S.selectedMidiId && S.midiAccess) {
+    const port = S.midiAccess.outputs.get(S.selectedMidiId);
+    if (port) for (const [p, v] of notes) port.send([0x90, p, v]);
+  }
+  if (S.bleChar) queueBleWrite(bleMidiPacket(notes.map(([p, v]) => [0x90, p, scaleVelocity(v)])));
+}
+function hasMidiOut() { return !!(S.selectedMidiId || S.bleChar); }
+
+// ─── MIDI init ───────────────────────────────────────────────
+async function initMidi() {
+  if (!navigator.requestMIDIAccess) {
+    document.getElementById("midiDevices").innerHTML = '<span style="font-size:12px;color:var(--error)">Web MIDI not supported. Use Chrome.</span>';
+    return;
+  }
+  try {
+    S.midiAccess = await navigator.requestMIDIAccess({ sysex: false });
+    refreshMidiDevices();
+    S.midiAccess.onstatechange = () => refreshMidiDevices();
+  } catch(e) {
+    document.getElementById("midiDevices").innerHTML = `<span style="font-size:12px;color:var(--error)">MIDI denied: ${e.message}</span>`;
+  }
+}
+
+function refreshMidiDevices() {
+  const el = document.getElementById("midiDevices");
+  if (!S.midiAccess) return;
+  S.midiOutputs = [];
+  S.midiAccess.outputs.forEach(p => S.midiOutputs.push({ id: p.id, name: p.name, mfr: p.manufacturer }));
+  if (!S.midiOutputs.length) {
+    el.innerHTML = '<span style="font-size:12px;color:var(--text-dim);font-style:italic">No MIDI devices found</span>';
+  } else {
+    el.innerHTML = S.midiOutputs.map(o => {
+      const active = S.selectedMidiId === o.id;
+      return `<button class="pill midi-device-btn ${active?'active':''}" data-id="${o.id}">${active?'● ':'○ '}${o.name}${o.mfr?' ('+o.mfr+')':''}</button>`;
+    }).join("");
+    el.querySelectorAll("[data-id]").forEach(b => b.addEventListener("click", () => {
+      S.selectedMidiId = S.selectedMidiId === b.dataset.id ? null : b.dataset.id;
+      refreshMidiDevices(); updateWarning();
+    }));
+  }
+  if (S.selectedMidiId && !S.midiOutputs.find(o => o.id === S.selectedMidiId)) S.selectedMidiId = null;
+  updateWarning();
+}
+
+function renderBLE() {
+  const el = document.getElementById("bleSection");
+  if (!navigator.bluetooth) { el.innerHTML = '<span style="font-size:12px;color:var(--text-dim)">Web Bluetooth not available</span>'; return; }
+  if (S.bleStatus === "connected") {
+    el.innerHTML = `<span style="font-size:12px;color:var(--success)">● ${S.bleDevice?.name||'Connected'}</span> <button class="pill" id="bleDc" style="font-size:11px;padding:3px 8px;color:var(--error)">Disconnect</button>`;
+    document.getElementById("bleDc")?.addEventListener("click", () => {
+      if (S.bleDevice?.gatt?.connected) S.bleDevice.gatt.disconnect();
+      S.bleDevice=null; S.bleChar=null; S.cmdChar=null; S.bleStatus="disconnected"; renderBLE(); updateWarning(); renderControlPanel();
+    });
+  } else {
+    const c = S.bleStatus==="connecting";
+    el.innerHTML = `<button class="pill" id="bleCo" style="width:100%;text-align:center;color:${c?'var(--text-dim)':'var(--blue)'}" ${c?'disabled':''}>${c?'Scanning...':'Connect BLE MIDI Device'}</button>`;
+    document.getElementById("bleCo")?.addEventListener("click", async () => {
+      S.bleStatus="connecting"; renderBLE();
+      try {
+        const d = await navigator.bluetooth.requestDevice({ filters: [{ services: [MIDI_SERVICE] }], optionalServices: [CMD_SERVICE] });
+        d.addEventListener("gattserverdisconnected", () => { S.bleDevice=null; S.bleChar=null; S.cmdChar=null; S.bleStatus="disconnected"; renderBLE(); updateWarning(); renderControlPanel(); });
+        const srv = await d.gatt.connect();
+        const svc = await srv.getPrimaryService(MIDI_SERVICE);
+        S.bleChar = await svc.getCharacteristic(MIDI_CHAR);
+        // Connect command channel
+        try {
+          const cmdSvc = await srv.getPrimaryService(CMD_SERVICE);
+          S.cmdChar = await cmdSvc.getCharacteristic(CMD_CHAR);
+          await S.cmdChar.startNotifications();
+          S.cmdChar.addEventListener("characteristicvaluechanged", onCmdResponse);
+        } catch(e) { console.warn("Command service not available:", e); S.cmdChar = null; }
+        S.bleDevice = d; S.bleStatus = "connected";
+      } catch(e) { console.error("BLE:", e); S.bleStatus = "disconnected"; }
+      renderBLE(); updateWarning(); renderControlPanel();
+      if (S.cmdChar) setTimeout(() => sendCommand("status"), 200);
+    });
+  }
+}
+
+function updateWarning() {
+  const show = (S.outputMode==="midi"||S.outputMode==="both") && !hasMidiOut();
+  document.getElementById("midiWarning").style.display = show ? "block" : "none";
+}
+
+// ─── BLE Command Channel ─────────────────────────────────────
+async function sendCommand(cmd) {
+  if (!S.cmdChar) return;
+  const log = document.getElementById("cmdLog");
+  if (log) { log.textContent += "> " + cmd + "\n"; log.scrollTop = log.scrollHeight; }
+  const enc = new TextEncoder();
+  try { await S.cmdChar.writeValueWithResponse(enc.encode(cmd)); }
+  catch(e) { if (log) log.textContent += "Error: " + e.message + "\n"; }
+}
+
+function onCmdResponse(event) {
+  const dec = new TextDecoder();
+  const chunk = dec.decode(event.target.value);
+  S.cmdResponseBuf += chunk;
+  clearTimeout(S.cmdResponseTimer);
+  S.cmdResponseTimer = setTimeout(() => {
+    const log = document.getElementById("cmdLog");
+    if (log) { log.textContent += S.cmdResponseBuf + "\n"; log.scrollTop = log.scrollHeight; }
+    // Auto-parse status responses to update the mallet display
+    if (S.cmdResponseBuf.includes("pitch=")) parseStatusResponse(S.cmdResponseBuf);
+    S.cmdResponseBuf = "";
+  }, 100);
+}
+
+function parseStatusResponse(text) {
+  const mallets = [];
+  const lines = text.split("\n");
+  for (const line of lines) {
+    const m = line.match(/#(\d+)\s+pitch=(\d+)\s+lagSoft=(\d+)\s+lagHard=(\d+)\s+pwrSoft=(\d+)\s+pwrHard=(\d+)\s+impactSoft=(\d+)\s+impactHard=(\d+)\s+strike=(\d+)%\s+rebPwr=(\d+)\s+valid=(\w+)(?:\s+cycleMs=(\d+))?/);
+    if (m) mallets.push({ idx: +m[1], pitch: +m[2], lagSoft: +m[3], lagHard: +m[4], pwrSoft: +m[5], pwrHard: +m[6], impactSoft: +m[7], impactHard: +m[8], strikePct: +m[9], reboundPwr: +m[10], valid: m[11]==="yes", cycleMs: m[12] ? +m[12] : null });
+  }
+  if (mallets.length > 0) {
+    S.malletStatus = mallets;
+    renderMalletStatus();
+  }
+}
+
+function renderMalletStatus() {
+  const el = document.getElementById("malletStatusGrid");
+  if (!el || !S.malletStatus) return;
+  el.innerHTML = S.malletStatus.map(m => {
+    const name = PNAME[m.pitch] || ("M" + m.pitch);
+    const col = PCOL[m.pitch] || "var(--text-muted)";
+    return `<div style="padding:5px 0;border-bottom:1px solid var(--border)">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:3px">
+        <span style="color:${col};font-weight:600">#${m.idx} ${name}</span>
+        <span style="color:var(--text-dim)">${m.lagHard}-${m.lagSoft}ms</span>
+        <span style="color:${m.valid?'var(--success)':'var(--error)'}">${m.valid?'OK':'--'}</span>
+      </div>
+      <div style="display:flex;gap:6px;align-items:center">
+        <label style="font-size:10px;color:var(--text-dim);width:42px">str ${m.strikePct}%</label>
+        <input type="range" min="50" max="250" step="5" value="${m.strikePct}" data-idx="${m.idx}" data-param="strike"
+          style="flex:1;height:3px;-webkit-appearance:none;appearance:none;background:var(--border);border-radius:2px;cursor:pointer">
+        <label style="font-size:10px;color:var(--text-dim);width:42px">reb ${m.reboundPwr}</label>
+        <input type="range" min="0" max="800" step="25" value="${m.reboundPwr}" data-idx="${m.idx}" data-param="rebound"
+          style="flex:1;height:3px;-webkit-appearance:none;appearance:none;background:var(--border);border-radius:2px;cursor:pointer">
+      </div>
+    </div>`;
+  }).join("");
+  // Wire up slider events
+  el.querySelectorAll("input[type=range]").forEach(slider => {
+    let debounce = 0;
+    slider.addEventListener("input", () => {
+      const label = slider.previousElementSibling;
+      if (slider.dataset.param === "strike") label.textContent = `str ${slider.value}%`;
+      else label.textContent = `reb ${slider.value}`;
+      clearTimeout(debounce);
+      debounce = setTimeout(() => {
+        const cmd = slider.dataset.param === "strike"
+          ? `setstrike ${slider.dataset.idx} ${slider.value}`
+          : `setrebound ${slider.dataset.idx} ${slider.value}`;
+        sendCommand(cmd);
+      }, 300);
+    });
+  });
+}
+
+function renderControlPanel() {
+  const el = document.getElementById("ctrlContent");
+  if (!el) return;
+  const ok = !!S.cmdChar;
+  if (!ok) {
+    el.innerHTML = '<div style="font-size:12px;color:var(--text-dim);font-style:italic">Connect BLE to enable controls</div>';
+    return;
+  }
+  el.innerHTML = `
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-bottom:8px">
+      <button class="pill ctrl-btn" data-cmd="status">Status</button>
+      <button class="pill ctrl-btn" data-cmd="balance">Balance</button>
+      <button class="pill ctrl-btn" data-cmd="arp">Arp</button>
+      <button class="pill ctrl-btn" data-cmd="loopstats">Loop Stats</button>
+      <button class="pill ctrl-btn" data-cmd="cal" style="color:var(--accent)">Calibrate All</button>
+      <button class="pill ctrl-btn" data-cmd="calrebound" style="color:var(--accent)">Cal Rebound</button>
+    </div>
+    <div id="malletStatusGrid" style="font-size:11px;font-family:'JetBrains Mono',monospace;margin-bottom:8px"></div>
+    <div style="display:flex;gap:4px;margin-bottom:4px">
+      <input id="cmdInput" type="text" placeholder="command..." style="flex:1;background:var(--surface);border:1px solid var(--border);border-radius:4px;padding:5px 8px;color:var(--text);font-size:12px;font-family:'JetBrains Mono',monospace">
+      <button class="pill" id="cmdSend" style="padding:5px 10px">Send</button>
+    </div>`;
+  el.querySelectorAll(".ctrl-btn").forEach(b => b.addEventListener("click", () => sendCommand(b.dataset.cmd)));
+  document.getElementById("cmdSend")?.addEventListener("click", () => {
+    const inp = document.getElementById("cmdInput");
+    if (inp?.value.trim()) { sendCommand(inp.value.trim()); inp.value = ""; }
+  });
+  document.getElementById("cmdInput")?.addEventListener("keydown", e => {
+    if (e.key === "Enter") { document.getElementById("cmdSend")?.click(); }
+  });
+  // Always render mallet sliders — use defaults if no status data yet
+  if (!S.malletStatus) {
+    S.malletStatus = NOTES.map((n, i) => ({ idx: i, pitch: n.midi, lagSoft: 0, lagHard: 0, strikePct: 150, reboundPwr: 250, valid: false, cycleMs: null }));
+  }
+  renderMalletStatus();
+}
+
+// ─── Parse MIDI file ─────────────────────────────────────────
+function parseMidiFile(buf) {
+  const d = new DataView(buf);
+  if (d.getUint32(0) !== 0x4d546864) throw new Error("Not a MIDI file");
+  const tpb = d.getUint16(12);
+  let tempo = 500000; // default 120 BPM
+
+  // Find all tracks
+  const notes = [];
+  let off = 14; // skip header
+
+  while (off < buf.byteLength) {
+    if (d.getUint32(off) !== 0x4d54726b) { off++; continue; }
+    const tlen = d.getUint32(off + 4);
+    let pos = off + 8;
+    const end = pos + tlen;
+    let tick = 0;
+    let running = 0;
+    const pending = {}; // pitch -> {tick, vel}
+
+    while (pos < end) {
+      // Read VLQ delta
+      let delta = 0;
+      while (pos < end) {
+        const b = d.getUint8(pos++);
+        delta = (delta << 7) | (b & 0x7f);
+        if (!(b & 0x80)) break;
+      }
+      tick += delta;
+
+      if (pos >= end) break;
+      let status = d.getUint8(pos);
+
+      // Meta event
+      if (status === 0xff) {
+        pos++;
+        const type = d.getUint8(pos++);
+        let len = 0;
+        while (pos < end) { const b = d.getUint8(pos++); len = (len << 7) | (b & 0x7f); if (!(b & 0x80)) break; }
+        if (type === 0x51 && len === 3) {
+          tempo = (d.getUint8(pos) << 16) | (d.getUint8(pos+1) << 8) | d.getUint8(pos+2);
+        }
+        pos += len;
+        continue;
+      }
+
+      // Sysex
+      if (status === 0xf0 || status === 0xf7) {
+        pos++;
+        let len = 0;
+        while (pos < end) { const b = d.getUint8(pos++); len = (len << 7) | (b & 0x7f); if (!(b & 0x80)) break; }
+        pos += len;
+        continue;
+      }
+
+      // Running status
+      if (status < 0x80) { status = running; }
+      else { running = status; pos++; }
+
+      const cmd = status & 0xf0;
+
+      if (cmd === 0x90 || cmd === 0x80) {
+        const pitch = d.getUint8(pos++);
+        const vel = d.getUint8(pos++);
+        if (cmd === 0x90 && vel > 0) {
+          pending[pitch] = { tick, vel };
+        } else {
+          // Note off
+          if (pending[pitch]) {
+            const on = pending[pitch];
+            const beatOn = on.tick / tpb;
+            const beatOff = tick / tpb;
+            notes.push([pitch, beatOn, beatOff - beatOn, on.vel]);
+            delete pending[pitch];
+          }
+        }
+      } else if (cmd === 0xc0 || cmd === 0xd0) {
+        pos++; // 1 data byte
+      } else {
+        pos += 2; // 2 data bytes
+      }
+    }
+
+    // Close any pending notes
+    for (const p in pending) {
+      const on = pending[p];
+      notes.push([+p, on.tick / tpb, 1, on.vel]);
+    }
+
+    off = end;
+  }
+
+  const bpm = Math.round(60000000 / tempo);
+  return { notes, tempo: bpm };
+}
+
+// ─── Constraint filter ───────────────────────────────────────
+function applyConstraints(notes, tempo) {
+  const mspb = 60000 / tempo;
+  const sorted = [...notes].sort((a, b) => a[1] - b[1]);
+  const last = {}; const kept = []; let dropped = 0;
+  for (const n of sorted) {
+    const gap = CYCLE[n[0]] || 554;
+    if (n[0] in last && n[1] - last[n[0]] < gap / mspb - 0.001) { dropped++; continue; }
+    kept.push(n); last[n[0]] = n[1];
+  }
+  return { notes: kept, dropped };
+}
+
+// ─── Load composition ────────────────────────────────────────
+function loadFromJSON(text) {
+  hideMessages();
+  try {
+    const cleaned = text.replace(/```json\s*/g, "").replace(/```\s*/g, "").trim();
+    let parsed;
+    try { parsed = JSON.parse(cleaned); } catch {
+      const m = cleaned.match(/\{[\s\S]*\}/);
+      if (m) parsed = JSON.parse(m[0]); else throw new Error("Could not parse JSON");
+    }
+    if (!parsed.notes?.length) throw new Error("No notes found");
+
+    const tempo = parsed.tempo || 92;
+    const validNotes = parsed.notes.filter(n => Array.isArray(n) && n.length >= 4 && VALID.has(n[0]));
+
+    S.composition = {
+      title: parsed.title || "Untitled",
+      validNotes, tempo,
+    };
+    reapplyConstraints();
+    showComposition();
+    showSuccess(`Loaded "${S.composition.title}" — ${S.composition.notes.length} notes, ${S.composition.durationSec.toFixed(1)}s`);
+  } catch (e) {
+    showError(e.message);
+  }
+}
+
+function loadFromMIDI(buf, filename) {
+  hideMessages();
+  try {
+    const { notes: raw, tempo } = parseMidiFile(buf);
+    // Filter to valid pitches
+    const valid = raw.filter(n => VALID.has(n[0]));
+    if (!valid.length) throw new Error("No notes matching the tongue drum's pitches found in this MIDI file");
+
+    const name = filename.replace(/\.[^.]+$/, "").replace(/[_-]/g, " ");
+
+    S.composition = {
+      title: name, validNotes: valid, tempo,
+      rawCount: raw.length,
+    };
+    reapplyConstraints();
+    showComposition();
+    showSuccess(`Loaded "${name}" — ${S.composition.notes.length} notes at ${tempo} BPM`);
+  } catch (e) {
+    showError("MIDI parse error: " + e.message);
+  }
+}
+
+// Re-filter notes for the current effective tempo and update derived fields.
+function reapplyConstraints() {
+  const c = S.composition;
+  if (!c || !c.validNotes) return;
+  const tempo = getEffectiveTempo();
+  const { notes, dropped } = applyConstraints(c.validNotes, tempo);
+  const maxBeat = notes.length ? Math.max(...notes.map(n => n[1] + n[2])) : 0;
+  c.notes = notes;
+  c.maxBeat = maxBeat;
+  c.durationSec = (maxBeat * 60) / tempo;
+  if (c.rawCount != null) {
+    c.statsText = `${c.rawCount} total → ${c.validNotes.length} valid pitches → ${notes.length} after constraints (${dropped} adjusted)`;
+  } else {
+    c.statsText = `${c.validNotes.length} valid notes, ${dropped} adjusted for mallet timing`;
+  }
+}
+
+// ─── Display ─────────────────────────────────────────────────
+function showComposition() {
+  const c = S.composition;
+  const tempo = getEffectiveTempo();
+  document.getElementById("emptyState").style.display = "none";
+  document.getElementById("resultPanel").style.display = "flex";
+  document.getElementById("pieceTitle").textContent = c.title;
+  document.getElementById("pieceInfo").innerHTML = `${c.notes.length} notes · ${c.durationSec.toFixed(1)}s · ${tempo} BPM`;
+  document.getElementById("statsBar").innerHTML = c.statsText;
+  document.getElementById("playBtn").disabled = false;
+
+  // Set tempo slider
+  document.getElementById("tempoSlider").value = tempo;
+  document.getElementById("tempoDisplay").textContent = tempo + " BPM";
+
+  renderPianoRoll();
+  updateTimingGrid(tempo);
+}
+
+function getEffectiveTempo() {
+  if (document.getElementById("tempoOverride").checked) return +document.getElementById("tempoSlider").value;
+  return S.composition ? S.composition.tempo : 92;
+}
+
+function onTempoChange() {
+  if (S.composition) {
+    reapplyConstraints();
+    showComposition();
+  } else {
+    updateTimingGrid(getEffectiveTempo());
+  }
+}
+
+function renderPianoRoll() {
+  const c = S.composition; if (!c) return;
+  const grid = document.getElementById("pianoGrid");
+  const w = Math.max(600, c.maxBeat * 18 + 40);
+  const rn = NOTES.length;
+  let h = `<div style="position:relative;width:${w}px;height:100%;min-height:200px">`;
+  for (let i = 0; i <= Math.ceil(c.maxBeat); i++) {
+    h += `<div style="position:absolute;left:${i*18+20}px;top:0;bottom:0;width:1px;background:${i%4===0?'var(--border-light)':'rgba(48,42,36,0.25)'}"></div>`;
+  }
+  for (let i = 0; i <= Math.ceil(c.maxBeat/4); i++) {
+    h += `<div style="position:absolute;left:${i*4*18+18}px;top:2px;font-size:9px;color:var(--text-dim);font-family:'JetBrains Mono',monospace">${i*4}</div>`;
+  }
+  [...NOTES].reverse().forEach((n, i) => {
+    h += `<div style="position:absolute;left:0;right:0;top:${(i/rn)*100}%;height:${100/rn}%;background:${i%2?'rgba(48,42,36,0.08)':'transparent'};border-bottom:1px solid rgba(48,42,36,0.1)"></div>`;
+  });
+  h += `<div id="cursor" style="position:absolute;left:20px;top:0;bottom:0;width:2px;background:var(--accent-bright);opacity:0;z-index:10"></div>`;
+  for (const [pitch, time, dur, vel] of c.notes) {
+    const ri = rn - 1 - PIDX[pitch]; const rh = 100 / rn;
+    h += `<div class="note-bar" title="${PNAME[pitch]} b:${time.toFixed(2)} d:${dur.toFixed(2)} v:${vel}" style="left:${time*18+20}px;width:${Math.max(4,dur*18-1)}px;top:calc(${ri*rh}% + 2px);height:calc(${rh}% - 4px);background:${PCOL[pitch]};opacity:${0.4+(vel/127)*0.6}"></div>`;
+  }
+  h += `</div>`;
+  grid.innerHTML = h;
+}
+
+function updateTimingGrid(tempo) {
+  const el = document.getElementById("timingGrid");
+  const sorted = [...NOTES].sort((a, b) => a.cycle - b.cycle);
+  el.innerHTML = sorted.map(n => {
+    const beats = (CYCLE[n.midi] / (60000 / tempo)).toFixed(2);
+    return `<div style="font-size:12px;font-family:'JetBrains Mono',monospace;display:flex;justify-content:space-between"><span style="color:${PCOL[n.midi]}">${n.name}</span><span style="color:var(--text-dim)">${beats}b / ${CYCLE[n.midi]}ms</span></div>`;
+  }).join("");
+}
+
+function showError(msg) { const el = document.getElementById("errorBox"); el.textContent = msg; el.style.display = "block"; }
+function showSuccess(msg) { const el = document.getElementById("successBox"); el.textContent = msg; el.style.display = "block"; }
+function hideMessages() { document.getElementById("errorBox").style.display = "none"; document.getElementById("successBox").style.display = "none"; }
+
+// ─── Playback ────────────────────────────────────────────────
+function stopPlayback() {
+  if (S.synth) try { S.synth.releaseAll(); } catch {}
+  S.timeouts.forEach(id => clearTimeout(id)); S.timeouts = [];
+  if (S.animFrame) cancelAnimationFrame(S.animFrame);
+  S.playing = false;
+  document.getElementById("playBtn").textContent = "▶ Play";
+  document.getElementById("playBtn").classList.remove("playing");
+  document.getElementById("stopBtn").style.display = "none";
+  document.getElementById("progressContainer").style.display = "none";
+  const cur = document.getElementById("cursor"); if (cur) cur.style.opacity = "0";
+}
+
+async function play() {
+  if (!S.composition) return;
+  if (S.playing) { stopPlayback(); return; }
+
+  const c = S.composition;
+  const tempo = getEffectiveTempo();
+  const useSpeaker = S.outputMode === "speaker" || S.outputMode === "both";
+  const useMidi = (S.outputMode === "midi" || S.outputMode === "both") && hasMidiOut();
+
+  if (useSpeaker) {
+    await Tone.start();
+    if (!S.synth) {
+      S.synth = new Tone.PolySynth(Tone.Synth, {
+        maxPolyphony: 10, voice: Tone.Synth,
+        options: { oscillator: { type: "triangle8" }, envelope: { attack: 0.003, decay: 2.2, sustain: 0, release: 1.8 } },
+      }).toDestination();
+      S.synth.volume.value = -6;
+    }
+  }
+
+  const spb = 60 / tempo;
+  const totalMs = c.maxBeat * spb * 1000;
+  S.timeouts = [];
+
+  // When MIDI output is active, the ESP32 adds MIDI_LEAD_MS of buffer
+  // before playing each note. Delay the speaker by the same amount so
+  // drum and speaker stay in sync. No delay for speaker-only mode.
+  const preRollMs = useMidi ? MIDI_LEAD_MS : 0;
+  const start = performance.now();
+
+  // Group notes by scheduled time so simultaneous notes (e.g. from
+  // different MIDI tracks) are sent as a single BLE packet instead of
+  // rapid-fire individual writes that can overwhelm the BLE connection.
+  if (useMidi) {
+    const noteOnsByMs = new Map();
+    for (const [pitch, beat, dur, vel] of c.notes) {
+      const ms = Math.round(beat * spb * 1000);
+      if (!noteOnsByMs.has(ms)) noteOnsByMs.set(ms, []);
+      noteOnsByMs.get(ms).push([pitch, vel]);
+    }
+    for (const [ms, group] of noteOnsByMs) {
+      S.timeouts.push(setTimeout(() => sendNoteOnGroup(group), ms));
+    }
+    for (const [pitch, beat, dur] of c.notes) {
+      const ms = beat * spb * 1000;
+      S.timeouts.push(setTimeout(() => sendNoteOff(pitch), ms + dur * spb * 1000));
+    }
+  }
+  if (useSpeaker) {
+    for (const [pitch, beat, dur, vel] of c.notes) {
+      const ms = beat * spb * 1000;
+      const durSec = dur * spb;
+      S.timeouts.push(setTimeout(() => {
+        try { S.synth.triggerAttackRelease(Tone.Frequency(pitch,"midi").toFrequency(), durSec, undefined, scaleVelocity(vel)/127); } catch {}
+      }, ms + preRollMs));
+    }
+  }
+  S.timeouts.push(setTimeout(stopPlayback, totalMs + preRollMs + 300));
+  S.playing = true;
+  document.getElementById("playBtn").textContent = "■ Stop";
+  document.getElementById("playBtn").classList.add("playing");
+  document.getElementById("progressContainer").style.display = "block";
+  const cur = document.getElementById("cursor"); if (cur) cur.style.opacity = "0.8";
+
+  (function animate() {
+    const elapsed = performance.now() - start - preRollMs;
+    const p = Math.min(1, Math.max(0, elapsed) / totalMs);
+    document.getElementById("progressFill").style.width = p * 100 + "%";
+    if (cur) cur.style.left = (p * c.maxBeat * 18 + 20) + "px";
+    if (p < 1 && S.playing) S.animFrame = requestAnimationFrame(animate);
+  })();
+}
+
+// ─── Init ────────────────────────────────────────────────────
+document.addEventListener("DOMContentLoaded", () => {
+  // Piano labels
+  document.getElementById("pianoLabels").innerHTML = [...NOTES].reverse().map(n =>
+    `<div class="piano-label" style="color:${PCOL[n.midi]}">${n.name}</div>`
+  ).join("");
+
+  // Tabs
+  document.querySelectorAll(".tab").forEach(t => t.addEventListener("click", () => {
+    document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
+    t.classList.add("active");
+    document.getElementById("tab-paste").style.display = t.dataset.tab === "paste" ? "block" : "none";
+    document.getElementById("tab-file").style.display = t.dataset.tab === "file" ? "block" : "none";
+  }));
+
+  // Load JSON
+  document.getElementById("loadJson").addEventListener("click", () => loadFromJSON(document.getElementById("jsonInput").value));
+
+  // File input
+  const dz = document.getElementById("dropZone");
+  const fi = document.getElementById("fileInput");
+  dz.addEventListener("click", () => fi.click());
+  dz.addEventListener("dragover", e => { e.preventDefault(); dz.classList.add("dragover"); });
+  dz.addEventListener("dragleave", () => dz.classList.remove("dragover"));
+  dz.addEventListener("drop", e => { e.preventDefault(); dz.classList.remove("dragover"); if (e.dataTransfer.files[0]) readMidiFile(e.dataTransfer.files[0]); });
+  fi.addEventListener("change", () => { if (fi.files[0]) readMidiFile(fi.files[0]); });
+
+  function readMidiFile(file) {
+    const r = new FileReader();
+    r.onload = () => loadFromMIDI(r.result, file.name);
+    r.readAsArrayBuffer(file);
+  }
+
+  // Output modes
+  const om = document.getElementById("outputModes");
+  const modes = [["speaker","🔊 Speaker"],["midi","🎹 MIDI"],["both","🔊+🎹 Both"]];
+  om.innerHTML = modes.map(([id,l]) => `<button class="pill ${S.outputMode===id?'active':''}" data-mode="${id}">${l}</button>`).join("");
+  om.querySelectorAll("[data-mode]").forEach(b => b.addEventListener("click", () => {
+    S.outputMode = b.dataset.mode;
+    om.querySelectorAll(".pill").forEach(x => x.classList.remove("active")); b.classList.add("active");
+    document.getElementById("midiSection").style.display = (S.outputMode==="midi"||S.outputMode==="both") ? "block" : "none";
+    updateWarning();
+  }));
+  // Show midi section by default since outputMode is "both"
+  document.getElementById("midiSection").style.display = "block";
+
+  // Tempo override
+  const tov = document.getElementById("tempoOverride");
+  const tsl = document.getElementById("tempoSlider");
+  tov.addEventListener("change", () => { tsl.disabled = !tov.checked; onTempoChange(); });
+  let tempoDebounce = 0;
+  tsl.addEventListener("input", () => {
+    document.getElementById("tempoDisplay").textContent = tsl.value + " BPM";
+    updateTimingGrid(+tsl.value);
+    clearTimeout(tempoDebounce);
+    tempoDebounce = setTimeout(() => { if (S.composition) { reapplyConstraints(); showComposition(); } }, 150);
+  });
+
+  // Velocity
+  const vsl = document.getElementById("velocitySlider");
+  vsl.addEventListener("input", () => {
+    document.getElementById("velocityDisplay").textContent = vsl.value + "%";
+  });
+
+  // Buttons
+  document.getElementById("playBtn").addEventListener("click", play);
+  document.getElementById("stopBtn").addEventListener("click", stopPlayback);
+  document.getElementById("refreshMidi").addEventListener("click", () => S.midiAccess ? refreshMidiDevices() : initMidi());
+
+  initMidi();
+  renderBLE();
+  renderControlPanel();
+  updateTimingGrid(92);
+});
+</script>
+</body>
+</html>

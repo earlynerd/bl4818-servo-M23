@@ -186,6 +186,63 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override automatic home-offset selection by choosing a specific candidate from the home-offset sweep",
     )
 
+    sp = sub.add_parser(
+        "build-strike-calibration-grid",
+        help="Build a multi-home-offset JSON calibration profile from a nested duty sweep CSV",
+    )
+    sp.add_argument(
+        "--duty-csv",
+        required=True,
+        help="CSV produced by a multi-home-offset duty sweep; configured_home_offset must vary across rows",
+    )
+    sp.add_argument("--out", required=True, help="Path to write the calibration profile JSON")
+    sp.add_argument("--address", type=int, help="Optional ring address metadata to store in the profile")
+    sp.add_argument("--midi-note", type=int, help="Optional MIDI note metadata to store in the profile")
+    sp.add_argument("--name", help="Optional human-readable note or mallet name")
+    sp.add_argument(
+        "--preferred-home-offset",
+        type=int,
+        help="Override automatic home-offset selection by choosing a specific offset profile",
+    )
+
+    sp = sub.add_parser(
+        "measure-strike-calibration-grid",
+        help="Sweep duty across multiple home offsets and emit a multi-offset calibration profile",
+    )
+    sp.add_argument("address", type=int)
+    sp.add_argument(
+        "--home-offsets",
+        nargs="+",
+        type=int,
+        help="Explicit home offset values; overrides --home-offset-start/--stop/--step",
+    )
+    sp.add_argument("--home-offset-start", type=int, default=800, help="Generated home-offset sweep start (default: 800)")
+    sp.add_argument("--home-offset-stop", type=int, default=1600, help="Generated home-offset sweep stop, inclusive (default: 1600)")
+    sp.add_argument("--home-offset-step", type=int, default=200, help="Generated home-offset sweep step (default: 200)")
+    sp.add_argument(
+        "--duties",
+        nargs="+",
+        type=int,
+        help="Explicit strike duty values; overrides --duty-start/--stop/--step",
+    )
+    sp.add_argument("--duty-start", type=int, default=100, help="Generated duty sweep start (default: 100)")
+    sp.add_argument("--duty-stop", type=int, default=800, help="Generated duty sweep stop, inclusive (default: 800)")
+    sp.add_argument("--duty-step", type=int, default=20, help="Generated duty sweep step (default: 20)")
+    sp.add_argument("--repeats", type=int, default=3, help="Samples to collect per home-offset/duty point (default: 3)")
+    sp.add_argument("--poll-ms", type=int, default=10, help="Strike-status polling interval in ms (default: 10)")
+    sp.add_argument("--idle-timeout-ms", type=int, default=3000, help="Timeout waiting for idle before each strike (default: 3000)")
+    sp.add_argument("--strike-timeout-ms", type=int, default=3000, help="Timeout waiting for each strike to finish (default: 3000)")
+    sp.add_argument("--pause-ms", type=int, default=100, help="Pause after each completed strike sample (default: 100)")
+    sp.add_argument("--csv", help="Write raw nested sweep samples to CSV")
+    sp.add_argument("--out", required=True, help="Path to write the calibration profile JSON")
+    sp.add_argument("--midi-note", type=int, help="Optional MIDI note metadata to store in the profile")
+    sp.add_argument("--name", help="Optional human-readable note or mallet name")
+    sp.add_argument(
+        "--preferred-home-offset",
+        type=int,
+        help="Override automatic home-offset selection by choosing a specific offset profile",
+    )
+
     sp = sub.add_parser("broadcast", help="Broadcast duty to all devices")
     sp.add_argument("duties", nargs="+", type=int, help="One signed duty per device")
 
@@ -221,6 +278,26 @@ def main() -> int:
         print(f"Calibration profile saved to {args.out}")
         print(f"lookup_home_offset={profile['lookup_home_offset']} suggested_home_offset={profile['suggested_home_offset']}")
         print(f"scheduler_ready={int(profile['scheduler_ready'])} lookup_entries={len(profile['midi_velocity_lookup'])}")
+        for warning in profile["warnings"]:
+            print(f"WARNING: {warning}")
+        return 0
+
+    if args.command == "build-strike-calibration-grid":
+        duty_samples = load_strike_timing_csv(args.duty_csv)
+        profile = build_strike_calibration_grid_profile(
+            duty_samples=duty_samples,
+            address=args.address,
+            midi_note=args.midi_note,
+            note_name=args.name,
+            preferred_home_offset=args.preferred_home_offset,
+        )
+        with open(args.out, "w", encoding="ascii") as json_file:
+            json.dump(profile, json_file, indent=2)
+            json_file.write("\n")
+
+        print(f"Calibration grid profile saved to {args.out}")
+        print(f"suggested_home_offset={profile['suggested_home_offset']} profile_count={len(profile['home_offset_profiles'])}")
+        print(f"scheduler_ready={int(profile['scheduler_ready'])}")
         for warning in profile["warnings"]:
             print(f"WARNING: {warning}")
         return 0
@@ -412,6 +489,115 @@ def main() -> int:
                 )
                 if args.plot_out:
                     print(f"Plot saved to {args.plot_out}")
+
+        elif args.command == "measure-strike-calibration-grid":
+            if args.repeats < 1:
+                raise RingError("--repeats must be at least 1")
+            if args.poll_ms < 0 or args.idle_timeout_ms < 1 or args.strike_timeout_ms < 1 or args.pause_ms < 0:
+                raise RingError("poll/timeout/pause values must be non-negative, and timeouts must be at least 1 ms")
+
+            home_offsets = list(args.home_offsets) if args.home_offsets else build_sweep_values(
+                args.home_offset_start,
+                args.home_offset_stop,
+                args.home_offset_step,
+            )
+            duties = list(args.duties) if args.duties else build_sweep_values(
+                args.duty_start,
+                args.duty_stop,
+                args.duty_step,
+            )
+            if any(duty == 0 for duty in duties):
+                raise RingError("duty sweep must not include 0 because STRIKE 0 is ignored")
+
+            total_samples = len(home_offsets) * len(duties) * args.repeats
+            samples: list[StrikeTimingSample] = []
+            completed = 0
+
+            print(
+                f"Collecting strike calibration grid for addr={args.address} "
+                f"home_offsets={home_offsets} duties={duties} repeats={args.repeats}"
+            )
+
+            for home_offset in home_offsets:
+                status = ensure_home_offset(
+                    client=client,
+                    address=args.address,
+                    home_offset=home_offset,
+                    poll_ms=args.poll_ms,
+                    idle_timeout_ms=args.idle_timeout_ms,
+                )
+                print(
+                    f"Home offset {home_offset} ready "
+                    f"(drum_pos={status.drum_position} home_pos={status.home_position})"
+                )
+
+                for duty in duties:
+                    for repeat_index in range(1, args.repeats + 1):
+                        completed += 1
+                        print(
+                            f"[{completed}/{total_samples}] "
+                            f"home_offset={home_offset} duty={duty} repeat={repeat_index}"
+                        )
+                        sample = collect_strike_timing_sample(
+                            client=client,
+                            address=args.address,
+                            sweep_param="duty",
+                            sweep_value=duty,
+                            strike_duty=0,
+                            repeat_index=repeat_index,
+                            poll_ms=args.poll_ms,
+                            idle_timeout_ms=args.idle_timeout_ms,
+                            strike_timeout_ms=args.strike_timeout_ms,
+                        )
+                        samples.append(sample)
+                        coast_text = "n/a" if sample.coast_ms is None else str(sample.coast_ms)
+                        rebound_text = "n/a" if sample.rebound_ms is None else str(sample.rebound_ms)
+                        retrigger_ready_text = (
+                            "n/a" if sample.retrigger_ready_ms is None else str(sample.retrigger_ready_ms)
+                        )
+                        ready_text = "n/a" if sample.ready_ms is None else str(sample.ready_ms)
+                        velocity_text = (
+                            "n/a" if sample.estimated_strike_velocity_dps is None
+                            else str(sample.estimated_strike_velocity_dps)
+                        )
+                        print(
+                            f"  seq={sample.sequence} home_offset={sample.configured_home_offset} "
+                            f"requested_duty={sample.requested_duty} applied_duty={sample.applied_duty} "
+                            f"coast_ms={coast_text} rebound_ms={rebound_text} "
+                            f"retrigger_ready_ms={retrigger_ready_text} ready_ms={ready_text} "
+                            f"strike_vel_dps={velocity_text}"
+                        )
+                        if args.pause_ms > 0:
+                            time.sleep(args.pause_ms / 1000.0)
+
+            if args.csv:
+                write_strike_timing_csv(samples, args.csv)
+                print(f"Raw CSV saved to {args.csv}")
+
+            profile = build_strike_calibration_grid_profile(
+                duty_samples=samples,
+                address=args.address,
+                midi_note=args.midi_note,
+                note_name=args.name,
+                preferred_home_offset=args.preferred_home_offset,
+            )
+            with open(args.out, "w", encoding="ascii") as json_file:
+                json.dump(profile, json_file, indent=2)
+                json_file.write("\n")
+
+            print(f"Calibration grid profile saved to {args.out}")
+            print(
+                f"suggested_home_offset={profile['suggested_home_offset']} "
+                f"profile_count={len(profile['home_offset_profiles'])} "
+                f"scheduler_ready={int(profile['scheduler_ready'])}"
+            )
+            for summary in profile["home_offset_tradeoff"]:
+                print(
+                    f"  home_offset={summary['home_offset']} "
+                    f"repeat_min_ms={summary['repeat_min_ms']} "
+                    f"lead_min_ms={summary['lead_min_ms']} "
+                    f"strength_max_dps={summary['strength_max_dps']}"
+                )
 
         elif args.command == "broadcast":
             if client.device_count is not None and len(args.duties) != client.device_count:

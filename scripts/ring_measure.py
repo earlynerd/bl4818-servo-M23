@@ -589,6 +589,167 @@ def build_strike_calibration_profile(
     }
 
 
+def ensure_home_offset(
+    client: RingClientV2,
+    address: int,
+    home_offset: int,
+    poll_ms: int,
+    idle_timeout_ms: int,
+) -> StrikeStatus:
+    baseline = wait_for_strike_idle(client, address, idle_timeout_ms, poll_ms)
+
+    if not baseline.homed:
+        raise RingError("strike actuator is not homed; run strike-home first")
+
+    if baseline.home_offset == home_offset:
+        return baseline
+
+    response = client.set_strike_param(
+        address,
+        STRIKE_PARAM_HOME_OFFSET,
+        home_offset,
+        reply_mode=REPLY_MODE_ACK,
+    )
+    if not isinstance(response, CommandAck) or not response.accepted:
+        result_text = "no response" if response is None else response.result_name
+        raise RingError(f"set home-offset was not accepted: {result_text}")
+
+    status = wait_for_strike_idle(client, address, idle_timeout_ms, poll_ms)
+    if status.home_offset is not None and status.home_offset != home_offset:
+        raise RingError(
+            f"home_offset verification failed: expected {home_offset}, got {status.home_offset}"
+        )
+    return status
+
+
+def build_home_offset_profile(
+    home_offset: int,
+    duty_aggregates: list[StrikeTimingAggregate],
+) -> dict[str, object]:
+    if not duty_aggregates:
+        raise RingError(f"home_offset {home_offset} has no duty aggregate data")
+
+    lookup = build_midi_velocity_lookup(duty_aggregates)
+    strength_values = [entry["target_strength_dps"] for entry in lookup]
+    duty_values = [entry["duty"] for entry in lookup]
+    lead_values = [entry["lead_ms"] for entry in lookup]
+    repeat_values = [entry["repeat_ms"] for entry in lookup]
+    settle_values = [entry["settle_ms"] for entry in lookup]
+
+    return {
+        "home_offset": home_offset,
+        "summary": {
+            "sample_points": len(duty_aggregates),
+            "strength_min_dps": min(strength_values),
+            "strength_max_dps": max(strength_values),
+            "duty_min": min(duty_values),
+            "duty_max": max(duty_values),
+            "lead_min_ms": min(lead_values),
+            "lead_max_ms": max(lead_values),
+            "repeat_min_ms": min(repeat_values),
+            "repeat_max_ms": max(repeat_values),
+            "settle_min_ms": min(settle_values),
+            "settle_max_ms": max(settle_values),
+            "drum_position": duty_aggregates[0].drum_position,
+            "home_position": duty_aggregates[0].home_position,
+        },
+        "duty_curve": [aggregate_to_profile_dict(aggregate) for aggregate in duty_aggregates],
+        "midi_velocity_lookup": lookup,
+    }
+
+
+def choose_home_offset_profile(
+    profiles: list[dict[str, object]],
+    preferred_home_offset: Optional[int] = None,
+) -> dict[str, object]:
+    if not profiles:
+        raise RingError("no home_offset profiles are available")
+
+    if preferred_home_offset is not None:
+        for profile in profiles:
+            if profile["home_offset"] == preferred_home_offset:
+                return profile
+        raise RingError(f"preferred home offset {preferred_home_offset} is not present in the profile")
+
+    return min(
+        profiles,
+        key=lambda profile: (
+            profile["summary"]["repeat_min_ms"],
+            profile["summary"]["settle_min_ms"],
+            -profile["summary"]["strength_max_dps"],
+            profile["home_offset"],
+        ),
+    )
+
+
+def build_strike_calibration_grid_profile(
+    duty_samples: list[StrikeTimingSample],
+    address: Optional[int] = None,
+    midi_note: Optional[int] = None,
+    note_name: Optional[str] = None,
+    preferred_home_offset: Optional[int] = None,
+) -> dict[str, object]:
+    if not duty_samples:
+        raise RingError("duty sweep is empty")
+
+    if duty_samples[0].sweep_param != "duty":
+        raise RingError("calibration grid requires duty sweep samples")
+
+    grouped: dict[int, list[StrikeTimingSample]] = {}
+    for sample in duty_samples:
+        if sample.sweep_param != "duty":
+            raise RingError("calibration grid CSV contains non-duty sweep samples")
+        if sample.configured_home_offset is None:
+            raise RingError("calibration grid CSV is missing configured_home_offset values")
+        grouped.setdefault(sample.configured_home_offset, []).append(sample)
+
+    profiles = [
+        build_home_offset_profile(home_offset, aggregate_strike_timing_samples(group))
+        for home_offset, group in sorted(grouped.items())
+    ]
+    suggested_profile = choose_home_offset_profile(
+        profiles,
+        preferred_home_offset=preferred_home_offset,
+    )
+
+    identity: dict[str, object] = {}
+    if address is not None:
+        identity["address"] = address
+    if midi_note is not None:
+        identity["midi_note"] = midi_note
+    if note_name:
+        identity["name"] = note_name
+
+    return {
+        "schema_version": 2,
+        "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
+        "scheduler_ready": True,
+        "warnings": [],
+        "identity": identity,
+        "lookup_basis": {
+            "lead_time_field": "rebound_ms",
+            "repeat_time_field": "retrigger_ready_ms",
+            "settle_time_field": "ready_ms",
+            "velocity_proxy_field": "estimated_strike_velocity_dps",
+            "impact_time_note": "rebound_ms is an inferred impact proxy from rebound detection, not a contact sensor",
+        },
+        "suggested_home_offset": suggested_profile["home_offset"],
+        "home_offset_selection_reason": (
+            "minimum repeat_min_ms, then minimum settle_min_ms, then maximum strength_max_dps"
+            if preferred_home_offset is None
+            else "user-selected preferred_home_offset"
+        ),
+        "home_offset_tradeoff": [
+            {
+                "home_offset": profile["home_offset"],
+                **profile["summary"],
+            }
+            for profile in profiles
+        ],
+        "home_offset_profiles": profiles,
+    }
+
+
 def write_strike_timing_csv(samples: list[StrikeTimingSample], path: str) -> None:
     fieldnames = [
         "sweep_param",
@@ -797,10 +958,14 @@ __all__ = [
     "aggregate_strike_timing_samples",
     "aggregate_to_profile_dict",
     "build_midi_velocity_lookup",
+    "build_home_offset_profile",
     "build_strike_calibration_profile",
+    "build_strike_calibration_grid_profile",
     "build_sweep_values",
     "choose_home_offset_candidate",
+    "choose_home_offset_profile",
     "collect_strike_timing_sample",
+    "ensure_home_offset",
     "int_or_none",
     "interpolate_curve",
     "load_strike_timing_csv",

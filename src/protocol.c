@@ -61,6 +61,8 @@
 #define SUBCMD_QUERY_STRIKE     0x11u
 #define SUBCMD_SAVE_SETTINGS    0x12u
 #define SUBCMD_CLEAR_SETTINGS   0x13u
+#define SUBCMD_SET_CUR_PID      0x14u
+#define SUBCMD_SET_CURRENT      0x15u
 #define SUBCMD_MASK             0x3Fu
 #define SUBCMD_REPLY_MASK       0xC0u
 #define SUBCMD_REPLY_FULL       0x00u
@@ -581,6 +583,31 @@ static void handle_addressed_cmd(uint8_t cmd_type, const uint8_t *payload, uint8
     case SUBCMD_CLEAR_SETTINGS:
         persist_clear();
         send_addressed_reply(reply_mode, subcmd, ACK_RESULT_OK, 0u, FULL_REPLY_STATUS);
+        break;
+    case SUBCMD_SET_CUR_PID:
+        ack_result = ACK_RESULT_INVALID_ARGUMENT;
+        if (len >= 6u) {
+            int16_t kp = (int16_t)(((uint16_t)payload[2] << 8) | payload[3]);
+            int16_t ki = (int16_t)(((uint16_t)payload[4] << 8) | payload[5]);
+            motor_set_cur_pid(kp, ki);
+            ack_result = ACK_RESULT_OK;
+        }
+        send_addressed_reply(reply_mode, subcmd, ack_result, 0u, FULL_REPLY_STATUS);
+        break;
+    case SUBCMD_SET_CURRENT:
+        ack_result = ACK_RESULT_INVALID_ARGUMENT;
+        if (len >= 4u) {
+            int16_t ma = (int16_t)(((uint16_t)payload[2] << 8) | payload[3]);
+            if (motor_get_state() == MOTOR_FAULT) {
+                ack_result = ACK_RESULT_REJECT_FAULT;
+            } else {
+                motor_set_current(ma);
+                motor_set_mode(CTRL_TORQUE);
+                motor_start();
+                ack_result = ACK_RESULT_OK;
+            }
+        }
+        send_addressed_reply(reply_mode, subcmd, ack_result, 0u, FULL_REPLY_STATUS);
         break;
     default:
         break;

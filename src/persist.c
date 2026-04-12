@@ -11,7 +11,7 @@
 
 #define PERSIST_FLASH_BASE   (FMC_APROM_BASE + FMC_APROM_SIZE - FMC_FLASH_PAGE_SIZE)
 #define PERSIST_MAGIC        0x31545350UL  /* "PST1" */
-#define PERSIST_VERSION      1u
+#define PERSIST_VERSION      2u
 
 #define PERSIST_FLAG_ZERO_VALID       0x0001u
 #define PERSIST_FLAG_STRIKE_CAL_VALID 0x0002u
@@ -35,6 +35,8 @@ typedef struct {
     int32_t pos_ki;
     int32_t pos_kd;
     uint32_t torque_limit_ma;
+    int32_t cur_kp;
+    int32_t cur_ki;
     uint16_t crc;
     uint16_t reserved1;
 } persist_record_t;
@@ -87,6 +89,7 @@ static void persist_capture_runtime(persist_record_t *record)
     record->vel_ff = motor_get_vel_ff();
     motor_get_pos_pid(&record->pos_kp, &record->pos_ki, &record->pos_kd);
     record->torque_limit_ma = motor_get_torque_limit();
+    motor_get_cur_pid(&record->cur_kp, &record->cur_ki);
     record->crc = persist_crc(record);
 }
 
@@ -146,6 +149,7 @@ void persist_init(void)
     motor_set_vel_pid(record->vel_kp, record->vel_ki, record->vel_kd);
     motor_set_vel_ff(record->vel_ff);
     motor_set_pos_pid(record->pos_kp, record->pos_ki, record->pos_kd);
+    motor_set_cur_pid(record->cur_kp, record->cur_ki);
 
     if ((record->flags & PERSIST_FLAG_ZERO_VALID) != 0u)
         encoder_set_zero_reference(record->zero_angle);

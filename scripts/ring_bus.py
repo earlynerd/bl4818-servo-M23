@@ -54,6 +54,8 @@ SUBCMD_QUERY_STATUS  = 0x10
 SUBCMD_QUERY_STRIKE  = 0x11
 SUBCMD_SAVE_SETTINGS = 0x12
 SUBCMD_CLEAR_SETTINGS = 0x13
+SUBCMD_SET_CUR_PID   = 0x14
+SUBCMD_SET_CURRENT   = 0x15
 SUBCMD_MASK          = 0x3F
 SUBCMD_REPLY_FULL    = 0x00
 SUBCMD_REPLY_ACK     = 0x40
@@ -111,7 +113,7 @@ def crc16_ccitt(data: bytes, init: int = 0xFFFF) -> int:
 
 MOTOR_STATES  = {0: "IDLE", 1: "RUN", 2: "FAULT"}
 FAULT_CODES   = {0: "NONE", 1: "OVERCURRENT", 2: "HALL_INVALID"}
-CTRL_MODES    = {0: "DUTY", 1: "VELOCITY", 2: "POSITION"}
+CTRL_MODES    = {0: "DUTY", 1: "VELOCITY", 2: "POSITION", 3: "TORQUE"}
 STRIKE_STATES = {0: "IDLE", 1: "HOMING", 2: "DRIVING", 3: "COASTING", 4: "RETURNING", 5: "CATCHING"}
 SUBCMD_NAMES  = {
     SUBCMD_SET_DUTY: "SET_DUTY",
@@ -133,6 +135,8 @@ SUBCMD_NAMES  = {
     SUBCMD_QUERY_STRIKE: "QUERY_STRIKE",
     SUBCMD_SAVE_SETTINGS: "SAVE_SETTINGS",
     SUBCMD_CLEAR_SETTINGS: "CLEAR_SETTINGS",
+    SUBCMD_SET_CUR_PID: "SET_CUR_PID",
+    SUBCMD_SET_CURRENT: "SET_CURRENT",
 }
 ACK_RESULT_NAMES = {
     ACK_RESULT_OK: "OK",
@@ -543,6 +547,23 @@ class RingClientV2:
                 raise RingError(f"{name} must fit in int16")
         return self._addressed_command(address, SUBCMD_SET_POS_PID, struct.pack(">hhh", kp, ki, kd), reply_mode)
 
+    def set_current(self, address: int, current_ma: int, reply_mode: str = REPLY_MODE_FULL) -> AddressedReply:
+        if current_ma < -32768 or current_ma > 32767:
+            raise RingError("current must fit in int16")
+        return self._addressed_command(address, SUBCMD_SET_CURRENT, struct.pack(">h", current_ma), reply_mode)
+
+    def set_cur_pid(
+        self,
+        address: int,
+        kp: int,
+        ki: int,
+        reply_mode: str = REPLY_MODE_FULL,
+    ) -> AddressedReply:
+        for name, value in [("kp", kp), ("ki", ki)]:
+            if value < -32768 or value > 32767:
+                raise RingError(f"{name} must fit in int16")
+        return self._addressed_command(address, SUBCMD_SET_CUR_PID, struct.pack(">hh", kp, ki), reply_mode)
+
     def zero_position(self, address: int, reply_mode: str = REPLY_MODE_FULL) -> AddressedReply:
         return self._addressed_command(address, SUBCMD_ZERO_POS, reply_mode=reply_mode)
 
@@ -747,7 +768,7 @@ class RingClientV2:
 
 
 def format_status(status: MotorStatus) -> str:
-    target_label = "duty" if status.mode == 0 else "rpm"
+    target_label = {0: "duty", 3: "mA"}.get(status.mode, "rpm")
     return (
         f"addr={status.address} state={status.state_name} fault={status.fault_name} "
         f"mode={status.mode_name} current={status.current_ma}mA hall={status.hall} "
@@ -851,6 +872,8 @@ __all__ = [
     "SUBCMD_REPLY_FULL",
     "SUBCMD_REPLY_NONE",
     "SUBCMD_SAVE_SETTINGS",
+    "SUBCMD_SET_CUR_PID",
+    "SUBCMD_SET_CURRENT",
     "SUBCMD_SET_DUTY",
     "SUBCMD_SET_FF",
     "SUBCMD_SET_MODE",

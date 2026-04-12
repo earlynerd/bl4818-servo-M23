@@ -9,7 +9,8 @@ Examples:
     python ring_tool.py -p COM7 set-velocity 0 500
     python ring_tool.py -p COM7 zero-pos 0
     python ring_tool.py -p COM7 save-settings 0
-    python ring_tool.py -p COM7 set-pid 0 128 16 0
+    python ring_tool.py -p COM7 set-pid 0 3840 75 75
+    python ring_tool.py -p COM7 set-cur-pid 0 64 8
     python ring_tool.py -p COM7 set-mode 0 1
     python ring_tool.py -p COM7 torque 0 2500
     python ring_tool.py -p COM7 stop 0
@@ -99,23 +100,43 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("clear-settings", help="Erase persisted settings from flash for next boot")
     sp.add_argument("address", type=int)
 
-    sp = sub.add_parser("set-mode", help="Set control mode (0=DUTY, 1=VELOCITY, 2=POSITION)")
+    sp = sub.add_parser("set-mode", help="Set control mode")
     sp.add_argument("address", type=int)
-    sp.add_argument("mode", type=int, choices=[0, 1, 2], help="0=DUTY, 1=VELOCITY, 2=POSITION")
+    sp.add_argument("mode", type=int, choices=[0, 1, 2, 3], help="0=DUTY, 1=VELOCITY, 2=POSITION, 3=TORQUE")
 
     sp = sub.add_parser("set-velocity", help="Set velocity target (RPM, auto-sets VELOCITY mode)")
     sp.add_argument("address", type=int)
     sp.add_argument("rpm", type=int, help="Signed int16 target RPM")
 
-    sp = sub.add_parser("set-pid", help="Set velocity PID gains (Q8 fixed-point)")
+    sp = sub.add_parser("set-pid", help="Set velocity PID gains (Q8, output=mA)")
     sp.add_argument("address", type=int)
-    sp.add_argument("kp", type=int, help="Proportional gain (Q8: 256 = 1.0)")
+    sp.add_argument("kp", type=int, help="Proportional gain (Q8: 256 = 1.0 mA/RPM)")
     sp.add_argument("ki", type=int, help="Integral gain (Q8)")
     sp.add_argument("kd", type=int, help="Derivative gain (Q8)")
 
     sp = sub.add_parser("set-ff", help="Set velocity feedforward gain (Q8)")
     sp.add_argument("address", type=int)
-    sp.add_argument("gain", type=int, help="Duty per RPM of back-EMF (Q8: 256 = 1.0)")
+    sp.add_argument("gain", type=int, help="mA per RPM feedforward (Q8: 256 = 1.0)")
+
+    sp = sub.add_parser("set-cur-pid", help="Set current PI gains (Q8, inner torque loop)")
+    sp.add_argument("address", type=int)
+    sp.add_argument("kp", type=int, help="Proportional gain (Q8: 256 = 1.0 duty/mA)")
+    sp.add_argument("ki", type=int, help="Integral gain (Q8)")
+
+    sp = sub.add_parser("set-current", help="Set current target (mA, auto-sets TORQUE mode)")
+    sp.add_argument("address", type=int)
+    sp.add_argument("milliamps", type=int, help="Signed int16 target current in mA")
+
+    sp = sub.add_parser("current-step", help="Step response capture for current loop tuning")
+    sp.add_argument("address", type=int)
+    sp.add_argument("milliamps", type=int, help="Step target in mA")
+    sp.add_argument("--pre-ms", type=int, default=200, help="Baseline at 0 mA before step (default: 200)")
+    sp.add_argument("--duration-ms", type=int, default=1000, help="Capture after step (default: 1000)")
+    sp.add_argument("--csv", help="Write samples to CSV")
+    sp.add_argument("--plot-out", help="Save plot image to this path")
+    sp.add_argument("--no-show", action="store_true", help="Do not open the plot window")
+    sp.add_argument("--no-plot", action="store_true", help="Collect data without plotting")
+    sp.add_argument("--title", help="Custom plot title")
 
     sp = sub.add_parser("strike", help="Trigger a strike")
     sp.add_argument("address", type=int)
@@ -375,6 +396,12 @@ def main() -> int:
         elif args.command == "set-ff":
             print(format_status(client.set_ff(args.address, args.gain)))
 
+        elif args.command == "set-cur-pid":
+            print(format_status(client.set_cur_pid(args.address, args.kp, args.ki)))
+
+        elif args.command == "set-current":
+            print(format_status(client.set_current(args.address, args.milliamps)))
+
         elif args.command == "strike":
             print(format_status(client.strike(args.address, args.duty)))
 
@@ -616,6 +643,83 @@ def main() -> int:
                 except RingCRCError as exc:
                     print(f"  (crc error: {exc})")
                 time.sleep(interval)
+
+        elif args.command == "current-step":
+            target_ma = args.milliamps
+            pre_ms = args.pre_ms
+            duration_ms = args.duration_ms
+
+            print(
+                f"Current step response: addr={args.address} "
+                f"target={target_ma}mA pre={pre_ms}ms duration={duration_ms}ms"
+            )
+
+            # Start in torque mode at 0 mA and let it settle
+            client.set_current(args.address, 0)
+            time.sleep(0.05)
+
+            samples: list[tuple[float, int, int]] = []  # (time_ms, setpoint, measured)
+            t0 = time.monotonic()
+            step_at = pre_ms / 1000.0
+            end_at = (pre_ms + duration_ms) / 1000.0
+            stepped = False
+
+            while True:
+                elapsed = time.monotonic() - t0
+                if elapsed >= end_at:
+                    break
+
+                if not stepped and elapsed >= step_at:
+                    client.set_current(args.address, target_ma, reply_mode=REPLY_MODE_NONE)
+                    stepped = True
+
+                try:
+                    status = client.query_status(args.address)
+                    setpoint = target_ma if stepped else 0
+                    samples.append(((time.monotonic() - t0) * 1000.0, setpoint, status.current_ma))
+                except (RingTimeout, RingCRCError):
+                    pass
+
+            client.stop(args.address)
+
+            actual_hz = len(samples) / ((pre_ms + duration_ms) / 1000.0) if samples else 0
+            print(f"Captured {len(samples)} samples ({actual_hz:.0f} Hz effective)")
+
+            if args.csv:
+                with open(args.csv, "w") as f:
+                    f.write("time_ms,setpoint_ma,measured_ma\n")
+                    for t, sp, m in samples:
+                        f.write(f"{t:.1f},{sp},{m}\n")
+                print(f"CSV saved to {args.csv}")
+
+            if not args.no_plot:
+                try:
+                    import matplotlib.pyplot as plt
+
+                    times = [s[0] for s in samples]
+                    setpoints = [s[1] for s in samples]
+                    measured = [s[2] for s in samples]
+
+                    fig, ax = plt.subplots(figsize=(10, 5))
+                    ax.plot(times, measured, "b-", linewidth=1.5, label="Measured")
+                    ax.step(times, setpoints, "r--", linewidth=1, label="Setpoint", where="post")
+                    ax.axvline(x=pre_ms, color="gray", linestyle=":", alpha=0.5, label="Step")
+                    ax.set_xlabel("Time (ms)")
+                    ax.set_ylabel("Current (mA)")
+                    ax.set_title(
+                        args.title
+                        or f"Current step response addr {args.address}: 0 \u2192 {target_ma} mA"
+                    )
+                    ax.legend()
+                    ax.grid(True, alpha=0.3)
+
+                    if args.plot_out:
+                        fig.savefig(args.plot_out, dpi=150, bbox_inches="tight")
+                        print(f"Plot saved to {args.plot_out}")
+                    if not args.no_show:
+                        plt.show()
+                except ImportError:
+                    print("matplotlib not available, skipping plot")
 
         return 0
 

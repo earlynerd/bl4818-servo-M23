@@ -2,11 +2,12 @@
  * Motor Control for Nuvoton M2003
  *
  * Supports three control modes:
- *   CTRL_DUTY     — open-loop signed duty cycle (pass-through)
- *   CTRL_VELOCITY — closed-loop RPM via encoder-derived velocity PID (5 kHz)
- *   CTRL_POSITION — cascaded: position PID (1 kHz) → velocity PID (5 kHz)
+ *   CTRL_DUTY     — open-loop signed duty cycle (torque-clamped)
+ *   CTRL_VELOCITY — closed-loop RPM: velocity PID → current PI → duty
+ *   CTRL_POSITION — cascaded: position PID → velocity PID → current PI → duty
  *
- * Control loop runs from the main loop tick, NOT from ISR.
+ * Loop rates are configured in m2003_config.h (_LOOP_HZ defines).
+ * Control tick runs from SysTick at CONTROL_LOOP_HZ; inner loops use dividers.
  * ADC ISR oversamples at PWM rate and hands the control loop an averaged window.
  */
 
@@ -29,6 +30,7 @@ static ctrl_mode_t   ctrl_mode;
 static int32_t       target_duty;
 static int32_t       target_velocity;   /* signed RPM (set directly or by pos PID) */
 static int32_t       target_position;   /* encoder counts, continuous */
+static int32_t       target_current;    /* signed mA (CTRL_TORQUE mode) */
 static int32_t       measured_velocity;  /* signed RPM */
 static int8_t        drive_dir;          /* +1 / -1, commutation direction */
 static uint32_t      torque_limit_ma;
@@ -48,7 +50,11 @@ static int8_t        coast_trip_dir;     /* +1: coast when pos >= trip, -1: when
 static uint8_t       coast_armed;        /* 1 = watching for coast trigger at 5 kHz */
 static pid_t         vel_pid;
 static pid_t         pos_pid;
-static uint8_t       pos_div;            /* divider counter for 1 kHz position loop */
+static pid_t         cur_pid;
+static int32_t       current_setpoint;   /* mA, output of velocity PID for current loop */
+static uint8_t       cur_div;            /* divider counter for current loop */
+static uint8_t       vel_div;            /* divider counter for velocity loop */
+static uint8_t       pos_div;            /* divider counter for position loop */
 
 /*
  * Encoder-based velocity:
@@ -121,12 +127,33 @@ static int32_t torque_clamp(int32_t duty)
     return (duty * (int32_t)torque_limit_ma) / (int32_t)current_ma;
 }
 
+static int32_t run_current_loop(int32_t setpoint_ma)
+{
+    int32_t magnitude;
+    int32_t duty;
+
+    /* Clamp to torque envelope */
+    if (setpoint_ma > (int32_t)torque_limit_ma)
+        setpoint_ma = (int32_t)torque_limit_ma;
+    else if (setpoint_ma < -(int32_t)torque_limit_ma)
+        setpoint_ma = -(int32_t)torque_limit_ma;
+
+    /* Current PI operates on magnitude — shunt measures unsigned current */
+    magnitude = (setpoint_ma >= 0) ? setpoint_ma : -setpoint_ma;
+    duty = pid_update(&cur_pid, magnitude, (int32_t)current_ma);
+
+    return (setpoint_ma >= 0) ? duty : -duty;
+}
+
 static void enter_fault(fault_code_t code)
 {
     target_duty = 0;
     target_velocity = 0;
+    target_current = 0;
     pid_reset(&vel_pid);
     pid_reset(&pos_pid);
+    pid_reset(&cur_pid);
+    current_setpoint = 0;
     coasting = 0;
     coast_armed = 0;
     overcurrent_ticks = 0;
@@ -144,6 +171,7 @@ void motor_init(void)
     target_duty = 0;
     target_velocity = 0;
     target_position = 0;
+    target_current = 0;
     measured_velocity = 0;
     drive_dir = 1;
     torque_limit_ma = DEFAULT_TORQUE_LIMIT_MA;
@@ -157,11 +185,18 @@ void motor_init(void)
     last_applied_duty = 0;
     coasting = 0;
     coast_armed = 0;
+    current_setpoint = 0;
+    cur_div = 0;
+    vel_div = 0;
     pos_div = 0;
 
     pid_init(&vel_pid,
              VEL_PID_KP_DEFAULT, VEL_PID_KI_DEFAULT, VEL_PID_KD_DEFAULT, VEL_FF_DEFAULT,
-             -(int32_t)PWM_MAX_DUTY, (int32_t)PWM_MAX_DUTY);
+             -(int32_t)CURRENT_LIMIT_MA, (int32_t)CURRENT_LIMIT_MA);
+
+    pid_init(&cur_pid,
+             CUR_PID_KP_DEFAULT, CUR_PID_KI_DEFAULT, 0, 0,
+             0, (int32_t)PWM_MAX_DUTY);
 
     pid_init(&pos_pid,
              POS_PID_KP_DEFAULT, POS_PID_KI_DEFAULT, POS_PID_KD_DEFAULT, 0,
@@ -182,20 +217,32 @@ void motor_set_mode(ctrl_mode_t mode)
          * so the motor doesn't jerk on mode switch */
         switch (mode) {
         case CTRL_VELOCITY:
-            if (ctrl_mode == CTRL_DUTY) {
-                /* vel_pid wasn't running — seed it */
-                pid_preload(&vel_pid, last_applied_duty,
+            if (ctrl_mode == CTRL_DUTY || ctrl_mode == CTRL_TORQUE) {
+                /* vel_pid wasn't running — seed with current draw */
+                int32_t signed_ma = (int32_t)current_ma * drive_dir;
+                pid_preload(&vel_pid, signed_ma,
                             target_velocity, measured_velocity);
+                if (ctrl_mode == CTRL_DUTY) {
+                    int32_t abs_duty = last_applied_duty >= 0 ? last_applied_duty : -last_applied_duty;
+                    pid_preload(&cur_pid, abs_duty,
+                                (int32_t)current_ma, (int32_t)current_ma);
+                }
+                /* CTRL_TORQUE: cur_pid already running, keep state */
             }
-            /* else: vel_pid was inner loop, keep its state */
+            /* else: vel_pid and cur_pid are running, keep their state */
             pid_reset(&pos_pid);
             break;
         case CTRL_POSITION:
-            if (ctrl_mode == CTRL_DUTY) {
-                /* Neither PID was running — seed vel_pid */
+            if (ctrl_mode == CTRL_DUTY || ctrl_mode == CTRL_TORQUE) {
+                int32_t signed_ma = (int32_t)current_ma * drive_dir;
                 target_velocity = measured_velocity;
-                pid_preload(&vel_pid, last_applied_duty,
+                pid_preload(&vel_pid, signed_ma,
                             target_velocity, measured_velocity);
+                if (ctrl_mode == CTRL_DUTY) {
+                    int32_t abs_duty = last_applied_duty >= 0 ? last_applied_duty : -last_applied_duty;
+                    pid_preload(&cur_pid, abs_duty,
+                                (int32_t)current_ma, (int32_t)current_ma);
+                }
             }
             /* Do not carry the incoming velocity-mode bias into the outer
              * position loop. Near-home capture behaves better when the
@@ -205,17 +252,32 @@ void motor_set_mode(ctrl_mode_t mode)
             pos_pid.prev_meas = -encoder_get_position();
             target_velocity = 0;
             break;
+        case CTRL_TORQUE:
+            if (ctrl_mode == CTRL_DUTY) {
+                int32_t abs_duty = last_applied_duty >= 0 ? last_applied_duty : -last_applied_duty;
+                pid_preload(&cur_pid, abs_duty,
+                            (int32_t)current_ma, (int32_t)current_ma);
+            }
+            /* else: cur_pid already running, keep state */
+            pid_reset(&vel_pid);
+            pid_reset(&pos_pid);
+            break;
         default:
             pid_reset(&vel_pid);
             pid_reset(&pos_pid);
+            pid_reset(&cur_pid);
             break;
         }
     } else {
         pid_reset(&vel_pid);
         pid_reset(&pos_pid);
+        pid_reset(&cur_pid);
     }
 
     ctrl_mode = mode;
+    current_setpoint = 0;
+    cur_div = 0;
+    vel_div = 0;
     pos_div = 0;
 }
 
@@ -224,6 +286,7 @@ ctrl_mode_t motor_get_mode(void) { return ctrl_mode; }
 void motor_set_duty(int32_t duty)        { target_duty = duty; }
 void motor_set_velocity(int32_t rpm)     { target_velocity = rpm; }
 void motor_set_position(int32_t counts)  { target_position = counts; }
+void motor_set_current(int32_t ma)       { target_current = ma; }
 void motor_shift_position_reference(int32_t delta)
 {
     target_position -= delta;
@@ -248,8 +311,8 @@ uint32_t motor_get_torque_limit(void)
 
 void motor_set_vel_pid(int32_t kp, int32_t ki, int32_t kd)
 {
-    pid_init(&vel_pid, kp, ki, kd, vel_pid.kf,
-             -(int32_t)PWM_MAX_DUTY, (int32_t)PWM_MAX_DUTY);
+    pid_set_gains(&vel_pid, kp, ki, kd, vel_pid.kf,
+                  -(int32_t)CURRENT_LIMIT_MA, (int32_t)CURRENT_LIMIT_MA);
 }
 
 void motor_set_vel_ff(int32_t gain)
@@ -274,9 +337,9 @@ int32_t motor_get_vel_ff(void)
 
 void motor_set_pos_pid(int32_t kp, int32_t ki, int32_t kd)
 {
-    pid_init(&pos_pid, kp, ki, kd, 0,
-             -(int32_t)(POS_MAX_VEL_RPM * POS_ERROR_PRESCALE),
-             (int32_t)(POS_MAX_VEL_RPM * POS_ERROR_PRESCALE));
+    pid_set_gains(&pos_pid, kp, ki, kd, 0,
+                  -(int32_t)(POS_MAX_VEL_RPM * POS_ERROR_PRESCALE),
+                  (int32_t)(POS_MAX_VEL_RPM * POS_ERROR_PRESCALE));
     pos_pid.int_max = (int64_t)POS_INT_MAX_RPM * POS_ERROR_PRESCALE * PID_SCALE;
 }
 
@@ -288,6 +351,20 @@ void motor_get_pos_pid(int32_t *kp, int32_t *ki, int32_t *kd)
         *ki = pos_pid.ki;
     if (kd != 0)
         *kd = pos_pid.kd;
+}
+
+void motor_set_cur_pid(int32_t kp, int32_t ki)
+{
+    pid_set_gains(&cur_pid, kp, ki, 0, 0,
+                  0, (int32_t)PWM_MAX_DUTY);
+}
+
+void motor_get_cur_pid(int32_t *kp, int32_t *ki)
+{
+    if (kp != 0)
+        *kp = cur_pid.kp;
+    if (ki != 0)
+        *ki = cur_pid.ki;
 }
 
 void motor_start(void)
@@ -303,6 +380,10 @@ void motor_start(void)
 
     pid_reset(&vel_pid);
     pid_reset(&pos_pid);
+    pid_reset(&cur_pid);
+    current_setpoint = 0;
+    cur_div = 0;
+    vel_div = 0;
     pos_div = 0;
     coasting = 0;
     current_filt_q8 = 0;
@@ -315,6 +396,8 @@ void motor_start(void)
         drive_dir = (target_duty >= 0) ? 1 : -1;
     else if (ctrl_mode == CTRL_VELOCITY)
         drive_dir = (target_velocity >= 0) ? 1 : -1;
+    else if (ctrl_mode == CTRL_TORQUE)
+        drive_dir = (target_current >= 0) ? 1 : -1;
     else
         drive_dir = 1;  /* position PID will sort it out */
 
@@ -326,10 +409,13 @@ void motor_stop(void)
 {
     target_duty = 0;
     target_velocity = 0;
+    target_current = 0;
     pwm_set_duty(0);
     pwm_disable();
     pid_reset(&vel_pid);
     pid_reset(&pos_pid);
+    pid_reset(&cur_pid);
+    current_setpoint = 0;
     coasting = 0;
     coast_armed = 0;
     current_filt_q8 = 0;
@@ -367,9 +453,12 @@ void motor_clear_fault(void)
 {
     target_duty = 0;
     target_velocity = 0;
+    target_current = 0;
     fault = FAULT_NONE;
     pid_reset(&vel_pid);
     pid_reset(&pos_pid);
+    pid_reset(&cur_pid);
+    current_setpoint = 0;
     pwm_disable();
     coasting = 0;
     coast_armed = 0;
@@ -386,8 +475,9 @@ int32_t       motor_get_velocity(void){ return measured_velocity; }
 
 int32_t motor_get_target(void)
 {
-    /* In position mode, report the velocity setpoint (pos PID output) */
-    return (ctrl_mode == CTRL_DUTY) ? target_duty : target_velocity;
+    if (ctrl_mode == CTRL_DUTY) return target_duty;
+    if (ctrl_mode == CTRL_TORQUE) return target_current;
+    return target_velocity;
 }
 
 /* ── Fast poll (main loop, every iteration) ──────────────────────────── */
@@ -462,7 +552,7 @@ void motor_tick_control(void)
     /* Always update measured velocity (useful for status reporting) */
     measured_velocity = estimate_velocity();
 
-    /* Fast coast detection at 5 kHz — armed by strike module.
+    /* Coast detection at CONTROL_LOOP_HZ — armed by strike module.
      * Must cut power before the mallet hits the drum. */
     if (coast_armed && state == MOTOR_RUN) {
         int32_t pos = -encoder_get_position();
@@ -489,34 +579,50 @@ void motor_tick_control(void)
             return;
         }
         duty = torque_clamp(target_duty);
-        break;
+        apply_duty(duty);
+        return;
+
+    case CTRL_TORQUE:
+        if (coasting)
+            return;
+        if (++cur_div >= CUR_LOOP_DIVIDER) {
+            cur_div = 0;
+            duty = run_current_loop(target_current);
+            apply_duty(duty);
+        }
+        return;
 
     case CTRL_VELOCITY:
-        duty = torque_clamp(run_velocity_loop());
+    case CTRL_POSITION:
+        if (coasting)
+            return;
         break;
-
-    case CTRL_POSITION: {
-        /* Position PID at 1 kHz (every POS_LOOP_DIVIDER ticks) */
-        if (++pos_div >= POS_LOOP_DIVIDER) {
-            pos_div = 0;
-            /* Calculate full 32-bit error to eliminate quantization deadband limit cycling.
-             * The PID math scales the output, which is then divided by POS_ERROR_PRESCALE
-             * to maintain the original gain scaling for backwards compatibility. */
-            int32_t pos = -encoder_get_position();
-            
-            /* Position PID outputs velocity setpoint (RPM) scaled by POS_ERROR_PRESCALE */
-            int32_t pid_out = pid_update(&pos_pid, target_position, pos);
-            target_velocity = pid_out / POS_ERROR_PRESCALE;
-        }
-        /* Velocity loop at full rate */
-        duty = torque_clamp(run_velocity_loop());
-        break;
-    }
 
     default:
-        duty = 0;
-        break;
+        apply_duty(0);
+        return;
     }
 
-    apply_duty(duty);
+    /* ── Cascaded loops (velocity / position modes) ────────────────── */
+
+    /* Position PID — outermost, only in CTRL_POSITION */
+    if (ctrl_mode == CTRL_POSITION && ++pos_div >= POS_LOOP_DIVIDER) {
+        pos_div = 0;
+        int32_t pos = -encoder_get_position();
+        int32_t pid_out = pid_update(&pos_pid, target_position, pos);
+        target_velocity = pid_out / POS_ERROR_PRESCALE;
+    }
+
+    /* Velocity PID — outputs current setpoint in mA */
+    if (++vel_div >= VEL_LOOP_DIVIDER) {
+        vel_div = 0;
+        current_setpoint = run_velocity_loop();
+    }
+
+    /* Current PI — innermost, outputs duty */
+    if (++cur_div >= CUR_LOOP_DIVIDER) {
+        cur_div = 0;
+        duty = run_current_loop(current_setpoint);
+        apply_duty(duty);
+    }
 }

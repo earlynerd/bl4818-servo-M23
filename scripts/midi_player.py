@@ -70,7 +70,7 @@ class MidiSource:
 class LookupEntry:
     midi_velocity: int
     target_strength_dps: int
-    duty: int
+    current_ma: int
     lead_ms: int
     repeat_ms: int
     settle_ms: int
@@ -111,7 +111,7 @@ class ScheduledStrike:
     address: int
     midi_note: int
     midi_velocity: int
-    duty: int
+    current_ma: int
     lead_ms: int
     repeat_ms: int
     settle_ms: int
@@ -238,8 +238,8 @@ def parse_lookup_entries(raw_entries: Any, context: str) -> list[LookupEntry]:
         entries.append(
             LookupEntry(
                 midi_velocity=int(entry["midi_velocity"]),
-                target_strength_dps=int(entry.get("target_strength_dps", entry.get("duty", 0))),
-                duty=int(entry["duty"]),
+                target_strength_dps=int(entry.get("target_strength_dps", entry.get("current_ma", 0))),
+                current_ma=int(entry["current_ma"]),
                 lead_ms=int(entry["lead_ms"]),
                 repeat_ms=int(entry.get("repeat_ms", entry.get("settle_ms", 0))),
                 settle_ms=int(entry.get("settle_ms", entry.get("repeat_ms", 0))),
@@ -490,7 +490,7 @@ def build_performance_plan(
                     address=profile.address,
                     midi_note=note.midi_note,
                     midi_velocity=note.velocity,
-                    duty=lookup.duty,
+                    current_ma=lookup.current_ma,
                     lead_ms=lookup.lead_ms,
                     repeat_ms=lookup.repeat_ms,
                     settle_ms=lookup.settle_ms,
@@ -580,7 +580,7 @@ def plan_to_jsonable(plan: PerformancePlan) -> dict[str, Any]:
                 "midi_note": event.midi_note,
                 "midi_note_name": format_note_name(event.midi_note),
                 "midi_velocity": event.midi_velocity,
-                "duty": event.duty,
+                "current_ma": event.current_ma,
                 "lead_ms": event.lead_ms,
                 "repeat_ms": event.repeat_ms,
                 "settle_ms": event.settle_ms,
@@ -627,7 +627,7 @@ def print_plan_summary(plan: PerformancePlan, show_events: int) -> None:
             f"  #{event.sequence_index:03d} impact={event.impact_time_ms:8.1f} ms "
             f"deadline={event.send_deadline_ms:8.1f} ms addr={event.address:02d} "
             f"note={format_note_name(event.midi_note):>3} vel={event.midi_velocity:3d} "
-            f"duty={event.duty:4d} lead={event.lead_ms:3d} "
+            f"current_ma={event.current_ma:4d} lead={event.lead_ms:3d} "
             f"repeat={event.repeat_ms:3d} settle={event.settle_ms:3d}"
         )
     if len(plan.scheduled) > show_events:
@@ -715,7 +715,7 @@ class SerialStrikeWorker(threading.Thread):
                 target_time = self.start_time + event.wall_send_ms / 1000.0
                 sleep_until(target_time)
                 send_time = time.monotonic()
-                reply = self.client.strike(event.address, event.duty, reply_mode=REPLY_MODE_ACK)
+                reply = self.client.strike(event.address, event.current_ma, reply_mode=REPLY_MODE_ACK)
                 ack_time = time.monotonic()
                 if not isinstance(reply, CommandAck):
                     raise MidiPlayerError(
@@ -771,7 +771,7 @@ def print_playback_summary(results: list[PlaybackLogEntry]) -> None:
     for item in results[:20]:
         print(
             f"  #{item.event.sequence_index:03d} addr={item.event.address:02d} "
-            f"note={format_note_name(item.event.midi_note):>3} duty={item.event.duty:4d} "
+            f"note={format_note_name(item.event.midi_note):>3} current_ma={item.event.current_ma:4d} "
             f"sent={item.sent_offset_ms:8.2f} ms late={item.lateness_ms:7.3f} ms "
             f"ack={item.ack_result_name}"
         )

@@ -118,14 +118,14 @@ uint16_t adc_raw_voltage(void)
 
 uint32_t adc_current_raw_to_ma(uint16_t raw)
 {
-    /* INA180B2 (50 V/V) on 20 mΩ shunt → 1.0 V/A.
-     * ADC Vref = 5.0 V, 12-bit.  mA = raw × 5000 / 4095. */
-    uint32_t ma = ((uint32_t)raw * 5000UL) / 4095UL;
+    /* I_mA = V_mV * 1000 / (gain * shunt_mΩ), with V_mV derived from ADC counts. */
+    uint32_t ma = ((uint32_t)raw * ADC_VREF_MV * 1000UL) /
+                  (ADC_FULL_SCALE_COUNTS * CURRENT_SENSE_GAIN * CURRENT_SENSE_SHUNT_MOHM);
     return ma;
 }
 
 uint16_t adc_voltage_raw_to_mv(uint16_t raw)
 {
-    uint32_t pin_mv = ((uint32_t)raw * 5000UL) / 4095UL;
+    uint32_t pin_mv = ((uint32_t)raw * ADC_VREF_MV) / ADC_FULL_SCALE_COUNTS;
     return (uint16_t)(pin_mv * 11);
 }

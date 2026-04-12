@@ -38,6 +38,7 @@ static uint32_t      current_ma;
 static int32_t       current_filt_q8;    /* filtered current estimate in Q8 mA */
 static uint8_t       current_filt_initialized;
 static uint16_t      overcurrent_ticks;
+static uint16_t      peak_overcurrent_ticks;
 
 static int32_t       prev_enc_position;
 static int32_t       vel_filt_q8;       /* IIR-filtered velocity in Q8 */
@@ -47,7 +48,7 @@ static int32_t       last_applied_duty;  /* for bumpless transfer on mode switch
 static uint8_t       coasting;           /* 1 = phases floating, skip duty dispatch */
 static int32_t       coast_trip_pos;     /* auto-coast position threshold */
 static int8_t        coast_trip_dir;     /* +1: coast when pos >= trip, -1: when <= */
-static uint8_t       coast_armed;        /* 1 = watching for coast trigger at 5 kHz */
+static uint8_t       coast_armed;        /* 1 = watching for coast trigger in control tick */
 static pid_t         vel_pid;
 static pid_t         pos_pid;
 static pid_t         cur_pid;
@@ -145,6 +146,14 @@ static int32_t run_current_loop(int32_t setpoint_ma)
     return (setpoint_ma >= 0) ? duty : -duty;
 }
 
+static void reset_current_protection_state(void)
+{
+    current_filt_q8 = 0;
+    current_filt_initialized = 0;
+    overcurrent_ticks = 0;
+    peak_overcurrent_ticks = 0;
+}
+
 static void enter_fault(fault_code_t code)
 {
     target_duty = 0;
@@ -156,7 +165,7 @@ static void enter_fault(fault_code_t code)
     current_setpoint = 0;
     coasting = 0;
     coast_armed = 0;
-    overcurrent_ticks = 0;
+    reset_current_protection_state();
     state = MOTOR_FAULT;
     fault = code;
 }
@@ -179,6 +188,7 @@ void motor_init(void)
     current_filt_q8 = 0;
     current_filt_initialized = 0;
     overcurrent_ticks = 0;
+    peak_overcurrent_ticks = 0;
     prev_enc_position = 0;
     vel_filt_q8 = 0;
     vel_initialized = 0;
@@ -207,66 +217,75 @@ void motor_init(void)
 
 void motor_set_mode(ctrl_mode_t mode)
 {
+    uint8_t was_coasting;
+
     if (mode == ctrl_mode)
         return;
 
+    was_coasting = coasting;
     coasting = 0;
 
     if (state == MOTOR_RUN) {
-        /* Bumpless transfer: preload PIDs to match current outputs
-         * so the motor doesn't jerk on mode switch */
-        switch (mode) {
-        case CTRL_VELOCITY:
-            if (ctrl_mode == CTRL_DUTY || ctrl_mode == CTRL_TORQUE) {
-                /* vel_pid wasn't running — seed with current draw */
-                int32_t signed_ma = (int32_t)current_ma * drive_dir;
-                pid_preload(&vel_pid, signed_ma,
-                            target_velocity, measured_velocity);
-                if (ctrl_mode == CTRL_DUTY) {
-                    int32_t abs_duty = last_applied_duty >= 0 ? last_applied_duty : -last_applied_duty;
-                    pid_preload(&cur_pid, abs_duty,
-                                (int32_t)current_ma, (int32_t)current_ma);
-                }
-                /* CTRL_TORQUE: cur_pid already running, keep state */
-            }
-            /* else: vel_pid and cur_pid are running, keep their state */
-            pid_reset(&pos_pid);
-            break;
-        case CTRL_POSITION:
-            if (ctrl_mode == CTRL_DUTY || ctrl_mode == CTRL_TORQUE) {
-                int32_t signed_ma = (int32_t)current_ma * drive_dir;
-                target_velocity = measured_velocity;
-                pid_preload(&vel_pid, signed_ma,
-                            target_velocity, measured_velocity);
-                if (ctrl_mode == CTRL_DUTY) {
-                    int32_t abs_duty = last_applied_duty >= 0 ? last_applied_duty : -last_applied_duty;
-                    pid_preload(&cur_pid, abs_duty,
-                                (int32_t)current_ma, (int32_t)current_ma);
-                }
-            }
-            /* Do not carry the incoming velocity-mode bias into the outer
-             * position loop. Near-home capture behaves better when the
-             * position controller starts from a clean state instead of
-             * inheriting a large homeward integrator/preload. */
-            pid_reset(&pos_pid);
-            pos_pid.prev_meas = -encoder_get_position();
-            target_velocity = 0;
-            break;
-        case CTRL_TORQUE:
-            if (ctrl_mode == CTRL_DUTY) {
-                int32_t abs_duty = last_applied_duty >= 0 ? last_applied_duty : -last_applied_duty;
-                pid_preload(&cur_pid, abs_duty,
-                            (int32_t)current_ma, (int32_t)current_ma);
-            }
-            /* else: cur_pid already running, keep state */
-            pid_reset(&vel_pid);
-            pid_reset(&pos_pid);
-            break;
-        default:
+        if (was_coasting) {
             pid_reset(&vel_pid);
             pid_reset(&pos_pid);
             pid_reset(&cur_pid);
-            break;
+        } else {
+            /* Bumpless transfer: preload PIDs to match current outputs
+             * so the motor doesn't jerk on mode switch */
+            switch (mode) {
+            case CTRL_VELOCITY:
+                if (ctrl_mode == CTRL_DUTY || ctrl_mode == CTRL_TORQUE) {
+                    /* vel_pid wasn't running — seed with current draw */
+                    int32_t signed_ma = (int32_t)current_ma * drive_dir;
+                    pid_preload(&vel_pid, signed_ma,
+                                target_velocity, measured_velocity);
+                    if (ctrl_mode == CTRL_DUTY) {
+                        int32_t abs_duty = last_applied_duty >= 0 ? last_applied_duty : -last_applied_duty;
+                        pid_preload(&cur_pid, abs_duty,
+                                    (int32_t)current_ma, (int32_t)current_ma);
+                    }
+                    /* CTRL_TORQUE: cur_pid already running, keep state */
+                }
+                /* else: vel_pid and cur_pid are running, keep their state */
+                pid_reset(&pos_pid);
+                break;
+            case CTRL_POSITION:
+                if (ctrl_mode == CTRL_DUTY || ctrl_mode == CTRL_TORQUE) {
+                    int32_t signed_ma = (int32_t)current_ma * drive_dir;
+                    target_velocity = measured_velocity;
+                    pid_preload(&vel_pid, signed_ma,
+                                target_velocity, measured_velocity);
+                    if (ctrl_mode == CTRL_DUTY) {
+                        int32_t abs_duty = last_applied_duty >= 0 ? last_applied_duty : -last_applied_duty;
+                        pid_preload(&cur_pid, abs_duty,
+                                    (int32_t)current_ma, (int32_t)current_ma);
+                    }
+                }
+                /* Do not carry the incoming velocity-mode bias into the outer
+                 * position loop. Near-home capture behaves better when the
+                 * position controller starts from a clean state instead of
+                 * inheriting a large homeward integrator/preload. */
+                pid_reset(&pos_pid);
+                pos_pid.prev_meas = -encoder_get_position();
+                target_velocity = 0;
+                break;
+            case CTRL_TORQUE:
+                if (ctrl_mode == CTRL_DUTY) {
+                    int32_t abs_duty = last_applied_duty >= 0 ? last_applied_duty : -last_applied_duty;
+                    pid_preload(&cur_pid, abs_duty,
+                                (int32_t)current_ma, (int32_t)current_ma);
+                }
+                /* else: cur_pid already running, keep state */
+                pid_reset(&vel_pid);
+                pid_reset(&pos_pid);
+                break;
+            default:
+                pid_reset(&vel_pid);
+                pid_reset(&pos_pid);
+                pid_reset(&cur_pid);
+                break;
+            }
         }
     } else {
         pid_reset(&vel_pid);
@@ -386,9 +405,7 @@ void motor_start(void)
     vel_div = 0;
     pos_div = 0;
     coasting = 0;
-    current_filt_q8 = 0;
-    current_filt_initialized = 0;
-    overcurrent_ticks = 0;
+    reset_current_protection_state();
     state = MOTOR_RUN;
 
     /* Set initial commutation direction */
@@ -418,9 +435,7 @@ void motor_stop(void)
     current_setpoint = 0;
     coasting = 0;
     coast_armed = 0;
-    current_filt_q8 = 0;
-    current_filt_initialized = 0;
-    overcurrent_ticks = 0;
+    reset_current_protection_state();
     state = MOTOR_IDLE;
 }
 
@@ -428,6 +443,15 @@ void motor_coast(void)
 {
     commutation_coast();
     pwm_set_duty(0);
+    pid_reset(&vel_pid);
+    pid_reset(&pos_pid);
+    pid_reset(&cur_pid);
+    current_setpoint = 0;
+    cur_div = 0;
+    vel_div = 0;
+    pos_div = 0;
+    overcurrent_ticks = 0;
+    peak_overcurrent_ticks = 0;
     last_applied_duty = 0;
     coasting = 1;
 }
@@ -462,9 +486,7 @@ void motor_clear_fault(void)
     pwm_disable();
     coasting = 0;
     coast_armed = 0;
-    current_filt_q8 = 0;
-    current_filt_initialized = 0;
-    overcurrent_ticks = 0;
+    reset_current_protection_state();
     state = MOTOR_IDLE;
 }
 
@@ -480,24 +502,29 @@ int32_t motor_get_target(void)
     return target_velocity;
 }
 
-/* ── Fast poll (main loop, every iteration) ──────────────────────────── */
+/* ── Hall transition handling ────────────────────────────────────────── */
 
-void motor_poll_fast(void)
+void motor_handle_hall_transition(uint8_t result)
 {
-    uint8_t result = hall_poll();
-
     if (result == HALL_POLL_INVALID) {
         pwm_fault_brake();
-        state = MOTOR_FAULT;
-        fault = FAULT_HALL_INVALID;
+        enter_fault(FAULT_HALL_INVALID);
         return;
     }
 
     if (result != HALL_POLL_TRANSITION)
         return;
 
-    if (state == MOTOR_RUN)
+    if (state == MOTOR_RUN && !coasting)
         commutation_update(drive_dir);
+}
+
+/* ── Fast poll (main loop, every iteration) ──────────────────────────── */
+
+void motor_poll_fast(void)
+{
+    /* Hall transitions are processed in the GPIO IRQ path. Keep the hook so
+     * the main loop structure does not need to change. */
 }
 
 /* ── Control tick ────────────────────────────────────────────────────── */
@@ -523,11 +550,17 @@ void motor_tick_control(void)
     }
     current_ma = (uint32_t)(current_filt_q8 / PID_SCALE);
 
-    /* Use a sustained peak-current detector for normal overcurrent trips so
-     * brief motion spikes do not fault immediately, while still preserving a
-     * higher instantaneous ceiling for real shoot-through / stall events. */
-    if (state == MOTOR_RUN) {
+    /* Skip overcurrent faulting during intentional coast: outputs are masked,
+     * and impact/rebound transients are expected while the strike is floating. */
+    if (state == MOTOR_RUN && !coasting) {
         if (peak_current_ma > CURRENT_PEAK_LIMIT_MA) {
+            if (peak_overcurrent_ticks < 0xFFFFu)
+                peak_overcurrent_ticks++;
+        } else {
+            peak_overcurrent_ticks = 0u;
+        }
+
+        if (peak_overcurrent_ticks >= CURRENT_PEAK_FAULT_TICKS) {
             pwm_fault_brake();
             enter_fault(FAULT_OVERCURRENT);
             return;
@@ -547,6 +580,7 @@ void motor_tick_control(void)
         }
     } else {
         overcurrent_ticks = 0u;
+        peak_overcurrent_ticks = 0u;
     }
 
     /* Always update measured velocity (useful for status reporting) */

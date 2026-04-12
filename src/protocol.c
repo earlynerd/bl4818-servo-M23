@@ -231,8 +231,8 @@ static void send_strike_status_reply(void)
     buf[4]  = metrics.flags;
     buf[5]  = (uint8_t)(metrics.sequence >> 8);
     buf[6]  = (uint8_t)(metrics.sequence & 0xFFu);
-    buf[7]  = (uint8_t)((uint16_t)metrics.last_duty >> 8);
-    buf[8]  = (uint8_t)((uint16_t)metrics.last_duty & 0xFFu);
+    buf[7]  = (uint8_t)((uint16_t)metrics.last_current_ma >> 8);
+    buf[8]  = (uint8_t)((uint16_t)metrics.last_current_ma & 0xFFu);
     buf[9]  = (uint8_t)(metrics.trigger_to_coast_ms >> 8);
     buf[10] = (uint8_t)(metrics.trigger_to_coast_ms & 0xFFu);
     buf[11] = (uint8_t)(metrics.trigger_to_rebound_ms >> 8);
@@ -531,8 +531,8 @@ static void handle_addressed_cmd(uint8_t cmd_type, const uint8_t *payload, uint8
         ack_result = ACK_RESULT_INVALID_ARGUMENT;
         ack_detail = strike_get_sequence();
         if (len >= 4u) {
-            int16_t duty = (int16_t)(((uint16_t)payload[2] << 8) | payload[3]);
-            ack_result = ack_result_from_strike_trigger(strike_trigger((int32_t)duty));
+            int16_t current_ma = (int16_t)(((uint16_t)payload[2] << 8) | payload[3]);
+            ack_result = ack_result_from_strike_trigger(strike_trigger((int32_t)current_ma));
             ack_detail = strike_get_sequence();
         }
         send_addressed_reply(reply_mode, subcmd, ack_result, ack_detail, FULL_REPLY_STATUS);

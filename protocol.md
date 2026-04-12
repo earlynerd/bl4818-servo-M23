@@ -83,7 +83,7 @@ sub-command ID; the top 2 bits select reply policy.
 | 0x09 | SET_POSITION | `[pos_b3] [pos_b2] [pos_b1] [pos_b0]` | 4 |
 | 0x0A | SET_POS_PID | `[kp_hi] [kp_lo] [ki_hi] [ki_lo] [kd_hi] [kd_lo]` | 6 |
 | 0x0B | ZERO_POSITION | -- | 0 |
-| 0x0C | STRIKE | `[duty_hi] [duty_lo]` | 2 |
+| 0x0C | STRIKE | `[current_hi] [current_lo]` | 2 |
 | 0x0D | STRIKE_HOME | -- | 0 |
 | 0x0E | STRIKE_CANCEL | -- | 0 |
 | 0x0F | SET_STRIKE_PARAM | `[param_id] [value_hi] [value_lo]` | 3 |
@@ -160,7 +160,7 @@ for `FAULT_OVERCURRENT`; the raw peak sample is not reported in this reply.
 
 ```
 [type] [strike_state] [homed] [timing_flags]
-[seq_hi] [seq_lo] [duty_hi] [duty_lo]
+[seq_hi] [seq_lo] [current_hi] [current_lo]
 [t_coast_hi] [t_coast_lo] [t_rebound_hi] [t_rebound_lo]
 [t_retrigger_ready_hi] [t_retrigger_ready_lo]
 [t_ready_hi] [t_ready_lo] [vel_dps_hi] [vel_dps_lo]
@@ -186,6 +186,11 @@ Timing fields are reported in milliseconds for the most recently accepted
 strike. `t_rebound` is an approximate impact proxy derived from rebound
 detection or coast timeout, not a direct drum-contact sensor.
 
+The `STRIKE` payload is a signed 16-bit current command in mA. Firmware
+orients that current toward the learned drum direction for the outbound hit.
+The `current` field in `QUERY_STRIKE` reports the last accepted strike current
+command in mA.
+
 `t_retrigger_ready` is earlier than `t_ready`. It marks the first moment when
 the mallet is both near the configured home position and moving slowly enough
 that a new strike can be accepted with predictable timing. Firmware rejects a
@@ -202,7 +207,7 @@ When `home_offset` is changed while the actuator is homed and not in the
 strike approach, the parked home target is updated immediately.
 
 If a `STRIKE` command arrives while the actuator is already in DRIVING,
-COASTING, RETURNING, or CATCHING, firmware only accepts it once
+COASTING, or CATCHING, firmware only accepts it once
 `t_retrigger_ready` has become valid. Before that point the compact
 `ACK_REPLY` returns `REJECT_NOT_READY`. Once accepted, the current recovery is
 aborted and a new strike attempt starts immediately, and the `ACK_REPLY`

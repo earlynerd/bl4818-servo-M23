@@ -16,8 +16,8 @@ Examples:
     python ring_tool.py -p COM7 stop 0
     python ring_tool.py -p COM7 broadcast 200 0 0
     python ring_tool.py -p COM7 monitor 0 --hz 10
-    python ring_tool.py -p COM7 measure-strike-timing 0 --start 100 --stop 800 --step 100 --csv strike.csv
-    python ring_tool.py -p COM7 measure-strike-timing 0 --sweep-param home-offset --start 1200 --stop 2200 --step 200 --strike-duty 500
+    python ring_tool.py -p COM7 measure-strike-timing 0 --start 500 --stop 3000 --step 250 --csv strike.csv
+    python ring_tool.py -p COM7 measure-strike-timing 0 --sweep-param home-offset --start 1200 --stop 2200 --step 200 --strike-current 1500
 """
 
 from __future__ import annotations
@@ -140,7 +140,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("strike", help="Trigger a strike")
     sp.add_argument("address", type=int)
-    sp.add_argument("duty", type=int, help="Signed strike duty (loudness)")
+    sp.add_argument("current_ma", type=int, help="Strike current magnitude in mA; firmware orients it toward the drum")
 
     sp = sub.add_parser("strike-home", help="Run strike homing sequence")
     sp.add_argument("address", type=int)
@@ -156,26 +156,26 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("param", choices=["home-offset", "coast-distance", "homing-duty"])
     sp.add_argument("value", type=int)
 
-    sp = sub.add_parser("measure-strike-timing", help="Sweep strike timing versus duty or home-offset")
+    sp = sub.add_parser("measure-strike-timing", help="Sweep strike timing versus strike current or home-offset")
     sp.add_argument("address", type=int)
-    sp.add_argument("--sweep-param", choices=["duty", "home-offset"], default="duty",
-                    help="Parameter to sweep (default: duty)")
+    sp.add_argument("--sweep-param", choices=["current", "home-offset"], default="current",
+                    help="Parameter to sweep (default: current)")
     sp.add_argument("--values", nargs="+", type=int,
                     help="Explicit sweep values; overrides --start/--stop/--step")
-    sp.add_argument("--duties", nargs="+", type=int,
-                    help="Explicit duty sweep values; duty sweep only, overrides --start/--stop/--step")
-    sp.add_argument("--start", type=int, default=100,
-                    help="Start value for generated sweep (default: 100)")
-    sp.add_argument("--stop", type=int, default=1000,
-                    help="Stop value for generated sweep, inclusive (default: 1000)")
-    sp.add_argument("--step", type=int, default=100,
-                    help="Step for generated sweep (default: 100)")
-    sp.add_argument("--strike-duty", type=int, default=400,
-                    help="Strike duty to use when sweeping non-duty parameters (default: 400)")
+    sp.add_argument("--currents", nargs="+", type=int, dest="currents",
+                    help="Explicit strike current sweep values in mA; current sweep only, overrides --start/--stop/--step")
+    sp.add_argument("--start", type=int, default=500,
+                    help="Start value for generated sweep (default: 500 mA)")
+    sp.add_argument("--stop", type=int, default=3000,
+                    help="Stop value for generated sweep, inclusive (default: 3000 mA)")
+    sp.add_argument("--step", type=int, default=250,
+                    help="Step for generated sweep (default: 250 mA)")
+    sp.add_argument("--strike-current", type=int, default=1500, dest="strike_current_ma",
+                    help="Strike current in mA to use when sweeping non-current parameters (default: 1500)")
     sp.add_argument("--repeats", type=int, default=3,
                     help="Samples to collect per sweep value (default: 3)")
-    sp.add_argument("--poll-ms", type=int, default=10,
-                    help="Strike-status polling interval in ms (default: 10)")
+    sp.add_argument("--poll-ms", type=int, default=20,
+                    help="Strike-status polling interval in ms (default: 20)")
     sp.add_argument("--idle-timeout-ms", type=int, default=3000,
                     help="Timeout waiting for idle before each strike (default: 3000)")
     sp.add_argument("--strike-timeout-ms", type=int, default=3000,
@@ -192,7 +192,7 @@ def build_parser() -> argparse.ArgumentParser:
         "build-strike-calibration",
         help="Build a scheduler-ready JSON calibration profile from strike timing CSV sweeps",
     )
-    sp.add_argument("--duty-csv", required=True, help="CSV produced by measure-strike-timing with --sweep-param=duty")
+    sp.add_argument("--current-csv", required=True, help="CSV produced by measure-strike-timing with --sweep-param=current")
     sp.add_argument(
         "--home-offset-csv",
         help="Optional CSV produced by measure-strike-timing with --sweep-param=home-offset",
@@ -209,12 +209,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser(
         "build-strike-calibration-grid",
-        help="Build a multi-home-offset JSON calibration profile from a nested duty sweep CSV",
+        help="Build a multi-home-offset JSON calibration profile from a nested strike-current sweep CSV",
     )
     sp.add_argument(
-        "--duty-csv",
+        "--current-csv",
         required=True,
-        help="CSV produced by a multi-home-offset duty sweep; configured_home_offset must vary across rows",
+        help="CSV produced by a multi-home-offset strike-current sweep; configured_home_offset must vary across rows",
     )
     sp.add_argument("--out", required=True, help="Path to write the calibration profile JSON")
     sp.add_argument("--address", type=int, help="Optional ring address metadata to store in the profile")
@@ -228,7 +228,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser(
         "measure-strike-calibration-grid",
-        help="Sweep duty across multiple home offsets and emit a multi-offset calibration profile",
+        help="Sweep strike current across multiple home offsets and emit a multi-offset calibration profile",
     )
     sp.add_argument("address", type=int)
     sp.add_argument(
@@ -241,16 +241,20 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--home-offset-stop", type=int, default=1600, help="Generated home-offset sweep stop, inclusive (default: 1600)")
     sp.add_argument("--home-offset-step", type=int, default=200, help="Generated home-offset sweep step (default: 200)")
     sp.add_argument(
-        "--duties",
+        "--currents",
         nargs="+",
         type=int,
-        help="Explicit strike duty values; overrides --duty-start/--stop/--step",
+        dest="strike_currents",
+        help="Explicit strike current values in mA; overrides --current-start/--stop/--step",
     )
-    sp.add_argument("--duty-start", type=int, default=100, help="Generated duty sweep start (default: 100)")
-    sp.add_argument("--duty-stop", type=int, default=800, help="Generated duty sweep stop, inclusive (default: 800)")
-    sp.add_argument("--duty-step", type=int, default=20, help="Generated duty sweep step (default: 20)")
-    sp.add_argument("--repeats", type=int, default=3, help="Samples to collect per home-offset/duty point (default: 3)")
-    sp.add_argument("--poll-ms", type=int, default=10, help="Strike-status polling interval in ms (default: 10)")
+    sp.add_argument("--current-start", type=int, default=500, dest="strike_current_start",
+                    help="Generated strike-current sweep start in mA (default: 500)")
+    sp.add_argument("--current-stop", type=int, default=3000, dest="strike_current_stop",
+                    help="Generated strike-current sweep stop in mA, inclusive (default: 3000)")
+    sp.add_argument("--current-step", type=int, default=250, dest="strike_current_step",
+                    help="Generated strike-current sweep step in mA (default: 250)")
+    sp.add_argument("--repeats", type=int, default=3, help="Samples to collect per home-offset/current point (default: 3)")
+    sp.add_argument("--poll-ms", type=int, default=20, help="Strike-status polling interval in ms (default: 20)")
     sp.add_argument("--idle-timeout-ms", type=int, default=3000, help="Timeout waiting for idle before each strike (default: 3000)")
     sp.add_argument("--strike-timeout-ms", type=int, default=3000, help="Timeout waiting for each strike to finish (default: 3000)")
     sp.add_argument("--pause-ms", type=int, default=100, help="Pause after each completed strike sample (default: 100)")
@@ -282,10 +286,10 @@ def main() -> int:
         return list_ports()
 
     if args.command == "build-strike-calibration":
-        duty_samples = load_strike_timing_csv(args.duty_csv)
+        current_samples = load_strike_timing_csv(args.current_csv)
         home_offset_samples = load_strike_timing_csv(args.home_offset_csv) if args.home_offset_csv else None
         profile = build_strike_calibration_profile(
-            duty_samples=duty_samples,
+            current_samples=current_samples,
             home_offset_samples=home_offset_samples,
             address=args.address,
             midi_note=args.midi_note,
@@ -304,9 +308,9 @@ def main() -> int:
         return 0
 
     if args.command == "build-strike-calibration-grid":
-        duty_samples = load_strike_timing_csv(args.duty_csv)
+        current_samples = load_strike_timing_csv(args.current_csv)
         profile = build_strike_calibration_grid_profile(
-            duty_samples=duty_samples,
+            current_samples=current_samples,
             address=args.address,
             midi_note=args.midi_note,
             note_name=args.name,
@@ -403,7 +407,7 @@ def main() -> int:
             print(format_status(client.set_current(args.address, args.milliamps)))
 
         elif args.command == "strike":
-            print(format_status(client.strike(args.address, args.duty)))
+            print(format_status(client.strike(args.address, args.current_ma)))
 
         elif args.command == "strike-home":
             print(format_status(client.strike_home(args.address)))
@@ -415,7 +419,7 @@ def main() -> int:
             status = client.query_strike(args.address)
             print(
                 f"addr={status.address} strike={status.state_name} homed={status.homed} "
-                f"seq={status.sequence} flags=0x{status.flags:02X} duty={status.last_duty} "
+                f"seq={status.sequence} flags=0x{status.flags:02X} current_ma={status.last_current_ma} "
                 f"coast_ms={status.trigger_to_coast_ms if status.coast_valid else -1} "
                 f"rebound_ms={status.trigger_to_rebound_ms if status.rebound_valid else -1} "
                 f"retrigger_ready_ms={status.trigger_to_retrigger_ready_ms if status.retrigger_ready_valid else -1} "
@@ -451,8 +455,8 @@ def main() -> int:
                 raise RingError("poll/timeout/pause values must be non-negative, and timeouts must be at least 1 ms")
             if args.no_plot and args.plot_out:
                 raise RingError("--plot-out cannot be used together with --no-plot")
-            if args.sweep_param != "duty" and args.strike_duty == 0:
-                raise RingError("--strike-duty must be non-zero when sweeping non-duty parameters")
+            if args.sweep_param != "current" and args.strike_current_ma == 0:
+                raise RingError("--strike-current must be non-zero when sweeping non-current parameters")
 
             sweep_values = resolve_measurement_sweep_values(args)
             sweep_label = measurement_sweep_label(args.sweep_param)
@@ -463,7 +467,7 @@ def main() -> int:
             print(
                 f"Collecting strike timing for addr={args.address} "
                 f"{sweep_label}s={sweep_values} repeats={args.repeats} "
-                f"strike_duty={args.strike_duty if args.sweep_param != 'duty' else 'swept'}"
+                f"strike_current_ma={args.strike_current_ma if args.sweep_param != 'current' else 'swept'}"
             )
 
             for sweep_value in sweep_values:
@@ -475,7 +479,7 @@ def main() -> int:
                         address=args.address,
                         sweep_param=args.sweep_param,
                         sweep_value=sweep_value,
-                        strike_duty=args.strike_duty,
+                        strike_current_ma=args.strike_current_ma,
                         repeat_index=repeat_index,
                         poll_ms=args.poll_ms,
                         idle_timeout_ms=args.idle_timeout_ms,
@@ -491,7 +495,8 @@ def main() -> int:
                     velocity_text = "n/a" if sample.estimated_strike_velocity_dps is None else str(sample.estimated_strike_velocity_dps)
                     print(
                         f"  seq={sample.sequence} {sweep_label}={sample.sweep_value} "
-                        f"requested_duty={sample.requested_duty} applied_duty={sample.applied_duty} "
+                        f"requested_current_ma={sample.requested_current_ma} "
+                        f"applied_current_ma={sample.applied_current_ma} "
                         f"home_offset={sample.configured_home_offset if sample.configured_home_offset is not None else 'n/a'} "
                         f"coast_ms={coast_text} rebound_ms={rebound_text} "
                         f"retrigger_ready_ms={retrigger_ready_text} ready_ms={ready_text} "
@@ -528,21 +533,21 @@ def main() -> int:
                 args.home_offset_stop,
                 args.home_offset_step,
             )
-            duties = list(args.duties) if args.duties else build_sweep_values(
-                args.duty_start,
-                args.duty_stop,
-                args.duty_step,
+            strike_currents = list(args.strike_currents) if args.strike_currents else build_sweep_values(
+                args.strike_current_start,
+                args.strike_current_stop,
+                args.strike_current_step,
             )
-            if any(duty == 0 for duty in duties):
-                raise RingError("duty sweep must not include 0 because STRIKE 0 is ignored")
+            if any(current_ma == 0 for current_ma in strike_currents):
+                raise RingError("current sweep must not include 0 because STRIKE 0 is ignored")
 
-            total_samples = len(home_offsets) * len(duties) * args.repeats
+            total_samples = len(home_offsets) * len(strike_currents) * args.repeats
             samples: list[StrikeTimingSample] = []
             completed = 0
 
             print(
                 f"Collecting strike calibration grid for addr={args.address} "
-                f"home_offsets={home_offsets} duties={duties} repeats={args.repeats}"
+                f"home_offsets={home_offsets} strike_currents_ma={strike_currents} repeats={args.repeats}"
             )
 
             for home_offset in home_offsets:
@@ -558,19 +563,19 @@ def main() -> int:
                     f"(drum_pos={status.drum_position} home_pos={status.home_position})"
                 )
 
-                for duty in duties:
+                for current_ma in strike_currents:
                     for repeat_index in range(1, args.repeats + 1):
                         completed += 1
                         print(
                             f"[{completed}/{total_samples}] "
-                            f"home_offset={home_offset} duty={duty} repeat={repeat_index}"
+                            f"home_offset={home_offset} current_ma={current_ma} repeat={repeat_index}"
                         )
                         sample = collect_strike_timing_sample(
                             client=client,
                             address=args.address,
-                            sweep_param="duty",
-                            sweep_value=duty,
-                            strike_duty=0,
+                            sweep_param="current",
+                            sweep_value=current_ma,
+                            strike_current_ma=0,
                             repeat_index=repeat_index,
                             poll_ms=args.poll_ms,
                             idle_timeout_ms=args.idle_timeout_ms,
@@ -589,7 +594,8 @@ def main() -> int:
                         )
                         print(
                             f"  seq={sample.sequence} home_offset={sample.configured_home_offset} "
-                            f"requested_duty={sample.requested_duty} applied_duty={sample.applied_duty} "
+                            f"requested_current_ma={sample.requested_current_ma} "
+                            f"applied_current_ma={sample.applied_current_ma} "
                             f"coast_ms={coast_text} rebound_ms={rebound_text} "
                             f"retrigger_ready_ms={retrigger_ready_text} ready_ms={ready_text} "
                             f"strike_vel_dps={velocity_text}"
@@ -602,7 +608,7 @@ def main() -> int:
                 print(f"Raw CSV saved to {args.csv}")
 
             profile = build_strike_calibration_grid_profile(
-                duty_samples=samples,
+                current_samples=samples,
                 address=args.address,
                 midi_note=args.midi_note,
                 note_name=args.name,

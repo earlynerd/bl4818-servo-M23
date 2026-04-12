@@ -1,0 +1,1366 @@
+{
+  "schema_version": 3,
+  "generated_at": "2026-04-12T17:04:52.459776Z",
+  "scheduler_ready": true,
+  "warnings": [],
+  "identity": {
+    "address": 0,
+    "midi_note": 65,
+    "name": "c5"
+  },
+  "lookup_basis": {
+    "lead_time_field": "rebound_ms",
+    "repeat_time_field": "retrigger_ready_ms",
+    "settle_time_field": "ready_ms",
+    "velocity_proxy_field": "estimated_strike_velocity_dps",
+    "impact_time_note": "rebound_ms is an inferred impact proxy from rebound detection, not a contact sensor"
+  },
+  "suggested_home_offset": 1024,
+  "home_offset_selection_reason": "minimum repeat_min_ms, then minimum settle_min_ms, then maximum strength_max_dps",
+  "home_offset_tradeoff": [
+    {
+      "home_offset": 1024,
+      "sample_points": 18,
+      "strength_min_dps": 660,
+      "strength_max_dps": 2766,
+      "current_ma_min": 50,
+      "current_ma_max": 900,
+      "lead_min_ms": 21,
+      "lead_max_ms": 70,
+      "repeat_min_ms": 29,
+      "repeat_max_ms": 80,
+      "settle_min_ms": 54,
+      "settle_max_ms": 137,
+      "drum_position": 7891,
+      "home_position": 6867
+    }
+  ],
+  "home_offset_profiles": [
+    {
+      "home_offset": 1024,
+      "summary": {
+        "sample_points": 18,
+        "strength_min_dps": 660,
+        "strength_max_dps": 2766,
+        "current_ma_min": 50,
+        "current_ma_max": 900,
+        "lead_min_ms": 21,
+        "lead_max_ms": 70,
+        "repeat_min_ms": 29,
+        "repeat_max_ms": 80,
+        "settle_min_ms": 54,
+        "settle_max_ms": 137,
+        "drum_position": 7891,
+        "home_position": 6867
+      },
+      "current_curve": [
+        {
+          "sweep_value": 50,
+          "sample_count": 3,
+          "requested_current_ma": 50.0,
+          "applied_current_ma": 50.0,
+          "configured_home_offset": 1024,
+          "coast_ms": 62.0,
+          "rebound_ms": 70.0,
+          "retrigger_ready_ms": 80.0,
+          "ready_ms": 137.0,
+          "estimated_strike_velocity_dps": 660.0,
+          "retriggered_count": 0,
+          "rebound_timeout_count": 0,
+          "drum_position": 7891,
+          "home_position": 6867
+        },
+        {
+          "sweep_value": 100,
+          "sample_count": 3,
+          "requested_current_ma": 100.0,
+          "applied_current_ma": 100.0,
+          "configured_home_offset": 1024,
+          "coast_ms": 47.0,
+          "rebound_ms": 54.0,
+          "retrigger_ready_ms": 64.0,
+          "ready_ms": 88.0,
+          "estimated_strike_velocity_dps": 870.0,
+          "retriggered_count": 0,
+          "rebound_timeout_count": 0,
+          "drum_position": 7891,
+          "home_position": 6867
+        },
+        {
+          "sweep_value": 150,
+          "sample_count": 3,
+          "requested_current_ma": 150.0,
+          "applied_current_ma": 150.0,
+          "configured_home_offset": 1024,
+          "coast_ms": 40.0,
+          "rebound_ms": 46.0,
+          "retrigger_ready_ms": 55.0,
+          "ready_ms": 108.0,
+          "estimated_strike_velocity_dps": 1062.0,
+          "retriggered_count": 0,
+          "rebound_timeout_count": 0,
+          "drum_position": 7891,
+          "home_position": 6867
+        },
+        {
+          "sweep_value": 200,
+          "sample_count": 3,
+          "requested_current_ma": 200.0,
+          "applied_current_ma": 200.0,
+          "configured_home_offset": 1024,
+          "coast_ms": 36.0,
+          "rebound_ms": 41.0,
+          "retrigger_ready_ms": 50.0,
+          "ready_ms": 99.0,
+          "estimated_strike_velocity_dps": 1218.0,
+          "retriggered_count": 0,
+          "rebound_timeout_count": 0,
+          "drum_position": 7891,
+          "home_position": 6867
+        },
+        {
+          "sweep_value": 250,
+          "sample_count": 3,
+          "requested_current_ma": 250.0,
+          "applied_current_ma": 250.0,
+          "configured_home_offset": 1024,
+          "coast_ms": 33.0,
+          "rebound_ms": 38.0,
+          "retrigger_ready_ms": 47.0,
+          "ready_ms": 87.0,
+          "estimated_strike_velocity_dps": 1212.0,
+          "retriggered_count": 0,
+          "rebound_timeout_count": 0,
+          "drum_position": 7891,
+          "home_position": 6867
+        },
+        {
+          "sweep_value": 300,
+          "sample_count": 3,
+          "requested_current_ma": 300.0,
+          "applied_current_ma": 300.0,
+          "configured_home_offset": 1024,
+          "coast_ms": 31.0,
+          "rebound_ms": 36.0,
+          "retrigger_ready_ms": 45.0,
+          "ready_ms": 85.0,
+          "estimated_strike_velocity_dps": 1320.0,
+          "retriggered_count": 0,
+          "rebound_timeout_count": 0,
+          "drum_position": 7891,
+          "home_position": 6867
+        },
+        {
+          "sweep_value": 350,
+          "sample_count": 3,
+          "requested_current_ma": 350.0,
+          "applied_current_ma": 350.0,
+          "configured_home_offset": 1024,
+          "coast_ms": 30.0,
+          "rebound_ms": 35.0,
+          "retrigger_ready_ms": 44.0,
+          "ready_ms": 69.0,
+          "estimated_strike_velocity_dps": 1338.0,
+          "retriggered_count": 0,
+          "rebound_timeout_count": 0,
+          "drum_position": 7891,
+          "home_position": 6867
+        },
+        {
+          "sweep_value": 400,
+          "sample_count": 3,
+          "requested_current_ma": 400.0,
+          "applied_current_ma": 400.0,
+          "configured_home_offset": 1024,
+          "coast_ms": 29.0,
+          "rebound_ms": 34.0,
+          "retrigger_ready_ms": 43.0,
+          "ready_ms": 68.0,
+          "estimated_strike_velocity_dps": 1428.0,
+          "retriggered_count": 0,
+          "rebound_timeout_count": 0,
+          "drum_position": 7891,
+          "home_position": 6867
+        },
+        {
+          "sweep_value": 450,
+          "sample_count": 3,
+          "requested_current_ma": 450.0,
+          "applied_current_ma": 450.0,
+          "configured_home_offset": 1024,
+          "coast_ms": 28.0,
+          "rebound_ms": 33.0,
+          "retrigger_ready_ms": 42.0,
+          "ready_ms": 67.0,
+          "estimated_strike_velocity_dps": 1500.0,
+          "retriggered_count": 0,
+          "rebound_timeout_count": 0,
+          "drum_position": 7891,
+          "home_position": 6867
+        },
+        {
+          "sweep_value": 500,
+          "sample_count": 3,
+          "requested_current_ma": 500.0,
+          "applied_current_ma": 500.0,
+          "configured_home_offset": 1024,
+          "coast_ms": 27.0,
+          "rebound_ms": 32.0,
+          "retrigger_ready_ms": 40.0,
+          "ready_ms": 66.0,
+          "estimated_strike_velocity_dps": 1548.0,
+          "retriggered_count": 0,
+          "rebound_timeout_count": 0,
+          "drum_position": 7891,
+          "home_position": 6867
+        },
+        {
+          "sweep_value": 550,
+          "sample_count": 3,
+          "requested_current_ma": 550.0,
+          "applied_current_ma": 550.0,
+          "configured_home_offset": 1024,
+          "coast_ms": 26.0,
+          "rebound_ms": 31.0,
+          "retrigger_ready_ms": 40.0,
+          "ready_ms": 65.0,
+          "estimated_strike_velocity_dps": 1566.0,
+          "retriggered_count": 0,
+          "rebound_timeout_count": 0,
+          "drum_position": 7891,
+          "home_position": 6867
+        },
+        {
+          "sweep_value": 600,
+          "sample_count": 3,
+          "requested_current_ma": 600.0,
+          "applied_current_ma": 600.0,
+          "configured_home_offset": 1024,
+          "coast_ms": 25.0,
+          "rebound_ms": 30.0,
+          "retrigger_ready_ms": 38.0,
+          "ready_ms": 64.0,
+          "estimated_strike_velocity_dps": 1638.0,
+          "retriggered_count": 0,
+          "rebound_timeout_count": 0,
+          "drum_position": 7891,
+          "home_position": 6867
+        },
+        {
+          "sweep_value": 650,
+          "sample_count": 3,
+          "requested_current_ma": 650.0,
+          "applied_current_ma": 650.0,
+          "configured_home_offset": 1024,
+          "coast_ms": 25.0,
+          "rebound_ms": 29.0,
+          "retrigger_ready_ms": 38.0,
+          "ready_ms": 63.0,
+          "estimated_strike_velocity_dps": 1686.0,
+          "retriggered_count": 0,
+          "rebound_timeout_count": 0,
+          "drum_position": 7891,
+          "home_position": 6867
+        },
+        {
+          "sweep_value": 700,
+          "sample_count": 3,
+          "requested_current_ma": 700.0,
+          "applied_current_ma": 700.0,
+          "configured_home_offset": 1024,
+          "coast_ms": 20.0,
+          "rebound_ms": 24.0,
+          "retrigger_ready_ms": 32.0,
+          "ready_ms": 58.0,
+          "estimated_strike_velocity_dps": 2232.0,
+          "retriggered_count": 0,
+          "rebound_timeout_count": 0,
+          "drum_position": 7891,
+          "home_position": 6867
+        },
+        {
+          "sweep_value": 750,
+          "sample_count": 3,
+          "requested_current_ma": 750.0,
+          "applied_current_ma": 750.0,
+          "configured_home_offset": 1024,
+          "coast_ms": 19.0,
+          "rebound_ms": 24.0,
+          "retrigger_ready_ms": 32.0,
+          "ready_ms": 57.0,
+          "estimated_strike_velocity_dps": 2268.0,
+          "retriggered_count": 0,
+          "rebound_timeout_count": 0,
+          "drum_position": 7891,
+          "home_position": 6867
+        },
+        {
+          "sweep_value": 800,
+          "sample_count": 3,
+          "requested_current_ma": 800.0,
+          "applied_current_ma": 800.0,
+          "configured_home_offset": 1024,
+          "coast_ms": 19.0,
+          "rebound_ms": 24.0,
+          "retrigger_ready_ms": 32.0,
+          "ready_ms": 57.0,
+          "estimated_strike_velocity_dps": 2292.0,
+          "retriggered_count": 0,
+          "rebound_timeout_count": 0,
+          "drum_position": 7891,
+          "home_position": 6867
+        },
+        {
+          "sweep_value": 850,
+          "sample_count": 3,
+          "requested_current_ma": 850.0,
+          "applied_current_ma": 850.0,
+          "configured_home_offset": 1024,
+          "coast_ms": 17.0,
+          "rebound_ms": 21.0,
+          "retrigger_ready_ms": 29.0,
+          "ready_ms": 54.0,
+          "estimated_strike_velocity_dps": 2766.0,
+          "retriggered_count": 0,
+          "rebound_timeout_count": 0,
+          "drum_position": 7891,
+          "home_position": 6867
+        },
+        {
+          "sweep_value": 900,
+          "sample_count": 3,
+          "requested_current_ma": 900.0,
+          "applied_current_ma": 900.0,
+          "configured_home_offset": 1024,
+          "coast_ms": 17.0,
+          "rebound_ms": 21.0,
+          "retrigger_ready_ms": 29.0,
+          "ready_ms": 54.0,
+          "estimated_strike_velocity_dps": 2766.0,
+          "retriggered_count": 0,
+          "rebound_timeout_count": 0,
+          "drum_position": 7891,
+          "home_position": 6867
+        }
+      ],
+      "midi_velocity_lookup": [
+        {
+          "midi_velocity": 1,
+          "target_strength_dps": 660,
+          "current_ma": 50,
+          "lead_ms": 70,
+          "repeat_ms": 80,
+          "settle_ms": 137
+        },
+        {
+          "midi_velocity": 2,
+          "target_strength_dps": 677,
+          "current_ma": 54,
+          "lead_ms": 69,
+          "repeat_ms": 79,
+          "settle_ms": 133
+        },
+        {
+          "midi_velocity": 3,
+          "target_strength_dps": 693,
+          "current_ma": 58,
+          "lead_ms": 67,
+          "repeat_ms": 77,
+          "settle_ms": 129
+        },
+        {
+          "midi_velocity": 4,
+          "target_strength_dps": 710,
+          "current_ma": 62,
+          "lead_ms": 66,
+          "repeat_ms": 76,
+          "settle_ms": 125
+        },
+        {
+          "midi_velocity": 5,
+          "target_strength_dps": 727,
+          "current_ma": 66,
+          "lead_ms": 65,
+          "repeat_ms": 75,
+          "settle_ms": 121
+        },
+        {
+          "midi_velocity": 6,
+          "target_strength_dps": 744,
+          "current_ma": 70,
+          "lead_ms": 64,
+          "repeat_ms": 74,
+          "settle_ms": 118
+        },
+        {
+          "midi_velocity": 7,
+          "target_strength_dps": 760,
+          "current_ma": 74,
+          "lead_ms": 62,
+          "repeat_ms": 72,
+          "settle_ms": 114
+        },
+        {
+          "midi_velocity": 8,
+          "target_strength_dps": 777,
+          "current_ma": 78,
+          "lead_ms": 61,
+          "repeat_ms": 71,
+          "settle_ms": 110
+        },
+        {
+          "midi_velocity": 9,
+          "target_strength_dps": 794,
+          "current_ma": 82,
+          "lead_ms": 60,
+          "repeat_ms": 70,
+          "settle_ms": 106
+        },
+        {
+          "midi_velocity": 10,
+          "target_strength_dps": 810,
+          "current_ma": 86,
+          "lead_ms": 59,
+          "repeat_ms": 69,
+          "settle_ms": 102
+        },
+        {
+          "midi_velocity": 11,
+          "target_strength_dps": 827,
+          "current_ma": 90,
+          "lead_ms": 57,
+          "repeat_ms": 67,
+          "settle_ms": 98
+        },
+        {
+          "midi_velocity": 12,
+          "target_strength_dps": 844,
+          "current_ma": 94,
+          "lead_ms": 56,
+          "repeat_ms": 66,
+          "settle_ms": 94
+        },
+        {
+          "midi_velocity": 13,
+          "target_strength_dps": 861,
+          "current_ma": 98,
+          "lead_ms": 55,
+          "repeat_ms": 65,
+          "settle_ms": 90
+        },
+        {
+          "midi_velocity": 14,
+          "target_strength_dps": 877,
+          "current_ma": 102,
+          "lead_ms": 54,
+          "repeat_ms": 64,
+          "settle_ms": 89
+        },
+        {
+          "midi_velocity": 15,
+          "target_strength_dps": 894,
+          "current_ma": 106,
+          "lead_ms": 53,
+          "repeat_ms": 63,
+          "settle_ms": 90
+        },
+        {
+          "midi_velocity": 16,
+          "target_strength_dps": 911,
+          "current_ma": 111,
+          "lead_ms": 52,
+          "repeat_ms": 62,
+          "settle_ms": 92
+        },
+        {
+          "midi_velocity": 17,
+          "target_strength_dps": 927,
+          "current_ma": 115,
+          "lead_ms": 52,
+          "repeat_ms": 61,
+          "settle_ms": 94
+        },
+        {
+          "midi_velocity": 18,
+          "target_strength_dps": 944,
+          "current_ma": 119,
+          "lead_ms": 51,
+          "repeat_ms": 61,
+          "settle_ms": 96
+        },
+        {
+          "midi_velocity": 19,
+          "target_strength_dps": 961,
+          "current_ma": 124,
+          "lead_ms": 50,
+          "repeat_ms": 60,
+          "settle_ms": 97
+        },
+        {
+          "midi_velocity": 20,
+          "target_strength_dps": 978,
+          "current_ma": 128,
+          "lead_ms": 50,
+          "repeat_ms": 59,
+          "settle_ms": 99
+        },
+        {
+          "midi_velocity": 21,
+          "target_strength_dps": 994,
+          "current_ma": 132,
+          "lead_ms": 49,
+          "repeat_ms": 58,
+          "settle_ms": 101
+        },
+        {
+          "midi_velocity": 22,
+          "target_strength_dps": 1011,
+          "current_ma": 137,
+          "lead_ms": 48,
+          "repeat_ms": 57,
+          "settle_ms": 103
+        },
+        {
+          "midi_velocity": 23,
+          "target_strength_dps": 1028,
+          "current_ma": 141,
+          "lead_ms": 47,
+          "repeat_ms": 57,
+          "settle_ms": 104
+        },
+        {
+          "midi_velocity": 24,
+          "target_strength_dps": 1044,
+          "current_ma": 145,
+          "lead_ms": 47,
+          "repeat_ms": 56,
+          "settle_ms": 106
+        },
+        {
+          "midi_velocity": 25,
+          "target_strength_dps": 1061,
+          "current_ma": 150,
+          "lead_ms": 46,
+          "repeat_ms": 55,
+          "settle_ms": 108
+        },
+        {
+          "midi_velocity": 26,
+          "target_strength_dps": 1078,
+          "current_ma": 160,
+          "lead_ms": 45,
+          "repeat_ms": 54,
+          "settle_ms": 106
+        },
+        {
+          "midi_velocity": 27,
+          "target_strength_dps": 1095,
+          "current_ma": 171,
+          "lead_ms": 44,
+          "repeat_ms": 53,
+          "settle_ms": 104
+        },
+        {
+          "midi_velocity": 28,
+          "target_strength_dps": 1111,
+          "current_ma": 182,
+          "lead_ms": 43,
+          "repeat_ms": 52,
+          "settle_ms": 101
+        },
+        {
+          "midi_velocity": 29,
+          "target_strength_dps": 1128,
+          "current_ma": 192,
+          "lead_ms": 43,
+          "repeat_ms": 52,
+          "settle_ms": 99
+        },
+        {
+          "midi_velocity": 30,
+          "target_strength_dps": 1145,
+          "current_ma": 203,
+          "lead_ms": 42,
+          "repeat_ms": 51,
+          "settle_ms": 97
+        },
+        {
+          "midi_velocity": 31,
+          "target_strength_dps": 1161,
+          "current_ma": 214,
+          "lead_ms": 41,
+          "repeat_ms": 50,
+          "settle_ms": 95
+        },
+        {
+          "midi_velocity": 32,
+          "target_strength_dps": 1178,
+          "current_ma": 224,
+          "lead_ms": 40,
+          "repeat_ms": 49,
+          "settle_ms": 92
+        },
+        {
+          "midi_velocity": 33,
+          "target_strength_dps": 1195,
+          "current_ma": 235,
+          "lead_ms": 39,
+          "repeat_ms": 48,
+          "settle_ms": 90
+        },
+        {
+          "midi_velocity": 34,
+          "target_strength_dps": 1212,
+          "current_ma": 246,
+          "lead_ms": 38,
+          "repeat_ms": 47,
+          "settle_ms": 88
+        },
+        {
+          "midi_velocity": 35,
+          "target_strength_dps": 1228,
+          "current_ma": 255,
+          "lead_ms": 38,
+          "repeat_ms": 47,
+          "settle_ms": 87
+        },
+        {
+          "midi_velocity": 36,
+          "target_strength_dps": 1245,
+          "current_ma": 263,
+          "lead_ms": 37,
+          "repeat_ms": 46,
+          "settle_ms": 86
+        },
+        {
+          "midi_velocity": 37,
+          "target_strength_dps": 1262,
+          "current_ma": 271,
+          "lead_ms": 37,
+          "repeat_ms": 46,
+          "settle_ms": 86
+        },
+        {
+          "midi_velocity": 38,
+          "target_strength_dps": 1278,
+          "current_ma": 280,
+          "lead_ms": 37,
+          "repeat_ms": 46,
+          "settle_ms": 86
+        },
+        {
+          "midi_velocity": 39,
+          "target_strength_dps": 1295,
+          "current_ma": 288,
+          "lead_ms": 36,
+          "repeat_ms": 45,
+          "settle_ms": 85
+        },
+        {
+          "midi_velocity": 40,
+          "target_strength_dps": 1312,
+          "current_ma": 296,
+          "lead_ms": 36,
+          "repeat_ms": 45,
+          "settle_ms": 85
+        },
+        {
+          "midi_velocity": 41,
+          "target_strength_dps": 1329,
+          "current_ma": 324,
+          "lead_ms": 36,
+          "repeat_ms": 45,
+          "settle_ms": 77
+        },
+        {
+          "midi_velocity": 42,
+          "target_strength_dps": 1345,
+          "current_ma": 354,
+          "lead_ms": 35,
+          "repeat_ms": 44,
+          "settle_ms": 69
+        },
+        {
+          "midi_velocity": 43,
+          "target_strength_dps": 1362,
+          "current_ma": 363,
+          "lead_ms": 35,
+          "repeat_ms": 44,
+          "settle_ms": 69
+        },
+        {
+          "midi_velocity": 44,
+          "target_strength_dps": 1379,
+          "current_ma": 373,
+          "lead_ms": 35,
+          "repeat_ms": 44,
+          "settle_ms": 69
+        },
+        {
+          "midi_velocity": 45,
+          "target_strength_dps": 1395,
+          "current_ma": 382,
+          "lead_ms": 34,
+          "repeat_ms": 43,
+          "settle_ms": 68
+        },
+        {
+          "midi_velocity": 46,
+          "target_strength_dps": 1412,
+          "current_ma": 391,
+          "lead_ms": 34,
+          "repeat_ms": 43,
+          "settle_ms": 68
+        },
+        {
+          "midi_velocity": 47,
+          "target_strength_dps": 1429,
+          "current_ma": 401,
+          "lead_ms": 34,
+          "repeat_ms": 43,
+          "settle_ms": 68
+        },
+        {
+          "midi_velocity": 48,
+          "target_strength_dps": 1446,
+          "current_ma": 412,
+          "lead_ms": 34,
+          "repeat_ms": 43,
+          "settle_ms": 68
+        },
+        {
+          "midi_velocity": 49,
+          "target_strength_dps": 1462,
+          "current_ma": 424,
+          "lead_ms": 34,
+          "repeat_ms": 43,
+          "settle_ms": 68
+        },
+        {
+          "midi_velocity": 50,
+          "target_strength_dps": 1479,
+          "current_ma": 435,
+          "lead_ms": 33,
+          "repeat_ms": 42,
+          "settle_ms": 67
+        },
+        {
+          "midi_velocity": 51,
+          "target_strength_dps": 1496,
+          "current_ma": 447,
+          "lead_ms": 33,
+          "repeat_ms": 42,
+          "settle_ms": 67
+        },
+        {
+          "midi_velocity": 52,
+          "target_strength_dps": 1512,
+          "current_ma": 463,
+          "lead_ms": 33,
+          "repeat_ms": 41,
+          "settle_ms": 67
+        },
+        {
+          "midi_velocity": 53,
+          "target_strength_dps": 1529,
+          "current_ma": 480,
+          "lead_ms": 32,
+          "repeat_ms": 41,
+          "settle_ms": 66
+        },
+        {
+          "midi_velocity": 54,
+          "target_strength_dps": 1546,
+          "current_ma": 498,
+          "lead_ms": 32,
+          "repeat_ms": 40,
+          "settle_ms": 66
+        },
+        {
+          "midi_velocity": 55,
+          "target_strength_dps": 1563,
+          "current_ma": 540,
+          "lead_ms": 31,
+          "repeat_ms": 40,
+          "settle_ms": 65
+        },
+        {
+          "midi_velocity": 56,
+          "target_strength_dps": 1579,
+          "current_ma": 559,
+          "lead_ms": 31,
+          "repeat_ms": 40,
+          "settle_ms": 65
+        },
+        {
+          "midi_velocity": 57,
+          "target_strength_dps": 1596,
+          "current_ma": 571,
+          "lead_ms": 31,
+          "repeat_ms": 39,
+          "settle_ms": 65
+        },
+        {
+          "midi_velocity": 58,
+          "target_strength_dps": 1613,
+          "current_ma": 582,
+          "lead_ms": 30,
+          "repeat_ms": 39,
+          "settle_ms": 64
+        },
+        {
+          "midi_velocity": 59,
+          "target_strength_dps": 1629,
+          "current_ma": 594,
+          "lead_ms": 30,
+          "repeat_ms": 38,
+          "settle_ms": 64
+        },
+        {
+          "midi_velocity": 60,
+          "target_strength_dps": 1646,
+          "current_ma": 608,
+          "lead_ms": 30,
+          "repeat_ms": 38,
+          "settle_ms": 64
+        },
+        {
+          "midi_velocity": 61,
+          "target_strength_dps": 1663,
+          "current_ma": 626,
+          "lead_ms": 29,
+          "repeat_ms": 38,
+          "settle_ms": 63
+        },
+        {
+          "midi_velocity": 62,
+          "target_strength_dps": 1680,
+          "current_ma": 643,
+          "lead_ms": 29,
+          "repeat_ms": 38,
+          "settle_ms": 63
+        },
+        {
+          "midi_velocity": 63,
+          "target_strength_dps": 1696,
+          "current_ma": 651,
+          "lead_ms": 29,
+          "repeat_ms": 38,
+          "settle_ms": 63
+        },
+        {
+          "midi_velocity": 64,
+          "target_strength_dps": 1713,
+          "current_ma": 652,
+          "lead_ms": 29,
+          "repeat_ms": 38,
+          "settle_ms": 63
+        },
+        {
+          "midi_velocity": 65,
+          "target_strength_dps": 1730,
+          "current_ma": 654,
+          "lead_ms": 29,
+          "repeat_ms": 38,
+          "settle_ms": 63
+        },
+        {
+          "midi_velocity": 66,
+          "target_strength_dps": 1746,
+          "current_ma": 656,
+          "lead_ms": 28,
+          "repeat_ms": 37,
+          "settle_ms": 62
+        },
+        {
+          "midi_velocity": 67,
+          "target_strength_dps": 1763,
+          "current_ma": 657,
+          "lead_ms": 28,
+          "repeat_ms": 37,
+          "settle_ms": 62
+        },
+        {
+          "midi_velocity": 68,
+          "target_strength_dps": 1780,
+          "current_ma": 659,
+          "lead_ms": 28,
+          "repeat_ms": 37,
+          "settle_ms": 62
+        },
+        {
+          "midi_velocity": 69,
+          "target_strength_dps": 1797,
+          "current_ma": 660,
+          "lead_ms": 28,
+          "repeat_ms": 37,
+          "settle_ms": 62
+        },
+        {
+          "midi_velocity": 70,
+          "target_strength_dps": 1813,
+          "current_ma": 662,
+          "lead_ms": 28,
+          "repeat_ms": 37,
+          "settle_ms": 62
+        },
+        {
+          "midi_velocity": 71,
+          "target_strength_dps": 1830,
+          "current_ma": 663,
+          "lead_ms": 28,
+          "repeat_ms": 36,
+          "settle_ms": 62
+        },
+        {
+          "midi_velocity": 72,
+          "target_strength_dps": 1847,
+          "current_ma": 665,
+          "lead_ms": 28,
+          "repeat_ms": 36,
+          "settle_ms": 62
+        },
+        {
+          "midi_velocity": 73,
+          "target_strength_dps": 1863,
+          "current_ma": 666,
+          "lead_ms": 27,
+          "repeat_ms": 36,
+          "settle_ms": 61
+        },
+        {
+          "midi_velocity": 74,
+          "target_strength_dps": 1880,
+          "current_ma": 668,
+          "lead_ms": 27,
+          "repeat_ms": 36,
+          "settle_ms": 61
+        },
+        {
+          "midi_velocity": 75,
+          "target_strength_dps": 1897,
+          "current_ma": 669,
+          "lead_ms": 27,
+          "repeat_ms": 36,
+          "settle_ms": 61
+        },
+        {
+          "midi_velocity": 76,
+          "target_strength_dps": 1914,
+          "current_ma": 671,
+          "lead_ms": 27,
+          "repeat_ms": 35,
+          "settle_ms": 61
+        },
+        {
+          "midi_velocity": 77,
+          "target_strength_dps": 1930,
+          "current_ma": 672,
+          "lead_ms": 27,
+          "repeat_ms": 35,
+          "settle_ms": 61
+        },
+        {
+          "midi_velocity": 78,
+          "target_strength_dps": 1947,
+          "current_ma": 674,
+          "lead_ms": 27,
+          "repeat_ms": 35,
+          "settle_ms": 61
+        },
+        {
+          "midi_velocity": 79,
+          "target_strength_dps": 1964,
+          "current_ma": 675,
+          "lead_ms": 26,
+          "repeat_ms": 35,
+          "settle_ms": 60
+        },
+        {
+          "midi_velocity": 80,
+          "target_strength_dps": 1980,
+          "current_ma": 677,
+          "lead_ms": 26,
+          "repeat_ms": 35,
+          "settle_ms": 60
+        },
+        {
+          "midi_velocity": 81,
+          "target_strength_dps": 1997,
+          "current_ma": 678,
+          "lead_ms": 26,
+          "repeat_ms": 35,
+          "settle_ms": 60
+        },
+        {
+          "midi_velocity": 82,
+          "target_strength_dps": 2014,
+          "current_ma": 680,
+          "lead_ms": 26,
+          "repeat_ms": 34,
+          "settle_ms": 60
+        },
+        {
+          "midi_velocity": 83,
+          "target_strength_dps": 2031,
+          "current_ma": 682,
+          "lead_ms": 26,
+          "repeat_ms": 34,
+          "settle_ms": 60
+        },
+        {
+          "midi_velocity": 84,
+          "target_strength_dps": 2047,
+          "current_ma": 683,
+          "lead_ms": 26,
+          "repeat_ms": 34,
+          "settle_ms": 60
+        },
+        {
+          "midi_velocity": 85,
+          "target_strength_dps": 2064,
+          "current_ma": 685,
+          "lead_ms": 26,
+          "repeat_ms": 34,
+          "settle_ms": 60
+        },
+        {
+          "midi_velocity": 86,
+          "target_strength_dps": 2081,
+          "current_ma": 686,
+          "lead_ms": 25,
+          "repeat_ms": 34,
+          "settle_ms": 59
+        },
+        {
+          "midi_velocity": 87,
+          "target_strength_dps": 2097,
+          "current_ma": 688,
+          "lead_ms": 25,
+          "repeat_ms": 33,
+          "settle_ms": 59
+        },
+        {
+          "midi_velocity": 88,
+          "target_strength_dps": 2114,
+          "current_ma": 689,
+          "lead_ms": 25,
+          "repeat_ms": 33,
+          "settle_ms": 59
+        },
+        {
+          "midi_velocity": 89,
+          "target_strength_dps": 2131,
+          "current_ma": 691,
+          "lead_ms": 25,
+          "repeat_ms": 33,
+          "settle_ms": 59
+        },
+        {
+          "midi_velocity": 90,
+          "target_strength_dps": 2148,
+          "current_ma": 692,
+          "lead_ms": 25,
+          "repeat_ms": 33,
+          "settle_ms": 59
+        },
+        {
+          "midi_velocity": 91,
+          "target_strength_dps": 2164,
+          "current_ma": 694,
+          "lead_ms": 25,
+          "repeat_ms": 33,
+          "settle_ms": 59
+        },
+        {
+          "midi_velocity": 92,
+          "target_strength_dps": 2181,
+          "current_ma": 695,
+          "lead_ms": 24,
+          "repeat_ms": 33,
+          "settle_ms": 58
+        },
+        {
+          "midi_velocity": 93,
+          "target_strength_dps": 2198,
+          "current_ma": 697,
+          "lead_ms": 24,
+          "repeat_ms": 32,
+          "settle_ms": 58
+        },
+        {
+          "midi_velocity": 94,
+          "target_strength_dps": 2214,
+          "current_ma": 698,
+          "lead_ms": 24,
+          "repeat_ms": 32,
+          "settle_ms": 58
+        },
+        {
+          "midi_velocity": 95,
+          "target_strength_dps": 2231,
+          "current_ma": 700,
+          "lead_ms": 24,
+          "repeat_ms": 32,
+          "settle_ms": 58
+        },
+        {
+          "midi_velocity": 96,
+          "target_strength_dps": 2248,
+          "current_ma": 722,
+          "lead_ms": 24,
+          "repeat_ms": 32,
+          "settle_ms": 58
+        },
+        {
+          "midi_velocity": 97,
+          "target_strength_dps": 2265,
+          "current_ma": 745,
+          "lead_ms": 24,
+          "repeat_ms": 32,
+          "settle_ms": 57
+        },
+        {
+          "midi_velocity": 98,
+          "target_strength_dps": 2281,
+          "current_ma": 778,
+          "lead_ms": 24,
+          "repeat_ms": 32,
+          "settle_ms": 57
+        },
+        {
+          "midi_velocity": 99,
+          "target_strength_dps": 2298,
+          "current_ma": 801,
+          "lead_ms": 24,
+          "repeat_ms": 32,
+          "settle_ms": 57
+        },
+        {
+          "midi_velocity": 100,
+          "target_strength_dps": 2315,
+          "current_ma": 805,
+          "lead_ms": 24,
+          "repeat_ms": 32,
+          "settle_ms": 57
+        },
+        {
+          "midi_velocity": 101,
+          "target_strength_dps": 2331,
+          "current_ma": 808,
+          "lead_ms": 24,
+          "repeat_ms": 32,
+          "settle_ms": 57
+        },
+        {
+          "midi_velocity": 102,
+          "target_strength_dps": 2348,
+          "current_ma": 812,
+          "lead_ms": 24,
+          "repeat_ms": 32,
+          "settle_ms": 57
+        },
+        {
+          "midi_velocity": 103,
+          "target_strength_dps": 2365,
+          "current_ma": 815,
+          "lead_ms": 24,
+          "repeat_ms": 32,
+          "settle_ms": 57
+        },
+        {
+          "midi_velocity": 104,
+          "target_strength_dps": 2382,
+          "current_ma": 819,
+          "lead_ms": 23,
+          "repeat_ms": 31,
+          "settle_ms": 56
+        },
+        {
+          "midi_velocity": 105,
+          "target_strength_dps": 2398,
+          "current_ma": 822,
+          "lead_ms": 23,
+          "repeat_ms": 31,
+          "settle_ms": 56
+        },
+        {
+          "midi_velocity": 106,
+          "target_strength_dps": 2415,
+          "current_ma": 826,
+          "lead_ms": 23,
+          "repeat_ms": 31,
+          "settle_ms": 56
+        },
+        {
+          "midi_velocity": 107,
+          "target_strength_dps": 2432,
+          "current_ma": 829,
+          "lead_ms": 23,
+          "repeat_ms": 31,
+          "settle_ms": 56
+        },
+        {
+          "midi_velocity": 108,
+          "target_strength_dps": 2448,
+          "current_ma": 833,
+          "lead_ms": 23,
+          "repeat_ms": 31,
+          "settle_ms": 56
+        },
+        {
+          "midi_velocity": 109,
+          "target_strength_dps": 2465,
+          "current_ma": 837,
+          "lead_ms": 23,
+          "repeat_ms": 31,
+          "settle_ms": 56
+        },
+        {
+          "midi_velocity": 110,
+          "target_strength_dps": 2482,
+          "current_ma": 840,
+          "lead_ms": 23,
+          "repeat_ms": 31,
+          "settle_ms": 56
+        },
+        {
+          "midi_velocity": 111,
+          "target_strength_dps": 2499,
+          "current_ma": 844,
+          "lead_ms": 23,
+          "repeat_ms": 31,
+          "settle_ms": 56
+        },
+        {
+          "midi_velocity": 112,
+          "target_strength_dps": 2515,
+          "current_ma": 847,
+          "lead_ms": 23,
+          "repeat_ms": 31,
+          "settle_ms": 56
+        },
+        {
+          "midi_velocity": 113,
+          "target_strength_dps": 2532,
+          "current_ma": 851,
+          "lead_ms": 22,
+          "repeat_ms": 30,
+          "settle_ms": 55
+        },
+        {
+          "midi_velocity": 114,
+          "target_strength_dps": 2549,
+          "current_ma": 854,
+          "lead_ms": 22,
+          "repeat_ms": 30,
+          "settle_ms": 55
+        },
+        {
+          "midi_velocity": 115,
+          "target_strength_dps": 2565,
+          "current_ma": 858,
+          "lead_ms": 22,
+          "repeat_ms": 30,
+          "settle_ms": 55
+        },
+        {
+          "midi_velocity": 116,
+          "target_strength_dps": 2582,
+          "current_ma": 861,
+          "lead_ms": 22,
+          "repeat_ms": 30,
+          "settle_ms": 55
+        },
+        {
+          "midi_velocity": 117,
+          "target_strength_dps": 2599,
+          "current_ma": 865,
+          "lead_ms": 22,
+          "repeat_ms": 30,
+          "settle_ms": 55
+        },
+        {
+          "midi_velocity": 118,
+          "target_strength_dps": 2616,
+          "current_ma": 868,
+          "lead_ms": 22,
+          "repeat_ms": 30,
+          "settle_ms": 55
+        },
+        {
+          "midi_velocity": 119,
+          "target_strength_dps": 2632,
+          "current_ma": 872,
+          "lead_ms": 22,
+          "repeat_ms": 30,
+          "settle_ms": 55
+        },
+        {
+          "midi_velocity": 120,
+          "target_strength_dps": 2649,
+          "current_ma": 875,
+          "lead_ms": 22,
+          "repeat_ms": 30,
+          "settle_ms": 55
+        },
+        {
+          "midi_velocity": 121,
+          "target_strength_dps": 2666,
+          "current_ma": 879,
+          "lead_ms": 22,
+          "repeat_ms": 30,
+          "settle_ms": 55
+        },
+        {
+          "midi_velocity": 122,
+          "target_strength_dps": 2682,
+          "current_ma": 882,
+          "lead_ms": 22,
+          "repeat_ms": 30,
+          "settle_ms": 55
+        },
+        {
+          "midi_velocity": 123,
+          "target_strength_dps": 2699,
+          "current_ma": 886,
+          "lead_ms": 21,
+          "repeat_ms": 29,
+          "settle_ms": 54
+        },
+        {
+          "midi_velocity": 124,
+          "target_strength_dps": 2716,
+          "current_ma": 889,
+          "lead_ms": 21,
+          "repeat_ms": 29,
+          "settle_ms": 54
+        },
+        {
+          "midi_velocity": 125,
+          "target_strength_dps": 2733,
+          "current_ma": 893,
+          "lead_ms": 21,
+          "repeat_ms": 29,
+          "settle_ms": 54
+        },
+        {
+          "midi_velocity": 126,
+          "target_strength_dps": 2749,
+          "current_ma": 896,
+          "lead_ms": 21,
+          "repeat_ms": 29,
+          "settle_ms": 54
+        },
+        {
+          "midi_velocity": 127,
+          "target_strength_dps": 2766,
+          "current_ma": 900,
+          "lead_ms": 21,
+          "repeat_ms": 29,
+          "settle_ms": 54
+        }
+      ]
+    }
+  ]
+}

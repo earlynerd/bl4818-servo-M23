@@ -350,7 +350,7 @@ def plot_step(
 
 # ── Strike test ────────────────────────────────────────────────────────────
 
-STRIKE_STATE_NAMES = {0: "IDLE", 1: "HOMING", 2: "DRIVING", 3: "COASTING", 4: "BRAKING", 5: "CATCHING"}
+STRIKE_STATE_NAMES = {0: "IDLE", 1: "HOMING", 2: "DRIVING", 3: "COASTING", 4: "LEGACY_RETURNING", 5: "CATCHING"}
 
 
 def wait_for_homed(client: RingClientV2, address: int, timeout: float = 15.0) -> StrikeStatus:
@@ -387,7 +387,7 @@ def wait_for_strike_idle(client: RingClientV2, address: int, timeout: float = 5.
 def run_strike(
     client: RingClientV2,
     address: int,
-    strike_duty: int,
+    strike_current_ma: int,
     home_offset: int | None,
     coast_distance: int | None,
     homing_duty: int | None,
@@ -427,8 +427,8 @@ def run_strike(
 
     # 4. Fire strike
     t_strike = time.monotonic()
-    print(f"STRIKE: duty={strike_duty}")
-    s = client.strike(address, strike_duty)
+    print(f"STRIKE: current_ma={strike_current_ma}")
+    s = client.strike(address, strike_current_ma)
     all_samples.append((time.monotonic(), s))
 
     # 5. Capture through the strike cycle
@@ -541,8 +541,8 @@ def build_parser() -> argparse.ArgumentParser:
                       help="Position step target (encoder counts, auto-zeros first)")
     step.add_argument("--measure-ff", action="store_true",
                       help="Measure feedforward gain (Kff) by open-loop sweep")
-    step.add_argument("--strike", type=int, metavar="DUTY",
-                      help="Strike test: home, strike at given duty, capture cycle")
+    step.add_argument("--strike", type=int, metavar="CURRENT_MA",
+                      help="Strike test: home, strike at given current in mA, capture cycle")
 
     parser.add_argument("--pid", nargs=3, type=int, metavar=("KP", "KI", "KD"),
                         help="Set velocity PID gains before step (Q8)")
@@ -611,7 +611,7 @@ def main() -> int:
             samples, t_strike, strike_info = run_strike(
                 client=client,
                 address=args.address,
-                strike_duty=args.strike,
+                strike_current_ma=args.strike,
                 home_offset=args.home_offset,
                 coast_distance=args.coast_distance,
                 homing_duty=args.homing_duty,
@@ -622,7 +622,7 @@ def main() -> int:
             if args.csv:
                 save_csv(args.csv, samples, t_strike)
 
-            title = f"Strike Test: duty={args.strike}"
+            title = f"Strike Test: current_ma={args.strike}"
             if args.home_offset is not None:
                 title += f"  home_offset={args.home_offset}"
             if args.coast_distance is not None:

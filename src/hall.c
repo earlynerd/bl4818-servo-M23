@@ -5,6 +5,7 @@
 #include "m2003_config.h"
 #include "M2003.h"
 #include "hall.h"
+#include "motor.h"
 
 static const uint8_t hall_decode[8] = { 0, 1, 2, 3, 4, 5, 6, 7 };
 static const uint8_t hall_forward_seq[8] = { 0xFF, 3, 6, 2, 5, 1, 4, 0xFF };
@@ -20,7 +21,7 @@ static int8_t  detected_direction;
 static int32_t hall_position;
 static uint32_t transition_period;
 static uint32_t last_transition_time;
-static volatile uint8_t hall_irq_hint;
+static volatile uint8_t hall_pending_result;
 
 static uint32_t irq_save(void)
 {
@@ -87,17 +88,17 @@ void hall_init(void)
     GPIO_EnableInt(PC, 14u, GPIO_INT_BOTH_EDGE);
     GPIO_CLR_INT_FLAG(PB, HALL_PORTB_MASK);
     GPIO_CLR_INT_FLAG(PC, HALL_PORTC_MASK);
-    NVIC_SetPriority(GPB_IRQn, 0u);
-    NVIC_SetPriority(GPC_IRQn, 0u);
-    NVIC_EnableIRQ(GPB_IRQn);
-    NVIC_EnableIRQ(GPC_IRQn);
-
     prev_hall = hall_read();
     detected_direction = 0;
     hall_position = 0;
     transition_period = 0xFFFFFFFFu;
     last_transition_time = TIMER_GetCounter(TIMER1) & HALL_TIMER_MASK;
-    hall_irq_hint = 1u;
+    hall_pending_result = HALL_POLL_NO_CHANGE;
+
+    NVIC_SetPriority(GPB_IRQn, 0u);
+    NVIC_SetPriority(GPC_IRQn, 0u);
+    NVIC_EnableIRQ(GPB_IRQn);
+    NVIC_EnableIRQ(GPC_IRQn);
 }
 
 uint8_t hall_read_raw(void)
@@ -121,16 +122,13 @@ uint8_t hall_read(void)
 
 uint8_t hall_poll(void)
 {
+    uint8_t result;
     uint32_t primask = irq_save();
 
-    if (hall_irq_hint == 0u) {
-        irq_restore(primask);
-        return HALL_POLL_NO_CHANGE;
-    }
-
-    hall_irq_hint = 0u;
+    result = hall_pending_result;
+    hall_pending_result = HALL_POLL_NO_CHANGE;
     irq_restore(primask);
-    return hall_process_transition(hall_read());
+    return result;
 }
 
 int8_t hall_direction(void) { return detected_direction; }
@@ -144,8 +142,11 @@ void GPB_IRQHandler(void)
     uint32_t flags = PB->INTSRC & HALL_PORTB_MASK;
 
     if (flags != 0u) {
+        uint8_t result;
         GPIO_CLR_INT_FLAG(PB, flags);
-        hall_irq_hint = 1u;
+        result = hall_process_transition(hall_read());
+        hall_pending_result = result;
+        motor_handle_hall_transition(result);
     }
 }
 
@@ -154,7 +155,10 @@ void GPC_IRQHandler(void)
     uint32_t flags = PC->INTSRC & HALL_PORTC_MASK;
 
     if (flags != 0u) {
+        uint8_t result;
         GPIO_CLR_INT_FLAG(PC, flags);
-        hall_irq_hint = 1u;
+        result = hall_process_transition(hall_read());
+        hall_pending_result = result;
+        motor_handle_hall_transition(result);
     }
 }

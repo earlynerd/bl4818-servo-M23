@@ -50,8 +50,16 @@
 #define CONTROL_LOOP_HZ     10000   /* base tick rate (SysTick / PWM-synchronous) */
 #define CURRENT_LOOP_HZ     10000   /* inner current PI                           */
 #define VELOCITY_LOOP_HZ    5000   /* velocity PID                               */
-#define POSITION_LOOP_HZ    2500    /* position PID (outermost)                   */
-#define STRIKE_LOOP_HZ      2500    /* strike state machine                       */
+#define POSITION_LOOP_HZ    2000    /* position PID (outermost)                   */
+#define STRIKE_LOOP_HZ      1000    /* strike state machine                       */
+
+/* ── Timing Helpers ──────────────────────────────────────────────────── */
+#define HZ_TICKS_FROM_MS(hz, ms) \
+    ((uint32_t)((((uint64_t)(hz) * (uint64_t)(ms)) + 999ULL) / 1000ULL))
+#define HZ_TICKS_FROM_US(hz, us) \
+    ((uint32_t)((((uint64_t)(hz) * (uint64_t)(us)) + 999999ULL) / 1000000ULL))
+#define VALUE_PER_TICK_FROM_HZ(hz, per_second) \
+    ((uint32_t)((((uint64_t)(per_second)) + (uint64_t)(hz) - 1ULL) / (uint64_t)(hz)))
 
 /* Dividers — derived, do not edit directly */
 #define CUR_LOOP_DIVIDER    (CONTROL_LOOP_HZ / CURRENT_LOOP_HZ)
@@ -59,16 +67,25 @@
 #define POS_LOOP_DIVIDER    (CONTROL_LOOP_HZ / POSITION_LOOP_HZ)
 #define STRIKE_TICK_DIVIDER (CONTROL_LOOP_HZ / STRIKE_LOOP_HZ)
 
+/* ── ADC / Current Sense ─────────────────────────────────────────────── */
+#define ADC_FULL_SCALE_COUNTS        4095UL
+#define ADC_VREF_MV                  5000UL
+#define CURRENT_SENSE_SHUNT_MOHM     20UL
+#define CURRENT_SENSE_GAIN           50UL
+
 /* ── Current Limits ──────────────────────────────────────────────────── */
 #define DEFAULT_TORQUE_LIMIT_MA 3200
 #define CURRENT_LIMIT_MA        3800    /* sustained limit — ADC full scale ~4900 mA (5 V AVDD, INA180B2 on 5 V) */
-#define CURRENT_PEAK_LIMIT_MA   4500    /* immediate fault ceiling — raise if strike transients trip it */
+#define CURRENT_PEAK_LIMIT_MA   4500    /* near-instant fault ceiling for real stalls / shoot-through */
+#define CURRENT_PEAK_FAULT_TIME_US 300  /* require this much peak-overlimit time before faulting */
 #define CURRENT_FILTER_SHIFT    3       /* IIR alpha = 1/(1<<N) for reported/clamped current */
-#define OVERCURRENT_FAULT_TICKS 80      /* consecutive control ticks above CURRENT_LIMIT_MA */
+#define OVERCURRENT_FAULT_TIME_MS 8     /* sustained over-limit time before faulting */
+#define CURRENT_PEAK_FAULT_TICKS HZ_TICKS_FROM_US(CONTROL_LOOP_HZ, CURRENT_PEAK_FAULT_TIME_US)
+#define OVERCURRENT_FAULT_TICKS HZ_TICKS_FROM_MS(CONTROL_LOOP_HZ, OVERCURRENT_FAULT_TIME_MS)
 
 /* Current PI defaults (Q8 — inner loop, regulates motor current to setpoint) */
-#define CUR_PID_KP_DEFAULT  64       /* 0.25 duty/mA */
-#define CUR_PID_KI_DEFAULT  8        /* 0.03125 */
+#define CUR_PID_KP_DEFAULT  96       /* 0.25 duty/mA */
+#define CUR_PID_KI_DEFAULT  5        /* 0.03125 */
 
 /*this is used in the D term of both position and velocity loops*/
 #define PID_D_FILTER_SHIFT  2       /* D-term IIR alpha = 1/(1<<N): 2→1/4, 3→1/8 */
@@ -76,8 +93,8 @@
 /* Velocity PID defaults (Q8 — output is current command in mA, not duty)
  * Gains rescaled ×2.5 from duty-output era (3000 mA / 1200 duty). */
 #define VEL_PID_KP_DEFAULT  1536     /* 15.0 mA/RPM */
-#define VEL_PID_KI_DEFAULT  20       /* 0.29 */
-#define VEL_PID_KD_DEFAULT  30       /* 0.29 */
+#define VEL_PID_KI_DEFAULT  10       /* 0.29 */
+#define VEL_PID_KD_DEFAULT  20       /* 0.29 */
 #define VEL_FF_DEFAULT      220      /* feedforward: mA per RPM */
 #define VEL_FILTER_SHIFT    3       /* IIR alpha = 1/(1<<N): 2→1/4, 3→1/8 */
 
@@ -86,26 +103,26 @@
  * Effective gain = Q8_value / 256 / POS_ERROR_PRESCALE RPM per encoder count */
 #define POS_ERROR_PRESCALE  16      /* divide position error by 16 before PID */
 #define POS_PID_KP_DEFAULT  1200     /* ≈0.0625 RPM/count (same as old 16 w/o prescale) */
-#define POS_PID_KI_DEFAULT  20
-#define POS_PID_KD_DEFAULT  30
+#define POS_PID_KI_DEFAULT  10
+#define POS_PID_KD_DEFAULT  20
 #define POS_MAX_VEL_RPM     2000    /* position loop velocity clamp */
-#define POS_INT_MAX_RPM     8000    /* position integral velocity clamp (RPM) */
+#define POS_INT_MAX_RPM     4000    /* position integral velocity clamp (RPM) */
 
 /* ── Strike Defaults ──────────────────────────────────────────────────── */
 #define STRIKE_HOME_OFFSET_DEFAULT      1024    /* encoder counts above drum surface */
 #define STRIKE_COAST_DISTANCE_DEFAULT   128     /* cut power this far from drum (counts) */
 #define STRIKE_HOMING_DUTY_DEFAULT      100  /* low duty toward drum (sign = toward drum) */
-#define STRIKE_RETURN_VELOCITY_RPM      1000    /* aggressive closed-loop return speed toward home */
-#define STRIKE_RETURN_RAMP_RATE         800     /* RPM per strike tick (1 kHz) toward return target */
-#define STRIKE_CATCH_ENTRY_WINDOW       512     /* counts: switch from return velocity to position hold */
 #define STRIKE_MAX_REBOUND_OVERSHOOT    128     /* counts beyond home allowed before forced recapture */
 #define STRIKE_RETRIGGER_DEADBAND       512     /* counts: must be this close to home for predictable retrigger */
 #define STRIKE_RETRIGGER_VEL_THRESHOLD  512     /* RPM: must be this slow near home for predictable retrigger */
 #define STRIKE_SETTLE_DEADBAND          200      /* counts: position "settled" threshold */
-#define STRIKE_SETTLE_TICKS             20     /* 25 ms at 1 kHz */
-#define STRIKE_HOMING_STALL_TICKS       200     /* 200 ms no movement = drum contact */
+#define STRIKE_SETTLE_TIME_MS           20
+#define STRIKE_HOMING_STALL_TIME_MS     200
 #define STRIKE_HOMING_STALL_THRESHOLD   4       /* counts: less than this = stalled */
-#define STRIKE_COAST_TIMEOUT_TICKS      500     /* 500 ms max coast before forced catch */
+#define STRIKE_COAST_TIMEOUT_MS         500
 #define STRIKE_REBOUND_THRESHOLD        5       /* RPM away from drum to confirm rebound */
+#define STRIKE_SETTLE_TICKS HZ_TICKS_FROM_MS(STRIKE_LOOP_HZ, STRIKE_SETTLE_TIME_MS)
+#define STRIKE_HOMING_STALL_TICKS HZ_TICKS_FROM_MS(STRIKE_LOOP_HZ, STRIKE_HOMING_STALL_TIME_MS)
+#define STRIKE_COAST_TIMEOUT_TICKS HZ_TICKS_FROM_MS(STRIKE_LOOP_HZ, STRIKE_COAST_TIMEOUT_MS)
 
 #endif /* M2003_CONFIG_H */

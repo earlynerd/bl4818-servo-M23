@@ -65,7 +65,8 @@ void motor_disarm_coast(void);
 uint8_t motor_is_coasting(void);
 void motor_clear_fault(void);
 
-void motor_poll_fast(void);     /* Main loop: commutation on hall transitions */
+void motor_handle_hall_transition(uint8_t hall_result); /* IRQ-side hall decode -> commutation/fault handling */
+void motor_poll_fast(void);     /* Legacy main-loop hook; hall commutation is IRQ-driven */
 void motor_tick_control(void);  /* SysTick-driven control loop at CONTROL_LOOP_HZ */
 
 motor_state_t motor_get_state(void);

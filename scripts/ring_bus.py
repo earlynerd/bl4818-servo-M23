@@ -114,7 +114,7 @@ def crc16_ccitt(data: bytes, init: int = 0xFFFF) -> int:
 MOTOR_STATES  = {0: "IDLE", 1: "RUN", 2: "FAULT"}
 FAULT_CODES   = {0: "NONE", 1: "OVERCURRENT", 2: "HALL_INVALID"}
 CTRL_MODES    = {0: "DUTY", 1: "VELOCITY", 2: "POSITION", 3: "TORQUE"}
-STRIKE_STATES = {0: "IDLE", 1: "HOMING", 2: "DRIVING", 3: "COASTING", 4: "RETURNING", 5: "CATCHING"}
+STRIKE_STATES = {0: "IDLE", 1: "HOMING", 2: "DRIVING", 3: "COASTING", 4: "LEGACY_RETURNING", 5: "CATCHING"}
 SUBCMD_NAMES  = {
     SUBCMD_SET_DUTY: "SET_DUTY",
     SUBCMD_SET_TORQUE: "SET_TORQUE",
@@ -206,7 +206,7 @@ class StrikeStatus:
     homed: int
     flags: int = 0
     sequence: int = 0
-    last_duty: int = 0
+    last_current_ma: int = 0
     trigger_to_coast_ms: int = 0
     trigger_to_rebound_ms: int = 0
     trigger_to_retrigger_ready_ms: int = 0
@@ -586,8 +586,8 @@ class RingClientV2:
                 raise RingError(f"{name} must fit in int16")
         return self._addressed_command(address, SUBCMD_SET_PID, struct.pack(">hhh", kp, ki, kd), reply_mode)
 
-    def strike(self, address: int, duty: int, reply_mode: str = REPLY_MODE_FULL) -> AddressedReply:
-        return self._addressed_command(address, SUBCMD_STRIKE, struct.pack(">h", duty), reply_mode)
+    def strike(self, address: int, current_ma: int, reply_mode: str = REPLY_MODE_FULL) -> AddressedReply:
+        return self._addressed_command(address, SUBCMD_STRIKE, struct.pack(">h", current_ma), reply_mode)
 
     def strike_home(self, address: int, reply_mode: str = REPLY_MODE_FULL) -> AddressedReply:
         return self._addressed_command(address, SUBCMD_STRIKE_HOME, reply_mode=reply_mode)
@@ -633,7 +633,7 @@ class RingClientV2:
                 homed=payload[2],
                 flags=payload[3],
                 sequence=struct.unpack(">H", payload[4:6])[0],
-                last_duty=struct.unpack(">h", payload[6:8])[0],
+                last_current_ma=struct.unpack(">h", payload[6:8])[0],
                 trigger_to_coast_ms=struct.unpack(">H", payload[8:10])[0],
                 trigger_to_rebound_ms=struct.unpack(">H", payload[10:12])[0],
                 trigger_to_retrigger_ready_ms=struct.unpack(">H", payload[12:14])[0],
@@ -653,7 +653,7 @@ class RingClientV2:
                 homed=payload[2],
                 flags=payload[3],
                 sequence=struct.unpack(">H", payload[4:6])[0],
-                last_duty=struct.unpack(">h", payload[6:8])[0],
+                last_current_ma=struct.unpack(">h", payload[6:8])[0],
                 trigger_to_coast_ms=struct.unpack(">H", payload[8:10])[0],
                 trigger_to_rebound_ms=struct.unpack(">H", payload[10:12])[0],
                 trigger_to_ready_ms=struct.unpack(">H", payload[12:14])[0],
@@ -672,7 +672,7 @@ class RingClientV2:
                 homed=payload[2],
                 flags=payload[3],
                 sequence=struct.unpack(">H", payload[4:6])[0],
-                last_duty=struct.unpack(">h", payload[6:8])[0],
+                last_current_ma=struct.unpack(">h", payload[6:8])[0],
                 trigger_to_coast_ms=struct.unpack(">H", payload[8:10])[0],
                 trigger_to_rebound_ms=struct.unpack(">H", payload[10:12])[0],
                 trigger_to_ready_ms=struct.unpack(">H", payload[12:14])[0],
@@ -688,7 +688,7 @@ class RingClientV2:
                 homed=payload[2],
                 flags=payload[3],
                 sequence=struct.unpack(">H", payload[4:6])[0],
-                last_duty=struct.unpack(">h", payload[6:8])[0],
+                last_current_ma=struct.unpack(">h", payload[6:8])[0],
                 trigger_to_coast_ms=struct.unpack(">H", payload[8:10])[0],
                 trigger_to_rebound_ms=struct.unpack(">H", payload[10:12])[0],
                 trigger_to_ready_ms=struct.unpack(">H", payload[12:14])[0],

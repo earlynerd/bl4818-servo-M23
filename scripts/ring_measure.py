@@ -28,8 +28,8 @@ from ring_bus import (
 class StrikeTimingSample:
     sweep_param: str
     sweep_value: int
-    requested_duty: int
-    applied_duty: int
+    requested_current_ma: int
+    applied_current_ma: int
     configured_home_offset: Optional[int]
     repeat_index: int
     sequence: int
@@ -49,8 +49,8 @@ class StrikeTimingAggregate:
     sweep_param: str
     sweep_value: int
     sample_count: int
-    requested_duty: Optional[float]
-    applied_duty: Optional[float]
+    requested_current_ma: Optional[float]
+    applied_current_ma: Optional[float]
     configured_home_offset: Optional[int]
     coast_ms: Optional[float]
     rebound_ms: Optional[float]
@@ -121,29 +121,31 @@ def build_sweep_values(start: int, stop: int, step: int) -> list[int]:
 def measurement_sweep_label(sweep_param: str) -> str:
     if sweep_param == "home-offset":
         return "home_offset"
-    return "duty"
+    return "current_ma"
 
 
 def measurement_sweep_axis_label(sweep_param: str) -> str:
     if sweep_param == "home-offset":
         return "Home offset above drum (encoder counts)"
-    return "Requested strike duty"
+    return "Requested strike current (mA)"
 
 
 def resolve_measurement_sweep_values(args: argparse.Namespace) -> list[int]:
-    if args.values and args.duties:
-        raise RingError("--values and --duties cannot be used together")
-    if args.sweep_param != "duty" and args.duties:
-        raise RingError("--duties can only be used when --sweep-param=duty")
+    explicit_currents = getattr(args, "currents", None)
 
-    values = list(args.values) if args.values else list(args.duties) if args.duties else build_sweep_values(
+    if args.values and explicit_currents:
+        raise RingError("--values and --currents cannot be used together")
+    if args.sweep_param != "current" and explicit_currents:
+        raise RingError("--currents can only be used when --sweep-param=current")
+
+    values = list(args.values) if args.values else list(explicit_currents) if explicit_currents else build_sweep_values(
         args.start,
         args.stop,
         args.step,
     )
 
-    if args.sweep_param == "duty" and any(value == 0 for value in values):
-        raise RingError("duty sweep must not include 0 because STRIKE 0 is ignored")
+    if args.sweep_param == "current" and any(value == 0 for value in values):
+        raise RingError("current sweep must not include 0 because STRIKE 0 is ignored")
 
     return values
 
@@ -176,7 +178,7 @@ def collect_strike_timing_sample(
     address: int,
     sweep_param: str,
     sweep_value: int,
-    strike_duty: int,
+    strike_current_ma: int,
     repeat_index: int,
     poll_ms: int,
     idle_timeout_ms: int,
@@ -203,12 +205,12 @@ def collect_strike_timing_sample(
             raise RingError(
                 f"home_offset verification failed: expected {sweep_value}, got {baseline.home_offset}"
             )
-        requested_duty = strike_duty
+        requested_current_ma = strike_current_ma
     else:
-        requested_duty = sweep_value
+        requested_current_ma = sweep_value
 
     prev_sequence = baseline.sequence
-    response = client.strike(address, requested_duty, reply_mode=REPLY_MODE_ACK)
+    response = client.strike(address, requested_current_ma, reply_mode=REPLY_MODE_ACK)
     if not isinstance(response, CommandAck):
         raise RingError("strike did not return an acknowledgement")
     if not response.accepted:
@@ -221,56 +223,56 @@ def collect_strike_timing_sample(
         )
 
     deadline = time.monotonic() + strike_timeout_ms / 1000.0
-    accepted_status: Optional[StrikeStatus] = None
+    final_status: Optional[StrikeStatus] = None
+
+    # Don't hammer QUERY_STRIKE immediately after launch. The timing fields are
+    # latched on-device, so slower polling does not reduce measurement accuracy,
+    # but it does reduce protocol load during fast commutation and catch.
+    if poll_s > 0:
+        time.sleep(poll_s)
 
     while time.monotonic() < deadline:
         status = client.query_strike(address)
-        if status.sequence == accepted_sequence:
-            accepted_status = status
-            break
-        if poll_s > 0:
-            time.sleep(poll_s)
-
-    if accepted_status is None:
-        raise RingTimeout(
-            f"timed out waiting for strike sequence {accepted_sequence} to appear in strike telemetry"
-        )
-    final_status = accepted_status
-
-    while time.monotonic() < deadline:
-        if final_status.sequence != accepted_sequence:
-            raise RingError(
-                f"strike sequence changed from {accepted_sequence} to {final_status.sequence} "
-                "while waiting for completion"
-            )
-        if not final_status.active and final_status.ready_valid:
+        if status.sequence == accepted_sequence and not status.active and status.ready_valid:
             return StrikeTimingSample(
                 sweep_param=sweep_param,
                 sweep_value=sweep_value,
-                requested_duty=requested_duty,
-                applied_duty=final_status.last_duty,
-                configured_home_offset=final_status.home_offset,
+                requested_current_ma=requested_current_ma,
+                applied_current_ma=status.last_current_ma,
+                configured_home_offset=status.home_offset,
                 repeat_index=repeat_index,
-                sequence=final_status.sequence,
-                coast_ms=final_status.trigger_to_coast_ms if final_status.coast_valid else None,
-                rebound_ms=final_status.trigger_to_rebound_ms if final_status.rebound_valid else None,
+                sequence=status.sequence,
+                coast_ms=status.trigger_to_coast_ms if status.coast_valid else None,
+                rebound_ms=status.trigger_to_rebound_ms if status.rebound_valid else None,
                 retrigger_ready_ms=(
-                    final_status.trigger_to_retrigger_ready_ms
-                    if final_status.retrigger_ready_valid
+                    status.trigger_to_retrigger_ready_ms
+                    if status.retrigger_ready_valid
                     else None
                 ),
-                ready_ms=final_status.trigger_to_ready_ms if final_status.ready_valid else None,
+                ready_ms=status.trigger_to_ready_ms if status.ready_valid else None,
                 estimated_strike_velocity_dps=(
-                    final_status.estimated_strike_velocity_dps if final_status.velocity_valid else None
+                    status.estimated_strike_velocity_dps if status.velocity_valid else None
                 ),
-                retriggered=final_status.retriggered,
-                rebound_timeout=final_status.rebound_timeout,
-                drum_position=final_status.drum_position,
-                home_position=final_status.home_position,
+                retriggered=status.retriggered,
+                rebound_timeout=status.rebound_timeout,
+                drum_position=status.drum_position,
+                home_position=status.home_position,
             )
+
+        if status.sequence > accepted_sequence:
+            raise RingError(
+                f"strike sequence changed from {accepted_sequence} to {status.sequence} "
+                "while waiting for completion"
+            )
+
+        final_status = status
         if poll_s > 0:
             time.sleep(poll_s)
-        final_status = client.query_strike(address)
+
+    if final_status is None:
+        raise RingTimeout(
+            f"timed out waiting for strike sequence {accepted_sequence} to appear in strike telemetry"
+        )
 
     raise RingTimeout(
         f"timed out waiting for strike sequence {accepted_sequence} to finish and report ready timing"
@@ -287,8 +289,8 @@ def load_strike_timing_csv(path: str) -> list[StrikeTimingSample]:
                 StrikeTimingSample(
                     sweep_param=row["sweep_param"],
                     sweep_value=int(row["sweep_value"]),
-                    requested_duty=int(row["requested_duty"]),
-                    applied_duty=int(row["applied_duty"]),
+                    requested_current_ma=int(row["requested_current_ma"]),
+                    applied_current_ma=int(row["applied_current_ma"]),
                     configured_home_offset=parse_optional_int(row.get("configured_home_offset", "")),
                     repeat_index=int(row["repeat_index"]),
                     sequence=int(row["sequence"]),
@@ -328,8 +330,8 @@ def aggregate_strike_timing_samples(samples: list[StrikeTimingSample]) -> list[S
                 sweep_param=sweep_param,
                 sweep_value=sweep_value,
                 sample_count=len(group),
-                requested_duty=median_or_none([sample.requested_duty for sample in group]),
-                applied_duty=median_or_none([sample.applied_duty for sample in group]),
+                requested_current_ma=median_or_none([sample.requested_current_ma for sample in group]),
+                applied_current_ma=median_or_none([sample.applied_current_ma for sample in group]),
                 configured_home_offset=int_or_none(
                     median_or_none([sample.configured_home_offset for sample in group])
                 ),
@@ -409,24 +411,29 @@ def interpolate_curve(x: float, points: list[tuple[float, float]]) -> float:
 
 
 def build_lookup_curve_points(
-    duty_aggregates: list[StrikeTimingAggregate],
+    current_aggregates: list[StrikeTimingAggregate],
 ) -> list[dict[str, float]]:
-    usable = [aggregate for aggregate in duty_aggregates if aggregate.applied_duty is not None]
+    usable = [aggregate for aggregate in current_aggregates if aggregate.applied_current_ma is not None]
     if not usable:
-        raise RingError("duty sweep does not contain any applied duty data")
+        raise RingError("current sweep does not contain any applied strike-current data")
 
     curve_points: list[dict[str, float]] = []
     last_strength: Optional[float] = None
 
-    for aggregate in sorted(usable, key=lambda item: item.applied_duty if item.applied_duty is not None else item.sweep_value):
-        duty = float(aggregate.applied_duty if aggregate.applied_duty is not None else aggregate.sweep_value)
+    for aggregate in sorted(
+        usable,
+        key=lambda item: item.applied_current_ma if item.applied_current_ma is not None else item.sweep_value,
+    ):
+        current_ma = float(
+            aggregate.applied_current_ma if aggregate.applied_current_ma is not None else aggregate.sweep_value
+        )
         raw_strength = aggregate.estimated_strike_velocity_dps
-        strength = float(raw_strength if raw_strength is not None else duty)
+        strength = float(raw_strength if raw_strength is not None else current_ma)
         if last_strength is not None and strength < last_strength:
             strength = last_strength
 
         point = {
-            "duty": duty,
+            "current_ma": current_ma,
             "strength": strength,
             "rebound_ms": float(aggregate.rebound_ms if aggregate.rebound_ms is not None else 0.0),
             "retrigger_ready_ms": float(
@@ -449,13 +456,13 @@ def build_lookup_curve_points(
 
 
 def build_midi_velocity_lookup(
-    duty_aggregates: list[StrikeTimingAggregate],
+    current_aggregates: list[StrikeTimingAggregate],
 ) -> list[dict[str, int]]:
-    curve_points = build_lookup_curve_points(duty_aggregates)
-    strength_points = [(point["strength"], point["duty"]) for point in curve_points]
-    duty_to_rebound = [(point["duty"], point["rebound_ms"]) for point in curve_points]
-    duty_to_retrigger_ready = [(point["duty"], point["retrigger_ready_ms"]) for point in curve_points]
-    duty_to_ready = [(point["duty"], point["ready_ms"]) for point in curve_points]
+    curve_points = build_lookup_curve_points(current_aggregates)
+    strength_points = [(point["strength"], point["current_ma"]) for point in curve_points]
+    current_to_rebound = [(point["current_ma"], point["rebound_ms"]) for point in curve_points]
+    current_to_retrigger_ready = [(point["current_ma"], point["retrigger_ready_ms"]) for point in curve_points]
+    current_to_ready = [(point["current_ma"], point["ready_ms"]) for point in curve_points]
 
     min_strength = curve_points[0]["strength"]
     max_strength = curve_points[-1]["strength"]
@@ -468,16 +475,16 @@ def build_midi_velocity_lookup(
             blend = (midi_velocity - 1) / 126.0
             target_strength = min_strength + (max_strength - min_strength) * blend
 
-        duty = interpolate_curve(target_strength, strength_points)
-        rebound_ms = interpolate_curve(duty, duty_to_rebound)
-        retrigger_ready_ms = interpolate_curve(duty, duty_to_retrigger_ready)
-        ready_ms = interpolate_curve(duty, duty_to_ready)
+        current_ma = interpolate_curve(target_strength, strength_points)
+        rebound_ms = interpolate_curve(current_ma, current_to_rebound)
+        retrigger_ready_ms = interpolate_curve(current_ma, current_to_retrigger_ready)
+        ready_ms = interpolate_curve(current_ma, current_to_ready)
 
         lookup.append(
             {
                 "midi_velocity": midi_velocity,
                 "target_strength_dps": int(round(target_strength)),
-                "duty": int(round(duty)),
+                "current_ma": int(round(current_ma)),
                 "lead_ms": int(round(rebound_ms)),
                 "repeat_ms": int(round(retrigger_ready_ms)),
                 "settle_ms": int(round(ready_ms)),
@@ -491,8 +498,8 @@ def aggregate_to_profile_dict(aggregate: StrikeTimingAggregate) -> dict[str, obj
     return {
         "sweep_value": aggregate.sweep_value,
         "sample_count": aggregate.sample_count,
-        "requested_duty": rounded_or_none(aggregate.requested_duty),
-        "applied_duty": rounded_or_none(aggregate.applied_duty),
+        "requested_current_ma": rounded_or_none(aggregate.requested_current_ma),
+        "applied_current_ma": rounded_or_none(aggregate.applied_current_ma),
         "configured_home_offset": aggregate.configured_home_offset,
         "coast_ms": rounded_or_none(aggregate.coast_ms),
         "rebound_ms": rounded_or_none(aggregate.rebound_ms),
@@ -507,26 +514,26 @@ def aggregate_to_profile_dict(aggregate: StrikeTimingAggregate) -> dict[str, obj
 
 
 def build_strike_calibration_profile(
-    duty_samples: list[StrikeTimingSample],
+    current_samples: list[StrikeTimingSample],
     home_offset_samples: Optional[list[StrikeTimingSample]] = None,
     address: Optional[int] = None,
     midi_note: Optional[int] = None,
     note_name: Optional[str] = None,
     preferred_home_offset: Optional[int] = None,
 ) -> dict[str, object]:
-    if not duty_samples:
-        raise RingError("duty sweep is empty")
-    if duty_samples[0].sweep_param != "duty":
-        raise RingError("duty sweep CSV must come from --sweep-param=duty")
+    if not current_samples:
+        raise RingError("current sweep is empty")
+    if current_samples[0].sweep_param != "current":
+        raise RingError("current sweep CSV must come from --sweep-param=current")
 
-    duty_aggregates = aggregate_strike_timing_samples(duty_samples)
-    duty_curve_home_offset = duty_aggregates[0].configured_home_offset
-    if any(aggregate.configured_home_offset != duty_curve_home_offset for aggregate in duty_aggregates):
-        raise RingError("duty sweep CSV mixes multiple configured home offsets")
+    current_aggregates = aggregate_strike_timing_samples(current_samples)
+    current_curve_home_offset = current_aggregates[0].configured_home_offset
+    if any(aggregate.configured_home_offset != current_curve_home_offset for aggregate in current_aggregates):
+        raise RingError("current sweep CSV mixes multiple configured home offsets")
 
-    suggested_home_offset = duty_curve_home_offset
+    suggested_home_offset = current_curve_home_offset
     home_offset_candidates: list[dict[str, object]] = []
-    selection_reason = "duty sweep configured_home_offset"
+    selection_reason = "current sweep configured_home_offset"
 
     if home_offset_samples:
         if home_offset_samples[0].sweep_param != "home-offset":
@@ -550,13 +557,13 @@ def build_strike_calibration_profile(
     scheduler_ready = True
     if (
         suggested_home_offset is not None
-        and duty_curve_home_offset is not None
-        and suggested_home_offset != duty_curve_home_offset
+        and current_curve_home_offset is not None
+        and suggested_home_offset != current_curve_home_offset
     ):
         scheduler_ready = False
         warnings.append(
-            "Suggested home_offset from the home-offset sweep does not match the home_offset used for the duty sweep. "
-            "Retake the duty sweep at the suggested home_offset before using this profile for production scheduling."
+            "Suggested home_offset from the home-offset sweep does not match the home_offset used for the current sweep. "
+            "Retake the current sweep at the suggested home_offset before using this profile for production scheduling."
         )
 
     identity: dict[str, object] = {}
@@ -568,7 +575,7 @@ def build_strike_calibration_profile(
         identity["name"] = note_name
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
         "scheduler_ready": scheduler_ready,
         "warnings": warnings,
@@ -580,12 +587,12 @@ def build_strike_calibration_profile(
             "velocity_proxy_field": "estimated_strike_velocity_dps",
             "impact_time_note": "rebound_ms is an inferred impact proxy from rebound detection, not a contact sensor",
         },
-        "lookup_home_offset": duty_curve_home_offset,
+        "lookup_home_offset": current_curve_home_offset,
         "suggested_home_offset": suggested_home_offset,
         "home_offset_selection_reason": selection_reason,
-        "duty_curve": [aggregate_to_profile_dict(aggregate) for aggregate in duty_aggregates],
+        "current_curve": [aggregate_to_profile_dict(aggregate) for aggregate in current_aggregates],
         "home_offset_candidates": home_offset_candidates,
-        "midi_velocity_lookup": build_midi_velocity_lookup(duty_aggregates),
+        "midi_velocity_lookup": build_midi_velocity_lookup(current_aggregates),
     }
 
 
@@ -624,14 +631,14 @@ def ensure_home_offset(
 
 def build_home_offset_profile(
     home_offset: int,
-    duty_aggregates: list[StrikeTimingAggregate],
+    current_aggregates: list[StrikeTimingAggregate],
 ) -> dict[str, object]:
-    if not duty_aggregates:
-        raise RingError(f"home_offset {home_offset} has no duty aggregate data")
+    if not current_aggregates:
+        raise RingError(f"home_offset {home_offset} has no current aggregate data")
 
-    lookup = build_midi_velocity_lookup(duty_aggregates)
+    lookup = build_midi_velocity_lookup(current_aggregates)
     strength_values = [entry["target_strength_dps"] for entry in lookup]
-    duty_values = [entry["duty"] for entry in lookup]
+    current_values = [entry["current_ma"] for entry in lookup]
     lead_values = [entry["lead_ms"] for entry in lookup]
     repeat_values = [entry["repeat_ms"] for entry in lookup]
     settle_values = [entry["settle_ms"] for entry in lookup]
@@ -639,21 +646,21 @@ def build_home_offset_profile(
     return {
         "home_offset": home_offset,
         "summary": {
-            "sample_points": len(duty_aggregates),
+            "sample_points": len(current_aggregates),
             "strength_min_dps": min(strength_values),
             "strength_max_dps": max(strength_values),
-            "duty_min": min(duty_values),
-            "duty_max": max(duty_values),
+            "current_ma_min": min(current_values),
+            "current_ma_max": max(current_values),
             "lead_min_ms": min(lead_values),
             "lead_max_ms": max(lead_values),
             "repeat_min_ms": min(repeat_values),
             "repeat_max_ms": max(repeat_values),
             "settle_min_ms": min(settle_values),
             "settle_max_ms": max(settle_values),
-            "drum_position": duty_aggregates[0].drum_position,
-            "home_position": duty_aggregates[0].home_position,
+            "drum_position": current_aggregates[0].drum_position,
+            "home_position": current_aggregates[0].home_position,
         },
-        "duty_curve": [aggregate_to_profile_dict(aggregate) for aggregate in duty_aggregates],
+        "current_curve": [aggregate_to_profile_dict(aggregate) for aggregate in current_aggregates],
         "midi_velocity_lookup": lookup,
     }
 
@@ -683,22 +690,22 @@ def choose_home_offset_profile(
 
 
 def build_strike_calibration_grid_profile(
-    duty_samples: list[StrikeTimingSample],
+    current_samples: list[StrikeTimingSample],
     address: Optional[int] = None,
     midi_note: Optional[int] = None,
     note_name: Optional[str] = None,
     preferred_home_offset: Optional[int] = None,
 ) -> dict[str, object]:
-    if not duty_samples:
-        raise RingError("duty sweep is empty")
+    if not current_samples:
+        raise RingError("current sweep is empty")
 
-    if duty_samples[0].sweep_param != "duty":
-        raise RingError("calibration grid requires duty sweep samples")
+    if current_samples[0].sweep_param != "current":
+        raise RingError("calibration grid requires current sweep samples")
 
     grouped: dict[int, list[StrikeTimingSample]] = {}
-    for sample in duty_samples:
-        if sample.sweep_param != "duty":
-            raise RingError("calibration grid CSV contains non-duty sweep samples")
+    for sample in current_samples:
+        if sample.sweep_param != "current":
+            raise RingError("calibration grid CSV contains non-current sweep samples")
         if sample.configured_home_offset is None:
             raise RingError("calibration grid CSV is missing configured_home_offset values")
         grouped.setdefault(sample.configured_home_offset, []).append(sample)
@@ -721,7 +728,7 @@ def build_strike_calibration_grid_profile(
         identity["name"] = note_name
 
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
         "scheduler_ready": True,
         "warnings": [],
@@ -754,8 +761,8 @@ def write_strike_timing_csv(samples: list[StrikeTimingSample], path: str) -> Non
     fieldnames = [
         "sweep_param",
         "sweep_value",
-        "requested_duty",
-        "applied_duty",
+        "requested_current_ma",
+        "applied_current_ma",
         "configured_home_offset",
         "repeat_index",
         "sequence",
@@ -778,8 +785,8 @@ def write_strike_timing_csv(samples: list[StrikeTimingSample], path: str) -> Non
                 {
                     "sweep_param": sample.sweep_param,
                     "sweep_value": sample.sweep_value,
-                    "requested_duty": sample.requested_duty,
-                    "applied_duty": sample.applied_duty,
+                    "requested_current_ma": sample.requested_current_ma,
+                    "applied_current_ma": sample.applied_current_ma,
                     "configured_home_offset": (
                         "" if sample.configured_home_offset is None else sample.configured_home_offset
                     ),
@@ -811,7 +818,7 @@ def mean_or_none(values: list[Optional[int]]) -> Optional[float]:
 
 def print_strike_timing_summary(samples: list[StrikeTimingSample]) -> None:
     grouped: dict[int, list[StrikeTimingSample]] = {}
-    sweep_param = samples[0].sweep_param if samples else "duty"
+    sweep_param = samples[0].sweep_param if samples else "current"
     value_label = measurement_sweep_label(sweep_param)
 
     for sample in samples:
@@ -826,18 +833,18 @@ def print_strike_timing_summary(samples: list[StrikeTimingSample]) -> None:
         velocity_mean = mean_or_none([sample.estimated_strike_velocity_dps for sample in sweep_samples])
         timeout_count = sum(1 for sample in sweep_samples if sample.rebound_timeout)
         retrigger_count = sum(1 for sample in sweep_samples if sample.retriggered)
-        duty_mean = mean_or_none([sample.requested_duty for sample in sweep_samples])
+        current_mean = mean_or_none([sample.requested_current_ma for sample in sweep_samples])
 
         coast_text = "n/a" if coast_mean is None else f"{coast_mean:.1f}"
         rebound_text = "n/a" if rebound_mean is None else f"{rebound_mean:.1f}"
         retrigger_ready_text = "n/a" if retrigger_ready_mean is None else f"{retrigger_ready_mean:.1f}"
         ready_text = "n/a" if ready_mean is None else f"{ready_mean:.1f}"
         velocity_text = "n/a" if velocity_mean is None else f"{velocity_mean:.1f}"
-        duty_text = "n/a" if duty_mean is None else f"{duty_mean:.1f}"
+        current_text = "n/a" if current_mean is None else f"{current_mean:.1f}"
 
         print(
             f"  {value_label}={sweep_value} n={len(sweep_samples)} "
-            f"strike_duty_mean={duty_text} "
+            f"strike_current_ma_mean={current_text} "
             f"coast_mean_ms={coast_text} rebound_mean_ms={rebound_text} "
             f"retrigger_ready_mean_ms={retrigger_ready_text} "
             f"ready_mean_ms={ready_text} strike_vel_mean_dps={velocity_text} "
@@ -861,11 +868,11 @@ def plot_strike_timing_samples(
         raise RingError("matplotlib is required for strike timing plots. Install with: pip install matplotlib") from exc
 
     grouped: dict[int, list[StrikeTimingSample]] = {}
-    sweep_param = samples[0].sweep_param if samples else "duty"
+    sweep_param = samples[0].sweep_param if samples else "current"
     for sample in samples:
         grouped.setdefault(sample.sweep_value, []).append(sample)
 
-    duties = sorted(grouped.keys())
+    sweep_values = sorted(grouped.keys())
     time_series = [
         ("coast_ms", "Trigger to coast", "tab:blue"),
         ("rebound_ms", "Trigger to rebound", "tab:orange"),
@@ -882,16 +889,16 @@ def plot_strike_timing_samples(
         mean_x: list[int] = []
         mean_y: list[float] = []
 
-        for duty in duties:
+        for sweep_value in sweep_values:
             values = [
                 getattr(sample, attr_name)
-                for sample in grouped[duty]
+                for sample in grouped[sweep_value]
                 if getattr(sample, attr_name) is not None
             ]
-            raw_x.extend([duty] * len(values))
+            raw_x.extend([sweep_value] * len(values))
             raw_y.extend(values)
             if values:
-                mean_x.append(duty)
+                mean_x.append(sweep_value)
                 mean_y.append(sum(values) / len(values))
 
         if raw_y:
@@ -904,16 +911,16 @@ def plot_strike_timing_samples(
     velocity_mean_x: list[int] = []
     velocity_mean_y: list[float] = []
 
-    for duty in duties:
+    for sweep_value in sweep_values:
         values = [
             getattr(sample, velocity_attr_name)
-            for sample in grouped[duty]
+            for sample in grouped[sweep_value]
             if getattr(sample, velocity_attr_name) is not None
         ]
-        velocity_raw_x.extend([duty] * len(values))
+        velocity_raw_x.extend([sweep_value] * len(values))
         velocity_raw_y.extend(values)
         if values:
-            velocity_mean_x.append(duty)
+            velocity_mean_x.append(sweep_value)
             velocity_mean_y.append(sum(values) / len(values))
 
     velocity_ax = None

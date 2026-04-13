@@ -14,6 +14,7 @@
 #include "persist.h"
 #include "protocol.h"
 #include "strike.h"
+#include "timing.h"
 
 extern uint32_t SystemCoreClock;
 extern uint32_t CyclesPerUs;
@@ -22,9 +23,38 @@ extern uint32_t PllClock;
 void Uart0DefaultMPF(void) {}
 
 #define UART_BAUD              250000UL
-#define ENCODER_DIVIDER        1u     /* encoder_poll every control tick */
 
-static volatile uint32_t systick_count;
+static volatile uint32_t protocol_tick_count;
+static volatile uint32_t strike_tick_accum;
+static volatile uint32_t protocol_tick_accum;
+
+static uint8_t schedule_latest_from_samples(volatile uint32_t *accum, uint32_t elapsed_samples, uint32_t target_hz)
+{
+    *accum += elapsed_samples * target_hz;
+    if (*accum < PWM_FREQ_HZ)
+        return 0u;
+
+    *accum -= PWM_FREQ_HZ;
+    if (*accum >= PWM_FREQ_HZ)
+        *accum = 0u;
+
+    return 1u;
+}
+
+static uint32_t schedule_protocol_timeout_from_samples(volatile uint32_t *accum, uint32_t elapsed_samples)
+{
+    *accum += elapsed_samples * PROTOCOL_TICK_HZ;
+    if (*accum < PWM_FREQ_HZ)
+        return 0u;
+
+    *accum -= PWM_FREQ_HZ;
+    if (*accum >= PWM_FREQ_HZ) {
+        *accum = 0u;
+        return HZ_TICKS_FROM_MS(PROTOCOL_TICK_HZ, PROTOCOL_FRAME_TIMEOUT_MS);
+    }
+
+    return 1u;
+}
 
 static void clock_init(void)
 {
@@ -42,19 +72,34 @@ static void clock_init(void)
     PllClock = CLK_HIRC_24M;
     CyclesPerUs = CLK_HIRC_24M / 1000000UL;
 
+    timing_init();
     SysTick_Config(SystemCoreClock / CONTROL_LOOP_HZ);
+    NVIC_SetPriority(SysTick_IRQn, 1u);
 }
 
 void SysTick_Handler(void)
 {
-    systick_count++;
+    uint32_t timing_start = timing_capture_stamp();
+    uint32_t protocol_ticks;
+    uint16_t elapsed_samples;
+
+    elapsed_samples = motor_tick_control();
+
+    if (schedule_latest_from_samples(&strike_tick_accum, elapsed_samples, STRIKE_LOOP_HZ)) {
+        strike_tick();
+    }
+
+    protocol_ticks = schedule_protocol_timeout_from_samples(&protocol_tick_accum, elapsed_samples);
+    if (protocol_ticks != 0u) {
+        protocol_tick_count += protocol_ticks;
+    }
+
+    timing_record_control_tick(timing_start);
 }
 
 int main(void)
 {
-    uint32_t handled_sys_ticks = 0;
-    uint8_t encoder_div = 0;
-    uint8_t strike_div = 0;
+    uint32_t handled_protocol_ticks = 0;
 
     SYS_UnlockReg();
 
@@ -74,24 +119,20 @@ int main(void)
     SYS_LockReg();
 
     while (1) {
+        uint32_t protocol_poll_start;
+        uint32_t pending_protocol_ticks;
+
         motor_poll_fast();
+        protocol_poll_start = timing_capture_stamp();
         protocol_poll();
+        timing_record_protocol_poll(protocol_poll_start);
 
-        while (handled_sys_ticks != systick_count) {
-            handled_sys_ticks++;
+        pending_protocol_ticks = protocol_tick_count - handled_protocol_ticks;
+        timing_note_protocol_backlog(pending_protocol_ticks);
 
-            if (++encoder_div >= ENCODER_DIVIDER) {
-                encoder_div = 0;
-                encoder_poll();
-            }
-
-            motor_tick_control();
-            protocol_tick();
-
-            if (++strike_div >= STRIKE_TICK_DIVIDER) {
-                strike_div = 0;
-                strike_tick();
-            }
+        if (pending_protocol_ticks != 0u) {
+            handled_protocol_ticks = protocol_tick_count;
+            protocol_tick(pending_protocol_ticks);
         }
     }
 }

@@ -40,6 +40,7 @@
 
 /* ── Commutation ──────────────────────────────────────────────────────── */
 #define COMMUTATION_OFFSET  1       /* Advance commutation by 1 sector (matches MS51 tuning) */
+#define HALL_MIN_TRANSITION_US 20   /* reject implausibly fast hall chatter / edge bounce */
 
 /* ── Motor Parameters ─────────────────────────────────────────────────── */
 #define MOTOR_POLE_PAIRS    5       /* 10-pole, 12 slot outrunner */
@@ -47,11 +48,14 @@
 #define ENCODER_COUNTS_PER_REV  16384   /* 14-bit absolute encoder */
 
 /* ── Loop Rates ──────────────────────────────────────────────────────── */
-#define CONTROL_LOOP_HZ     10000   /* base tick rate (SysTick / PWM-synchronous) */
-#define CURRENT_LOOP_HZ     10000   /* inner current PI                           */
-#define VELOCITY_LOOP_HZ    5000   /* velocity PID                               */
-#define POSITION_LOOP_HZ    2000    /* position PID (outermost)                   */
-#define STRIKE_LOOP_HZ      1000    /* strike state machine                       */
+#define CURRENT_LOOP_HZ     5000    /* fastest software loop: ADC/protection/current PI */
+#define VELOCITY_LOOP_HZ    2500    /* velocity estimator + velocity PID               */
+#define POSITION_LOOP_HZ    1250    /* position PID (outermost)                        */
+#define STRIKE_LOOP_HZ      1250    /* strike state machine                            */
+#define PROTOCOL_TICK_HZ    1000    /* serial parser timeout aging                     */
+#define PROTOCOL_FRAME_TIMEOUT_MS 20u
+#define ENCODER_POLL_HZ     VELOCITY_LOOP_HZ /* bit-banged SSI read rate            */
+#define CONTROL_LOOP_HZ     CURRENT_LOOP_HZ  /* SysTick fast tick budget/reporting   */
 
 /* ── Timing Helpers ──────────────────────────────────────────────────── */
 #define HZ_TICKS_FROM_MS(hz, ms) \
@@ -61,11 +65,25 @@
 #define VALUE_PER_TICK_FROM_HZ(hz, per_second) \
     ((uint32_t)((((uint64_t)(per_second)) + (uint64_t)(hz) - 1ULL) / (uint64_t)(hz)))
 
-/* Dividers — derived, do not edit directly */
-#define CUR_LOOP_DIVIDER    (CONTROL_LOOP_HZ / CURRENT_LOOP_HZ)
-#define VEL_LOOP_DIVIDER    (CONTROL_LOOP_HZ / VELOCITY_LOOP_HZ)
-#define POS_LOOP_DIVIDER    (CONTROL_LOOP_HZ / POSITION_LOOP_HZ)
-#define STRIKE_TICK_DIVIDER (CONTROL_LOOP_HZ / STRIKE_LOOP_HZ)
+#if VELOCITY_LOOP_HZ > CONTROL_LOOP_HZ
+#error "VELOCITY_LOOP_HZ must be <= CONTROL_LOOP_HZ"
+#endif
+
+#if POSITION_LOOP_HZ > CONTROL_LOOP_HZ
+#error "POSITION_LOOP_HZ must be <= CONTROL_LOOP_HZ"
+#endif
+
+#if STRIKE_LOOP_HZ > CONTROL_LOOP_HZ
+#error "STRIKE_LOOP_HZ must be <= CONTROL_LOOP_HZ"
+#endif
+
+#if PROTOCOL_TICK_HZ > CONTROL_LOOP_HZ
+#error "PROTOCOL_TICK_HZ must be <= CONTROL_LOOP_HZ"
+#endif
+
+#if ENCODER_POLL_HZ != VELOCITY_LOOP_HZ
+#error "Bit-banged SSI encoder polling is expected to match VELOCITY_LOOP_HZ"
+#endif
 
 /* ── ADC / Current Sense ─────────────────────────────────────────────── */
 #define ADC_FULL_SCALE_COUNTS        4095UL
@@ -80,8 +98,8 @@
 #define CURRENT_PEAK_FAULT_TIME_US 300  /* require this much peak-overlimit time before faulting */
 #define CURRENT_FILTER_SHIFT    3       /* IIR alpha = 1/(1<<N) for reported/clamped current */
 #define OVERCURRENT_FAULT_TIME_MS 8     /* sustained over-limit time before faulting */
-#define CURRENT_PEAK_FAULT_TICKS HZ_TICKS_FROM_US(CONTROL_LOOP_HZ, CURRENT_PEAK_FAULT_TIME_US)
-#define OVERCURRENT_FAULT_TICKS HZ_TICKS_FROM_MS(CONTROL_LOOP_HZ, OVERCURRENT_FAULT_TIME_MS)
+#define CURRENT_PEAK_FAULT_SAMPLES HZ_TICKS_FROM_US(PWM_FREQ_HZ, CURRENT_PEAK_FAULT_TIME_US)
+#define OVERCURRENT_FAULT_SAMPLES HZ_TICKS_FROM_MS(PWM_FREQ_HZ, OVERCURRENT_FAULT_TIME_MS)
 
 /* Current PI defaults (Q8 — inner loop, regulates motor current to setpoint) */
 #define CUR_PID_KP_DEFAULT  96       /* 0.25 duty/mA */

@@ -6,6 +6,7 @@
 #include "M2003.h"
 #include "hall.h"
 #include "motor.h"
+#include "timing.h"
 
 static const uint8_t hall_decode[8] = { 0, 1, 2, 3, 4, 5, 6, 7 };
 static const uint8_t hall_forward_seq[8] = { 0xFF, 3, 6, 2, 5, 1, 4, 0xFF };
@@ -21,6 +22,8 @@ static int8_t  detected_direction;
 static int32_t hall_position;
 static uint32_t transition_period;
 static uint32_t last_transition_time;
+static uint32_t hall_counter_hz;
+static uint32_t hall_min_transition_counts;
 static volatile uint8_t hall_pending_result;
 
 static uint32_t irq_save(void)
@@ -39,6 +42,11 @@ static void irq_restore(uint32_t primask)
 
 static uint8_t hall_process_transition(uint8_t current)
 {
+    uint32_t now;
+    uint32_t period;
+    uint8_t forward;
+    uint8_t reverse;
+
     if (current == prev_hall) {
         return HALL_POLL_NO_CHANGE;
     }
@@ -47,20 +55,31 @@ static uint8_t hall_process_transition(uint8_t current)
         return HALL_POLL_INVALID;
     }
 
-    if (hall_forward_seq[prev_hall] == current) {
+    forward = (hall_forward_seq[prev_hall] == current) ? 1u : 0u;
+    reverse = (hall_forward_seq[current] == prev_hall) ? 1u : 0u;
+    if (!forward && !reverse) {
+        /* Ignore impossible state jumps. They are usually chatter or a
+         * transient read during two GPIO edge IRQs arriving back-to-back. */
+        return HALL_POLL_NO_CHANGE;
+    }
+
+    now = TIMER_GetCounter(TIMER1) & HALL_TIMER_MASK;
+    period = (now - last_transition_time) & HALL_TIMER_MASK;
+    if (period < hall_min_transition_counts) {
+        /* Reject transitions faster than the mechanism can plausibly produce. */
+        return HALL_POLL_NO_CHANGE;
+    }
+
+    if (forward) {
         detected_direction = 1;
         hall_position++;
-    } else if (hall_forward_seq[current] == prev_hall) {
+    } else {
         detected_direction = -1;
         hall_position--;
     }
 
-    {
-        uint32_t now = TIMER_GetCounter(TIMER1) & HALL_TIMER_MASK;
-        transition_period = (now - last_transition_time) & HALL_TIMER_MASK;
-        last_transition_time = now;
-    }
-
+    transition_period = period;
+    last_transition_time = now;
     prev_hall = current;
     return HALL_POLL_TRANSITION;
 }
@@ -80,6 +99,12 @@ void hall_init(void)
     TIMER_Start(TIMER1);
     while (!TIMER_IS_ACTIVE(TIMER1)) {
     }
+    hall_counter_hz = TIMER_GetModuleClock(TIMER1) /
+                      (((TIMER1->CTL & TIMER_CTL_PSC_Msk) >> TIMER_CTL_PSC_Pos) + 1u);
+    hall_min_transition_counts =
+        (uint32_t)((((uint64_t)hall_counter_hz * HALL_MIN_TRANSITION_US) + 999999ULL) / 1000000ULL);
+    if (hall_min_transition_counts == 0u)
+        hall_min_transition_counts = 1u;
 
     GPIO_DISABLE_DEBOUNCE(PB, HALL_PORTB_MASK);
     GPIO_DISABLE_DEBOUNCE(PC, HALL_PORTC_MASK);
@@ -142,11 +167,13 @@ void GPB_IRQHandler(void)
     uint32_t flags = PB->INTSRC & HALL_PORTB_MASK;
 
     if (flags != 0u) {
+        uint32_t timing_start = timing_capture_stamp();
         uint8_t result;
         GPIO_CLR_INT_FLAG(PB, flags);
         result = hall_process_transition(hall_read());
         hall_pending_result = result;
         motor_handle_hall_transition(result);
+        timing_record_hall_isr(timing_start);
     }
 }
 
@@ -155,10 +182,12 @@ void GPC_IRQHandler(void)
     uint32_t flags = PC->INTSRC & HALL_PORTC_MASK;
 
     if (flags != 0u) {
+        uint32_t timing_start = timing_capture_stamp();
         uint8_t result;
         GPIO_CLR_INT_FLAG(PC, flags);
         result = hall_process_transition(hall_read());
         hall_pending_result = result;
         motor_handle_hall_transition(result);
+        timing_record_hall_isr(timing_start);
     }
 }

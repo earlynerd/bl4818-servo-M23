@@ -18,6 +18,7 @@
 
 #include <stdint.h>
 #include "m2003_config.h"
+#include "M2003.h"
 #include "strike.h"
 #include "motor.h"
 #include "encoder.h"
@@ -25,6 +26,19 @@
 /* ── Helpers ─────────────────────────────────────────────────────────── */
 
 static int32_t abs_i32(int32_t x) { return (x < 0) ? -x : x; }
+
+static uint32_t irq_save(void)
+{
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    return primask;
+}
+
+static void irq_restore(uint32_t primask)
+{
+    if ((primask & 1u) == 0u)
+        __enable_irq();
+}
 
 /* ── State ───────────────────────────────────────────────────────────── */
 
@@ -208,7 +222,7 @@ static void begin_strike(int32_t current_ma, uint8_t retriggered)
     /* motor_start() is a no-op if already running (position hold) */
     motor_start();
 
-    /* Arm coast detection in the control tick so power cuts before impact. */
+    /* Arm coast detection on the encoder/velocity cadence so power cuts before impact. */
     motor_arm_coast(coast_threshold, drum_dir);
 
     state = STRIKE_DRIVING;
@@ -244,15 +258,29 @@ void strike_init(void)
 
 void strike_set_home_offset(int32_t counts)
 {
+    uint32_t irq_state = irq_save();
+
     home_offset = counts;
 
     if (homed || (state == STRIKE_HOMING && home_phase == HOME_MOVE_HOME)) {
         update_home_position_target();
         command_home_position_if_safe();
     }
+
+    irq_restore(irq_state);
 }
-void strike_set_coast_distance(int32_t counts) { coast_distance = counts; }
-void strike_set_homing_duty(int32_t duty)      { homing_duty = duty; }
+void strike_set_coast_distance(int32_t counts)
+{
+    uint32_t irq_state = irq_save();
+    coast_distance = counts;
+    irq_restore(irq_state);
+}
+void strike_set_homing_duty(int32_t duty)
+{
+    uint32_t irq_state = irq_save();
+    homing_duty = duty;
+    irq_restore(irq_state);
+}
 int32_t strike_get_home_offset(void)           { return home_offset; }
 int32_t strike_get_coast_distance(void)        { return coast_distance; }
 int32_t strike_get_homing_duty(void)           { return homing_duty; }
@@ -261,6 +289,8 @@ int32_t strike_get_homing_duty(void)           { return homing_duty; }
 
 void strike_shift_position_reference(int32_t delta)
 {
+    uint32_t irq_state = irq_save();
+
     if (homed || (state == STRIKE_HOMING && home_phase == HOME_MOVE_HOME)) {
         drum_position -= delta;
         home_position -= delta;
@@ -271,26 +301,43 @@ void strike_shift_position_reference(int32_t delta)
 
     if (state == STRIKE_DRIVING)
         coast_threshold -= delta;
+
+    irq_restore(irq_state);
 }
 
 void strike_restore_calibration(int32_t drum_pos, int32_t home_pos)
 {
+    uint32_t irq_state = irq_save();
+
     if (homing_duty == 0)
+    {
+        irq_restore(irq_state);
         return;
+    }
 
     drum_position = drum_pos;
     home_position = home_pos;
     drum_dir = (homing_duty > 0) ? 1 : -1;
     homed = 1;
     state = STRIKE_IDLE;
+
+    irq_restore(irq_state);
 }
 
 void strike_home(void)
 {
+    uint32_t irq_state = irq_save();
+
     if (state != STRIKE_IDLE)
+    {
+        irq_restore(irq_state);
         return;
+    }
     if (homing_duty == 0)
+    {
+        irq_restore(irq_state);
         return;
+    }
 
     drum_dir = (homing_duty > 0) ? 1 : -1;
     homed = 0;
@@ -307,20 +354,32 @@ void strike_home(void)
 
     state = STRIKE_HOMING;
     home_phase = HOME_SEEK_DRUM;
+
+    irq_restore(irq_state);
 }
 
 strike_trigger_result_t strike_trigger(int32_t current_ma)
 {
+    uint32_t irq_state = irq_save();
     int32_t pos;
     int32_t vel;
     uint8_t retriggered;
 
     if (!homed || state == STRIKE_HOMING)
+    {
+        irq_restore(irq_state);
         return STRIKE_TRIGGER_REJECT_NOT_HOMED;
+    }
     if (motor_get_state() == MOTOR_FAULT)
+    {
+        irq_restore(irq_state);
         return STRIKE_TRIGGER_REJECT_FAULT;
+    }
     if (current_ma == 0)
+    {
+        irq_restore(irq_state);
         return STRIKE_TRIGGER_REJECT_ZERO;
+    }
 
     retriggered = (state != STRIKE_IDLE);
     pos = get_pos();
@@ -328,7 +387,10 @@ strike_trigger_result_t strike_trigger(int32_t current_ma)
 
     if (retriggered) {
         if (!retrigger_ready_now(pos, vel))
+        {
+            irq_restore(irq_state);
             return STRIKE_TRIGGER_REJECT_NOT_READY;
+        }
 
         if ((timing_flags & STRIKE_TIMING_RETRIGGER_READY_VALID) == 0u) {
             trigger_to_retrigger_ready_ms = elapsed_ms_since(active_start_tick);
@@ -341,11 +403,14 @@ strike_trigger_result_t strike_trigger(int32_t current_ma)
         motor_stop();
 
     begin_strike(current_ma, retriggered);
+    irq_restore(irq_state);
     return retriggered ? STRIKE_TRIGGER_RETRIGGERED : STRIKE_TRIGGER_ACCEPTED;
 }
 
 void strike_cancel(void)
 {
+    uint32_t irq_state = irq_save();
+
     motor_disarm_coast();
     if (homed) {
         motor_set_position(home_position);
@@ -356,6 +421,8 @@ void strike_cancel(void)
     }
     timing_flags &= (uint8_t)~STRIKE_TIMING_ACTIVE;
     state = STRIKE_IDLE;
+
+    irq_restore(irq_state);
 }
 
 /* ── Status ──────────────────────────────────────────────────────────── */
@@ -367,9 +434,12 @@ uint8_t  strike_is_homed(void)               { return homed; }
 uint16_t strike_get_sequence(void)           { return strike_sequence; }
 void strike_get_metrics(strike_metrics_t *metrics)
 {
+    uint32_t irq_state;
+
     if (metrics == 0)
         return;
 
+    irq_state = irq_save();
     metrics->flags = timing_flags;
     metrics->sequence = strike_sequence;
     metrics->last_current_ma = last_current_ma;
@@ -381,6 +451,7 @@ void strike_get_metrics(strike_metrics_t *metrics)
     metrics->home_offset = (int16_t)home_offset;
     metrics->coast_distance = (int16_t)coast_distance;
     metrics->homing_duty = (int16_t)homing_duty;
+    irq_restore(irq_state);
 }
 
 /* ── Tick (configured by STRIKE_LOOP_HZ) ─────────────────────────────── */
@@ -456,8 +527,8 @@ void strike_tick(void)
                 estimated_strike_velocity_dps = velocity_dps;
         }
 
-        /* Coast is triggered by the faster control tick (motor_arm_coast).
-         * We just detect the transition here at the strike tick rate. */
+        /* Coast is triggered by the faster encoder/velocity cadence
+         * (motor_arm_coast). We just detect the transition here. */
         if (motor_is_coasting()) {
             trigger_to_coast_ms = elapsed_ms_since(active_start_tick);
             timing_flags |= STRIKE_TIMING_COAST_VALID;

@@ -91,6 +91,7 @@ sub-command ID; the top 2 bits select reply policy.
 | 0x11 | QUERY_STRIKE | -- | 0 |
 | 0x12 | SAVE_SETTINGS | -- | 0 |
 | 0x13 | CLEAR_SETTINGS | -- | 0 |
+| 0x16 | QUERY_TIMING | -- | 0 |
 
 ### Addressed Reply Modes
 
@@ -111,6 +112,7 @@ bits 5:0 = sub-command ID
 Notes:
 
 - `QUERY_STATUS` and `QUERY_STRIKE` always return their full reply payloads.
+- `QUERY_TIMING` also always returns its full reply payload.
 - `NONE` only suppresses the device-generated reply. In cut-through mode the
   command frame itself still propagates around the ring and returns to the
   master RX path.
@@ -212,6 +214,32 @@ COASTING, or CATCHING, firmware only accepts it once
 `ACK_REPLY` returns `REJECT_NOT_READY`. Once accepted, the current recovery is
 aborted and a new strike attempt starts immediately, and the `ACK_REPLY`
 reports `OK_RETRIGGERED`.
+
+`QUERY_TIMING` replies with the same type `0x40 + addr` and 33 payload bytes:
+
+```
+[type]
+[control_budget_hi] [control_budget_lo]
+[control_last_hi] [control_last_lo]
+[control_max_hi] [control_max_lo]
+[control_overrun_b3] [control_overrun_b2] [control_overrun_b1] [control_overrun_b0]
+[hall_last_hi] [hall_last_lo] [hall_max_hi] [hall_max_lo]
+[uart_last_hi] [uart_last_lo] [uart_max_hi] [uart_max_lo]
+[adc_last_hi] [adc_last_lo] [adc_max_hi] [adc_max_lo]
+[proto_poll_last_hi] [proto_poll_last_lo]
+[proto_poll_max_hi] [proto_poll_max_lo]
+[proto_backlog_hi] [proto_backlog_lo]
+[uptime_b3] [uptime_b2] [uptime_b1] [uptime_b0]
+```
+
+All timing fields are in microseconds except `uptime`, which is milliseconds
+since boot. `control_*` measures the full `SysTick` control service time against
+the configured control-period budget. `hall_*` measures GPIO hall IRQ service
+time. `uart_*` and `adc_*` measure the corresponding ISR wall times. 
+`proto_poll_*` measures foreground `protocol_poll()` wall time. The
+`proto_backlog` field is the maximum number of `protocol_tick()` periods that
+were pending before the main loop caught up, which is a direct signal that
+foreground work is starting to miss its schedule.
 
 ## Persistent Settings
 

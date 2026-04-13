@@ -7,8 +7,8 @@
 #include "M2003.h"
 #include "app_uart.h"
 
-#define UART_RX_BUF_SIZE 64
-#define UART_TX_BUF_SIZE 64
+#define UART_RX_BUF_SIZE 256
+#define UART_TX_BUF_SIZE 256
 
 static volatile uint8_t rx_buf[UART_RX_BUF_SIZE];
 static volatile uint16_t rx_head = 0;
@@ -83,6 +83,7 @@ void UART1_IRQHandler(void)
             tx_running = 0;
         }
     }
+
 }
 
 void uart_init(uint32_t baud)
@@ -119,7 +120,7 @@ void uart_init(uint32_t baud)
 
     UART1->INTEN |= (UART_INTEN_RDAIEN_Msk | UART_INTEN_RXTOIEN_Msk |
                      UART_INTEN_RLSIEN_Msk | UART_INTEN_BUFERRIEN_Msk);
-    NVIC_SetPriority(UART1_IRQn, 1u);
+    NVIC_SetPriority(UART1_IRQn, 2u);
     NVIC_EnableIRQ(UART1_IRQn);
 }
 

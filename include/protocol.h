@@ -5,7 +5,7 @@
 
 void protocol_init(void);
 void protocol_poll(void);
-void protocol_tick(void);
+void protocol_tick(uint32_t elapsed_ticks);
 uint8_t protocol_is_enumerated(void);
 uint8_t protocol_get_address(void);
 

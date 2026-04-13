@@ -17,6 +17,19 @@ static int32_t  encoder_position_offset = 0;   /* logical zero reference */
 static uint8_t  encoder_initialized = 0;
 static uint8_t  encoder_zero_valid = 0;
 
+static uint32_t irq_save(void)
+{
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    return primask;
+}
+
+static void irq_restore(uint32_t primask)
+{
+    if ((primask & 1u) == 0u)
+        __enable_irq();
+}
+
 static int16_t angle_delta(uint16_t current, uint16_t reference)
 {
     int16_t delta = (int16_t)(current - reference);
@@ -85,7 +98,10 @@ void encoder_init(void)
 void encoder_poll(void)
 {
     uint32_t raw = 0;
+    uint32_t irq_state;
     int i;
+
+    irq_state = irq_save();
 
     /* Assert CSn to start the frame */
     PIN_SSI_CSN = 1;
@@ -110,7 +126,7 @@ void encoder_poll(void)
     delay_nop(2); /* Minimum quiet time before next frame */
     /* De-assert CSn to end the frame */
     PIN_SSI_CSN = 0;
-    
+    irq_restore(irq_state);
 
     encoder_raw = raw;
 

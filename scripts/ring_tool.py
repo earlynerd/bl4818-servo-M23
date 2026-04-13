@@ -16,6 +16,7 @@ Examples:
     python ring_tool.py -p COM7 stop 0
     python ring_tool.py -p COM7 broadcast 200 0 0
     python ring_tool.py -p COM7 monitor 0 --hz 10
+    python ring_tool.py -p COM7 timing-status 0
     python ring_tool.py -p COM7 measure-strike-timing 0 --start 500 --stop 3000 --step 250 --csv strike.csv
     python ring_tool.py -p COM7 measure-strike-timing 0 --sweep-param home-offset --start 1200 --stop 2200 --step 200 --strike-current 1500
 """
@@ -65,6 +66,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("enumerate", help="Enumerate devices on the ring")
 
     sp = sub.add_parser("status", help="Query status from a device")
+    sp.add_argument("address", type=int)
+
+    sp = sub.add_parser("timing-status", help="Query timing and scheduler instrumentation from a device")
     sp.add_argument("address", type=int)
 
     sp = sub.add_parser("set-duty", help="Set signed duty on a device")
@@ -345,78 +349,88 @@ def main() -> int:
     try:
         client.open()
 
+        def retry_after_enumerate(operation):
+            try:
+                return operation()
+            except RingTimeout as first_exc:
+                try:
+                    count = client.enumerate()
+                except RingError:
+                    raise first_exc
+
+                print(f"devices={count}")
+                if count == 0:
+                    raise first_exc
+
+                return operation()
+
         if args.command == "enumerate":
             count = client.enumerate()
             print(f"devices={count}")
             return 0
 
-        try:
-            count = client.enumerate()
-            print(f"devices={count}")
-            if count == 0:
-                print("WARNING: enumeration returned 0 devices")
-        except RingError as exc:
-            print(f"WARNING: enumerate failed ({exc}), proceeding anyway")
-
         if args.command == "status":
-            print(format_status(client.query_status(args.address)))
+            print(format_status(retry_after_enumerate(lambda: client.query_status(args.address))))
+
+        elif args.command == "timing-status":
+            print(format_timing_status(retry_after_enumerate(lambda: client.query_timing(args.address))))
 
         elif args.command == "set-duty":
-            print(format_status(client.set_duty(args.address, args.duty)))
+            print(format_status(retry_after_enumerate(lambda: client.set_duty(args.address, args.duty))))
 
         elif args.command == "torque":
-            print(format_status(client.set_torque(args.address, args.milliamps)))
+            print(format_status(retry_after_enumerate(lambda: client.set_torque(args.address, args.milliamps))))
 
         elif args.command == "stop":
-            print(format_status(client.stop(args.address)))
+            print(format_status(retry_after_enumerate(lambda: client.stop(args.address))))
 
         elif args.command == "clear-fault":
-            print(format_status(client.clear_fault(args.address)))
+            print(format_status(retry_after_enumerate(lambda: client.clear_fault(args.address))))
 
         elif args.command == "set-position":
-            print(format_status(client.set_position(args.address, args.counts)))
+            print(format_status(retry_after_enumerate(lambda: client.set_position(args.address, args.counts))))
 
         elif args.command == "set-pos-pid":
-            print(format_status(client.set_pos_pid(args.address, args.kp, args.ki, args.kd)))
+            print(format_status(retry_after_enumerate(lambda: client.set_pos_pid(args.address, args.kp, args.ki, args.kd))))
 
         elif args.command == "zero-pos":
-            print(format_status(client.zero_position(args.address)))
+            print(format_status(retry_after_enumerate(lambda: client.zero_position(args.address))))
 
         elif args.command == "save-settings":
-            print(format_status(client.save_settings(args.address)))
+            print(format_status(retry_after_enumerate(lambda: client.save_settings(args.address))))
 
         elif args.command == "clear-settings":
-            print(format_status(client.clear_settings(args.address)))
+            print(format_status(retry_after_enumerate(lambda: client.clear_settings(args.address))))
 
         elif args.command == "set-mode":
-            print(format_status(client.set_mode(args.address, args.mode)))
+            print(format_status(retry_after_enumerate(lambda: client.set_mode(args.address, args.mode))))
 
         elif args.command == "set-velocity":
-            print(format_status(client.set_velocity(args.address, args.rpm)))
+            print(format_status(retry_after_enumerate(lambda: client.set_velocity(args.address, args.rpm))))
 
         elif args.command == "set-pid":
-            print(format_status(client.set_pid(args.address, args.kp, args.ki, args.kd)))
+            print(format_status(retry_after_enumerate(lambda: client.set_pid(args.address, args.kp, args.ki, args.kd))))
 
         elif args.command == "set-ff":
-            print(format_status(client.set_ff(args.address, args.gain)))
+            print(format_status(retry_after_enumerate(lambda: client.set_ff(args.address, args.gain))))
 
         elif args.command == "set-cur-pid":
-            print(format_status(client.set_cur_pid(args.address, args.kp, args.ki)))
+            print(format_status(retry_after_enumerate(lambda: client.set_cur_pid(args.address, args.kp, args.ki))))
 
         elif args.command == "set-current":
-            print(format_status(client.set_current(args.address, args.milliamps)))
+            print(format_status(retry_after_enumerate(lambda: client.set_current(args.address, args.milliamps))))
 
         elif args.command == "strike":
-            print(format_status(client.strike(args.address, args.current_ma)))
+            print(format_status(retry_after_enumerate(lambda: client.strike(args.address, args.current_ma))))
 
         elif args.command == "strike-home":
-            print(format_status(client.strike_home(args.address)))
+            print(format_status(retry_after_enumerate(lambda: client.strike_home(args.address))))
 
         elif args.command == "strike-cancel":
-            print(format_status(client.strike_cancel(args.address)))
+            print(format_status(retry_after_enumerate(lambda: client.strike_cancel(args.address))))
 
         elif args.command == "strike-status":
-            status = client.query_strike(args.address)
+            status = retry_after_enumerate(lambda: client.query_strike(args.address))
             print(
                 f"addr={status.address} strike={status.state_name} homed={status.homed} "
                 f"seq={status.sequence} flags=0x{status.flags:02X} current_ma={status.last_current_ma} "
@@ -440,8 +454,10 @@ def main() -> int:
                 "coast-distance": STRIKE_PARAM_COAST_DISTANCE,
                 "homing-duty": STRIKE_PARAM_HOMING_DUTY,
             }
-            print(format_status(client.set_strike_param(args.address, param_map[args.param], args.value)))
-            status = client.query_strike(args.address)
+            print(format_status(retry_after_enumerate(
+                lambda: client.set_strike_param(args.address, param_map[args.param], args.value)
+            )))
+            status = retry_after_enumerate(lambda: client.query_strike(args.address))
             print(
                 f"strike params: home_offset={status.home_offset if status.home_offset is not None else 'n/a'} "
                 f"coast_distance={status.coast_distance if status.coast_distance is not None else 'n/a'} "
@@ -633,7 +649,15 @@ def main() -> int:
                 )
 
         elif args.command == "broadcast":
-            if client.device_count is not None and len(args.duties) != client.device_count:
+            if client.device_count is None:
+                try:
+                    count = client.enumerate()
+                    print(f"devices={count}")
+                except RingError:
+                    count = None
+            else:
+                count = client.device_count
+            if count is not None and len(args.duties) != count:
                 print(f"WARNING: sending {len(args.duties)} duties but {client.device_count} devices enumerated")
             client.broadcast_duty(args.duties)
             print("broadcast ok")
@@ -643,7 +667,7 @@ def main() -> int:
             print(f"Monitoring device {args.address} at {args.hz:.1f} Hz (Ctrl-C to stop)")
             while True:
                 try:
-                    print(format_status(client.query_status(args.address)))
+                    print(format_status(retry_after_enumerate(lambda: client.query_status(args.address))))
                 except RingTimeout:
                     print("  (timeout)")
                 except RingCRCError as exc:
@@ -661,7 +685,7 @@ def main() -> int:
             )
 
             # Start in torque mode at 0 mA and let it settle
-            client.set_current(args.address, 0)
+            retry_after_enumerate(lambda: client.set_current(args.address, 0))
             time.sleep(0.05)
 
             samples: list[tuple[float, int, int]] = []  # (time_ms, setpoint, measured)

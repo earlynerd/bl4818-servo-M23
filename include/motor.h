@@ -60,14 +60,14 @@ void motor_get_cur_pid(int32_t *kp, int32_t *ki);
 void motor_start(void);
 void motor_stop(void);
 void motor_coast(void);        /* Float phases, stay MOTOR_RUN (for strike coast) */
-void motor_arm_coast(int32_t threshold, int8_t direction);  /* Auto-coast at position */
+void motor_arm_coast(int32_t threshold, int8_t direction);  /* Auto-coast at position on encoder sample */
 void motor_disarm_coast(void);
 uint8_t motor_is_coasting(void);
 void motor_clear_fault(void);
 
 void motor_handle_hall_transition(uint8_t hall_result); /* IRQ-side hall decode -> commutation/fault handling */
 void motor_poll_fast(void);     /* Legacy main-loop hook; hall commutation is IRQ-driven */
-void motor_tick_control(void);  /* SysTick-driven control loop at CONTROL_LOOP_HZ */
+uint16_t motor_tick_control(void);  /* SysTick-driven fast loop at CONTROL_LOOP_HZ; returns elapsed ADC samples */
 
 motor_state_t motor_get_state(void);
 fault_code_t  motor_get_fault(void);

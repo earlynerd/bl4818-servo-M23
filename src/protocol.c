@@ -16,6 +16,7 @@
 #include "encoder.h"
 #include "persist.h"
 #include "strike.h"
+#include "timing.h"
 /* Enable for parser state tracing: #define DBG(c) uart_putc(c) */
 #define DBG(c) ((void)0)
 
@@ -26,8 +27,8 @@
 #define FRAME_BUF_SIZE          (1u + MAX_PAYLOAD + 2u) /* LEN + payload + CRC */
 #define ADDR_UNASSIGNED         0xFFu
 #define MAX_DEVICES             16u
-#define FRAME_TIMEOUT_TICKS     25u   /* 5 ms at 5 kHz, refreshed on every byte */
-#define POLL_BYTE_BUDGET        48u
+#define FRAME_TIMEOUT_TICKS     HZ_TICKS_FROM_MS(PROTOCOL_TICK_HZ, PROTOCOL_FRAME_TIMEOUT_MS)
+#define POLL_BYTE_BUDGET        128u
 
 /* ── Command types ────────────────────────────────────────────────────── */
 #define CMD_ENTER_SF            0x01u
@@ -63,6 +64,7 @@
 #define SUBCMD_CLEAR_SETTINGS   0x13u
 #define SUBCMD_SET_CUR_PID      0x14u
 #define SUBCMD_SET_CURRENT      0x15u
+#define SUBCMD_QUERY_TIMING     0x16u
 #define SUBCMD_MASK             0x3Fu
 #define SUBCMD_REPLY_MASK       0xC0u
 #define SUBCMD_REPLY_FULL       0x00u
@@ -103,6 +105,19 @@ static rx_phase_t rx_phase;
 static uint8_t rx_timeout;
 
 /* ── Helpers ──────────────────────────────────────────────────────────── */
+
+static uint32_t irq_save(void)
+{
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    return primask;
+}
+
+static void irq_restore(uint32_t primask)
+{
+    if ((primask & 1u) == 0u)
+        __enable_irq();
+}
 
 static void send_raw(const uint8_t *data, uint8_t len)
 {
@@ -152,11 +167,15 @@ static uint8_t prepare_set_duty(int16_t duty)
 
 static uint8_t prepare_set_velocity(int16_t rpm)
 {
+    uint32_t irq_state;
+
     if (motor_get_state() == MOTOR_FAULT)
         return 0u;
 
+    irq_state = irq_save();
     motor_set_velocity(rpm);
     motor_set_mode(CTRL_VELOCITY);
+    irq_restore(irq_state);
     return 1u;
 }
 
@@ -172,22 +191,39 @@ static uint8_t prepare_set_position(int32_t counts)
 
 static void send_status_reply(void)
 {
-    uint16_t current = (uint16_t)motor_get_current();
-    uint16_t angle = encoder_get_angle();
-    int16_t  velocity = (int16_t)motor_get_velocity();
-    int16_t  target = (int16_t)motor_get_target();
-    int32_t  position = -encoder_get_position(); /* negate: forward = positive */
+    uint32_t irq_state;
+    uint8_t motor_state;
+    uint8_t motor_fault;
+    uint8_t motor_mode;
+    uint16_t current;
+    uint16_t angle;
+    int16_t velocity;
+    int16_t target;
+    int32_t position;
+    uint8_t hall_state;
     uint8_t buf[20];
     uint16_t crc;
 
+    irq_state = irq_save();
+    motor_state = (uint8_t)motor_get_state();
+    motor_fault = (uint8_t)motor_get_fault();
+    motor_mode = (uint8_t)motor_get_mode();
+    current = (uint16_t)motor_get_current();
+    angle = encoder_get_angle();
+    velocity = (int16_t)motor_get_velocity();
+    target = (int16_t)motor_get_target();
+    position = -encoder_get_position(); /* negate: forward = positive */
+    hall_state = hall_read();
+    irq_restore(irq_state);
+
     buf[0]  = 17u;
     buf[1]  = CMD_STATUS_BASE | device_addr;
-    buf[2]  = (uint8_t)motor_get_state();
-    buf[3]  = (uint8_t)motor_get_fault();
-    buf[4]  = (uint8_t)motor_get_mode();
+    buf[2]  = motor_state;
+    buf[3]  = motor_fault;
+    buf[4]  = motor_mode;
     buf[5]  = (uint8_t)(current >> 8);
     buf[6]  = (uint8_t)(current & 0xFFu);
-    buf[7]  = hall_read();
+    buf[7]  = hall_state;
     buf[8]  = (uint8_t)(angle >> 8);
     buf[9]  = (uint8_t)(angle & 0xFFu);
     buf[10] = (uint8_t)((uint16_t)velocity >> 8);
@@ -213,21 +249,31 @@ static void send_status_reply(void)
 
 #define FULL_REPLY_STATUS            0u
 #define FULL_REPLY_STRIKE_STATUS     1u
+#define FULL_REPLY_TIMING_STATUS     2u
 
 static void send_strike_status_reply(void)
 {
-    int32_t drum_pos = strike_get_drum_position();
-    int32_t home_pos = strike_get_home_position();
+    uint32_t irq_state;
+    int32_t drum_pos;
+    int32_t home_pos;
+    uint8_t strike_state;
+    uint8_t strike_homed;
     strike_metrics_t metrics;
     uint8_t buf[35];
     uint16_t crc;
 
+    irq_state = irq_save();
+    drum_pos = strike_get_drum_position();
+    home_pos = strike_get_home_position();
+    strike_state = (uint8_t)strike_get_state();
+    strike_homed = strike_is_homed();
     strike_get_metrics(&metrics);
+    irq_restore(irq_state);
 
     buf[0]  = 32u;                                  /* LEN */
     buf[1]  = CMD_STATUS_BASE | device_addr;
-    buf[2]  = (uint8_t)strike_get_state();
-    buf[3]  = strike_is_homed();
+    buf[2]  = strike_state;
+    buf[3]  = strike_homed;
     buf[4]  = metrics.flags;
     buf[5]  = (uint8_t)(metrics.sequence >> 8);
     buf[6]  = (uint8_t)(metrics.sequence & 0xFFu);
@@ -263,6 +309,56 @@ static void send_strike_status_reply(void)
     buf[34] = (uint8_t)(crc & 0xFFu);
 
     send_frame(buf, 35);
+}
+
+static void send_timing_status_reply(void)
+{
+    timing_snapshot_t snapshot;
+    uint8_t buf[36];
+    uint16_t crc;
+
+    timing_get_snapshot(&snapshot);
+
+    buf[0]  = 33u;                                  /* LEN */
+    buf[1]  = CMD_STATUS_BASE | device_addr;
+    buf[2]  = (uint8_t)(snapshot.control_budget_us >> 8);
+    buf[3]  = (uint8_t)(snapshot.control_budget_us & 0xFFu);
+    buf[4]  = (uint8_t)(snapshot.control_last_us >> 8);
+    buf[5]  = (uint8_t)(snapshot.control_last_us & 0xFFu);
+    buf[6]  = (uint8_t)(snapshot.control_max_us >> 8);
+    buf[7]  = (uint8_t)(snapshot.control_max_us & 0xFFu);
+    buf[8]  = (uint8_t)(snapshot.control_overrun_count >> 24);
+    buf[9]  = (uint8_t)(snapshot.control_overrun_count >> 16);
+    buf[10] = (uint8_t)(snapshot.control_overrun_count >> 8);
+    buf[11] = (uint8_t)(snapshot.control_overrun_count & 0xFFu);
+    buf[12] = (uint8_t)(snapshot.hall_last_us >> 8);
+    buf[13] = (uint8_t)(snapshot.hall_last_us & 0xFFu);
+    buf[14] = (uint8_t)(snapshot.hall_max_us >> 8);
+    buf[15] = (uint8_t)(snapshot.hall_max_us & 0xFFu);
+    buf[16] = (uint8_t)(snapshot.uart_last_us >> 8);
+    buf[17] = (uint8_t)(snapshot.uart_last_us & 0xFFu);
+    buf[18] = (uint8_t)(snapshot.uart_max_us >> 8);
+    buf[19] = (uint8_t)(snapshot.uart_max_us & 0xFFu);
+    buf[20] = (uint8_t)(snapshot.adc_last_us >> 8);
+    buf[21] = (uint8_t)(snapshot.adc_last_us & 0xFFu);
+    buf[22] = (uint8_t)(snapshot.adc_max_us >> 8);
+    buf[23] = (uint8_t)(snapshot.adc_max_us & 0xFFu);
+    buf[24] = (uint8_t)(snapshot.protocol_poll_last_us >> 8);
+    buf[25] = (uint8_t)(snapshot.protocol_poll_last_us & 0xFFu);
+    buf[26] = (uint8_t)(snapshot.protocol_poll_max_us >> 8);
+    buf[27] = (uint8_t)(snapshot.protocol_poll_max_us & 0xFFu);
+    buf[28] = (uint8_t)(snapshot.protocol_backlog_max >> 8);
+    buf[29] = (uint8_t)(snapshot.protocol_backlog_max & 0xFFu);
+    buf[30] = (uint8_t)(snapshot.uptime_ms >> 24);
+    buf[31] = (uint8_t)(snapshot.uptime_ms >> 16);
+    buf[32] = (uint8_t)(snapshot.uptime_ms >> 8);
+    buf[33] = (uint8_t)(snapshot.uptime_ms & 0xFFu);
+
+    crc = crc16_ccitt(buf, 34);
+    buf[34] = (uint8_t)(crc >> 8);
+    buf[35] = (uint8_t)(crc & 0xFFu);
+
+    send_frame(buf, 36);
 }
 
 static void send_ack_reply(uint8_t subcmd, uint8_t result, uint16_t detail)
@@ -330,6 +426,8 @@ static void send_addressed_reply(
 
     if (full_reply_kind == FULL_REPLY_STRIKE_STATUS)
         send_strike_status_reply();
+    else if (full_reply_kind == FULL_REPLY_TIMING_STATUS)
+        send_timing_status_reply();
     else
         send_status_reply();
 }
@@ -407,7 +505,7 @@ static void handle_addressed_cmd(uint8_t cmd_type, const uint8_t *payload, uint8
     subcmd = raw_subcmd & SUBCMD_MASK;
     reply_mode = sanitize_reply_mode(raw_subcmd & SUBCMD_REPLY_MASK);
 
-    if (subcmd == SUBCMD_QUERY_STATUS || subcmd == SUBCMD_QUERY_STRIKE)
+    if (subcmd == SUBCMD_QUERY_STATUS || subcmd == SUBCMD_QUERY_STRIKE || subcmd == SUBCMD_QUERY_TIMING)
         reply_mode = SUBCMD_REPLY_FULL;
 
     switch (subcmd) {
@@ -518,10 +616,14 @@ static void handle_addressed_cmd(uint8_t cmd_type, const uint8_t *payload, uint8
         break;
     case SUBCMD_ZERO_POSITION:
     {
-        int32_t current_pos = -encoder_get_position();
+        uint32_t irq_state;
+        int32_t current_pos;
+        irq_state = irq_save();
+        current_pos = -encoder_get_position();
         motor_shift_position_reference(current_pos);
         strike_shift_position_reference(current_pos);
         encoder_reset_position();
+        irq_restore(irq_state);
         /* Persist the logical zero point so absolute angle reconstructs it. */
         persist_save_runtime();
         send_addressed_reply(reply_mode, subcmd, ACK_RESULT_OK, 0u, FULL_REPLY_STATUS);
@@ -575,6 +677,9 @@ static void handle_addressed_cmd(uint8_t cmd_type, const uint8_t *payload, uint8
         break;
     case SUBCMD_QUERY_STRIKE:
         send_addressed_reply(reply_mode, subcmd, ACK_RESULT_OK, strike_get_sequence(), FULL_REPLY_STRIKE_STATUS);
+        break;
+    case SUBCMD_QUERY_TIMING:
+        send_addressed_reply(reply_mode, subcmd, ACK_RESULT_OK, 0u, FULL_REPLY_TIMING_STATUS);
         break;
     case SUBCMD_SAVE_SETTINGS:
         persist_save_runtime();
@@ -754,12 +859,13 @@ void protocol_poll(void)
     }
 }
 
-void protocol_tick(void)
+void protocol_tick(uint32_t elapsed_ticks)
 {
     if (rx_phase != RX_SCAN_0 && rx_timeout != 0u) {
-        rx_timeout--;
-        if (rx_timeout == 0u)
+        if (elapsed_ticks >= rx_timeout)
             reset_receiver();
+        else
+            rx_timeout = (uint8_t)(rx_timeout - elapsed_ticks);
     }
 }
 

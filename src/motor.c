@@ -7,8 +7,9 @@
  *   CTRL_POSITION — cascaded: position PID → velocity PID → current PI → duty
  *
  * Loop rates are configured in m2003_config.h (_LOOP_HZ defines).
- * Control tick runs from SysTick at CONTROL_LOOP_HZ; inner loops use dividers.
- * ADC ISR oversamples at PWM rate and hands the control loop an averaged window.
+ * The fast tick runs at CURRENT_LOOP_HZ for current PI and protection, while
+ * velocity and position work are scheduled more slowly from it.
+ * ADC ISR oversamples at PWM rate and hands the fast loop an averaged window.
  */
 
 #include <stdint.h>
@@ -37,8 +38,8 @@ static uint32_t      torque_limit_ma;
 static uint32_t      current_ma;
 static int32_t       current_filt_q8;    /* filtered current estimate in Q8 mA */
 static uint8_t       current_filt_initialized;
-static uint16_t      overcurrent_ticks;
-static uint16_t      peak_overcurrent_ticks;
+static uint16_t      overcurrent_samples;
+static uint16_t      peak_overcurrent_samples;
 
 static int32_t       prev_enc_position;
 static int32_t       vel_filt_q8;       /* IIR-filtered velocity in Q8 */
@@ -48,27 +49,61 @@ static int32_t       last_applied_duty;  /* for bumpless transfer on mode switch
 static uint8_t       coasting;           /* 1 = phases floating, skip duty dispatch */
 static int32_t       coast_trip_pos;     /* auto-coast position threshold */
 static int8_t        coast_trip_dir;     /* +1: coast when pos >= trip, -1: when <= */
-static uint8_t       coast_armed;        /* 1 = watching for coast trigger in control tick */
+static uint8_t       coast_armed;        /* 1 = watching for coast trigger on encoder samples */
 static pid_t         vel_pid;
 static pid_t         pos_pid;
 static pid_t         cur_pid;
 static int32_t       current_setpoint;   /* mA, output of velocity PID for current loop */
-static uint8_t       cur_div;            /* divider counter for current loop */
-static uint8_t       vel_div;            /* divider counter for velocity loop */
-static uint8_t       pos_div;            /* divider counter for position loop */
+static uint32_t      velocity_sched_accum;
+static uint32_t      position_sched_accum;
+static uint32_t      velocity_elapsed_samples;
 
 /*
  * Encoder-based velocity:
- *   RPM = delta_counts * 60 * CONTROL_LOOP_HZ / ENCODER_COUNTS_PER_REV
+ *   RPM = delta_counts * 60 * PWM_FREQ_HZ /
+ *         (ENCODER_COUNTS_PER_REV * elapsed_pwm_samples)
  */
-#define VEL_CONV_NUM  (60 * CONTROL_LOOP_HZ)
-
 /* ── Helpers ─────────────────────────────────────────────────────────── */
 
-static int32_t estimate_velocity(void)
+static uint32_t irq_save(void)
+{
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    return primask;
+}
+
+static void irq_restore(uint32_t primask)
+{
+    if ((primask & 1u) == 0u)
+        __enable_irq();
+}
+
+static void reset_scheduler_state(void)
+{
+    velocity_sched_accum = 0u;
+    position_sched_accum = 0u;
+    velocity_elapsed_samples = 0u;
+}
+
+static uint8_t schedule_latest_from_samples(uint32_t *accum, uint32_t elapsed_samples, uint32_t target_hz)
+{
+    *accum += elapsed_samples * target_hz;
+    if (*accum < PWM_FREQ_HZ)
+        return 0u;
+
+    *accum -= PWM_FREQ_HZ;
+    if (*accum >= PWM_FREQ_HZ)
+        *accum = 0u;
+
+    return 1u;
+}
+
+static int32_t estimate_velocity(uint32_t elapsed_samples)
 {
     int32_t pos = encoder_get_position();
     int32_t delta = pos - prev_enc_position;
+    int64_t numerator;
+    int64_t denominator;
     prev_enc_position = pos;
 
     if (!vel_initialized) {
@@ -76,8 +111,13 @@ static int32_t estimate_velocity(void)
         return 0;
     }
 
+    if (elapsed_samples == 0u)
+        elapsed_samples = 1u;
+
     /* Negate: encoder counts positive in opposite direction to commutation forward */
-    int32_t raw_rpm = -(delta * VEL_CONV_NUM) / ENCODER_COUNTS_PER_REV;
+    numerator = -(int64_t)delta * 60LL * (int64_t)PWM_FREQ_HZ;
+    denominator = (int64_t)ENCODER_COUNTS_PER_REV * (int64_t)elapsed_samples;
+    int32_t raw_rpm = (int32_t)(numerator / denominator);
 
     /* First-order IIR in Q8 for sub-RPM precision */
     int32_t raw_q8 = raw_rpm << PID_SCALE_SHIFT;
@@ -150,8 +190,8 @@ static void reset_current_protection_state(void)
 {
     current_filt_q8 = 0;
     current_filt_initialized = 0;
-    overcurrent_ticks = 0;
-    peak_overcurrent_ticks = 0;
+    overcurrent_samples = 0;
+    peak_overcurrent_samples = 0;
 }
 
 static void enter_fault(fault_code_t code)
@@ -163,6 +203,7 @@ static void enter_fault(fault_code_t code)
     pid_reset(&pos_pid);
     pid_reset(&cur_pid);
     current_setpoint = 0;
+    reset_scheduler_state();
     coasting = 0;
     coast_armed = 0;
     reset_current_protection_state();
@@ -187,8 +228,8 @@ void motor_init(void)
     current_ma = 0;
     current_filt_q8 = 0;
     current_filt_initialized = 0;
-    overcurrent_ticks = 0;
-    peak_overcurrent_ticks = 0;
+    overcurrent_samples = 0;
+    peak_overcurrent_samples = 0;
     prev_enc_position = 0;
     vel_filt_q8 = 0;
     vel_initialized = 0;
@@ -196,9 +237,7 @@ void motor_init(void)
     coasting = 0;
     coast_armed = 0;
     current_setpoint = 0;
-    cur_div = 0;
-    vel_div = 0;
-    pos_div = 0;
+    reset_scheduler_state();
 
     pid_init(&vel_pid,
              VEL_PID_KP_DEFAULT, VEL_PID_KI_DEFAULT, VEL_PID_KD_DEFAULT, VEL_FF_DEFAULT,
@@ -217,10 +256,13 @@ void motor_init(void)
 
 void motor_set_mode(ctrl_mode_t mode)
 {
+    uint32_t irq_state = irq_save();
     uint8_t was_coasting;
 
-    if (mode == ctrl_mode)
+    if (mode == ctrl_mode) {
+        irq_restore(irq_state);
         return;
+    }
 
     was_coasting = coasting;
     coasting = 0;
@@ -295,9 +337,8 @@ void motor_set_mode(ctrl_mode_t mode)
 
     ctrl_mode = mode;
     current_setpoint = 0;
-    cur_div = 0;
-    vel_div = 0;
-    pos_div = 0;
+    reset_scheduler_state();
+    irq_restore(irq_state);
 }
 
 ctrl_mode_t motor_get_mode(void) { return ctrl_mode; }
@@ -308,19 +349,23 @@ void motor_set_position(int32_t counts)  { target_position = counts; }
 void motor_set_current(int32_t ma)       { target_current = ma; }
 void motor_shift_position_reference(int32_t delta)
 {
+    uint32_t irq_state = irq_save();
     target_position -= delta;
     pos_pid.prev_meas -= delta;
     coast_trip_pos -= delta;
 
     /* encoder_position moves to encoder_position + delta when re-zeroed */
     prev_enc_position += delta;
+    irq_restore(irq_state);
 }
 
 void motor_set_torque_limit(uint32_t ma)
 {
+    uint32_t irq_state = irq_save();
     if (ma > CURRENT_LIMIT_MA)
         ma = CURRENT_LIMIT_MA;
     torque_limit_ma = ma;
+    irq_restore(irq_state);
 }
 
 uint32_t motor_get_torque_limit(void)
@@ -330,13 +375,17 @@ uint32_t motor_get_torque_limit(void)
 
 void motor_set_vel_pid(int32_t kp, int32_t ki, int32_t kd)
 {
+    uint32_t irq_state = irq_save();
     pid_set_gains(&vel_pid, kp, ki, kd, vel_pid.kf,
                   -(int32_t)CURRENT_LIMIT_MA, (int32_t)CURRENT_LIMIT_MA);
+    irq_restore(irq_state);
 }
 
 void motor_set_vel_ff(int32_t gain)
 {
+    uint32_t irq_state = irq_save();
     vel_pid.kf = gain;
+    irq_restore(irq_state);
 }
 
 void motor_get_vel_pid(int32_t *kp, int32_t *ki, int32_t *kd)
@@ -356,10 +405,12 @@ int32_t motor_get_vel_ff(void)
 
 void motor_set_pos_pid(int32_t kp, int32_t ki, int32_t kd)
 {
+    uint32_t irq_state = irq_save();
     pid_set_gains(&pos_pid, kp, ki, kd, 0,
                   -(int32_t)(POS_MAX_VEL_RPM * POS_ERROR_PRESCALE),
                   (int32_t)(POS_MAX_VEL_RPM * POS_ERROR_PRESCALE));
     pos_pid.int_max = (int64_t)POS_INT_MAX_RPM * POS_ERROR_PRESCALE * PID_SCALE;
+    irq_restore(irq_state);
 }
 
 void motor_get_pos_pid(int32_t *kp, int32_t *ki, int32_t *kd)
@@ -374,8 +425,10 @@ void motor_get_pos_pid(int32_t *kp, int32_t *ki, int32_t *kd)
 
 void motor_set_cur_pid(int32_t kp, int32_t ki)
 {
+    uint32_t irq_state = irq_save();
     pid_set_gains(&cur_pid, kp, ki, 0, 0,
                   0, (int32_t)PWM_MAX_DUTY);
+    irq_restore(irq_state);
 }
 
 void motor_get_cur_pid(int32_t *kp, int32_t *ki)
@@ -388,22 +441,31 @@ void motor_get_cur_pid(int32_t *kp, int32_t *ki)
 
 void motor_start(void)
 {
+    uint32_t irq_state = irq_save();
+
     if (state == MOTOR_FAULT)
+    {
+        irq_restore(irq_state);
         return;
+    }
 
     if (ctrl_mode == CTRL_DUTY && target_duty == 0)
+    {
+        irq_restore(irq_state);
         return;
+    }
 
     if (state == MOTOR_RUN)
+    {
+        irq_restore(irq_state);
         return;
+    }
 
     pid_reset(&vel_pid);
     pid_reset(&pos_pid);
     pid_reset(&cur_pid);
     current_setpoint = 0;
-    cur_div = 0;
-    vel_div = 0;
-    pos_div = 0;
+    reset_scheduler_state();
     coasting = 0;
     reset_current_protection_state();
     state = MOTOR_RUN;
@@ -420,10 +482,12 @@ void motor_start(void)
 
     commutation_update(drive_dir);
     pwm_enable();
+    irq_restore(irq_state);
 }
 
 void motor_stop(void)
 {
+    uint32_t irq_state = irq_save();
     target_duty = 0;
     target_velocity = 0;
     target_current = 0;
@@ -433,10 +497,12 @@ void motor_stop(void)
     pid_reset(&pos_pid);
     pid_reset(&cur_pid);
     current_setpoint = 0;
+    reset_scheduler_state();
     coasting = 0;
     coast_armed = 0;
     reset_current_protection_state();
     state = MOTOR_IDLE;
+    irq_restore(irq_state);
 }
 
 void motor_coast(void)
@@ -447,25 +513,27 @@ void motor_coast(void)
     pid_reset(&pos_pid);
     pid_reset(&cur_pid);
     current_setpoint = 0;
-    cur_div = 0;
-    vel_div = 0;
-    pos_div = 0;
-    overcurrent_ticks = 0;
-    peak_overcurrent_ticks = 0;
+    reset_scheduler_state();
+    overcurrent_samples = 0;
+    peak_overcurrent_samples = 0;
     last_applied_duty = 0;
     coasting = 1;
 }
 
 void motor_arm_coast(int32_t threshold, int8_t direction)
 {
+    uint32_t irq_state = irq_save();
     coast_trip_pos = threshold;
     coast_trip_dir = direction;
     coast_armed = 1;
+    irq_restore(irq_state);
 }
 
 void motor_disarm_coast(void)
 {
+    uint32_t irq_state = irq_save();
     coast_armed = 0;
+    irq_restore(irq_state);
 }
 
 uint8_t motor_is_coasting(void)
@@ -475,6 +543,7 @@ uint8_t motor_is_coasting(void)
 
 void motor_clear_fault(void)
 {
+    uint32_t irq_state = irq_save();
     target_duty = 0;
     target_velocity = 0;
     target_current = 0;
@@ -483,11 +552,13 @@ void motor_clear_fault(void)
     pid_reset(&pos_pid);
     pid_reset(&cur_pid);
     current_setpoint = 0;
+    reset_scheduler_state();
     pwm_disable();
     coasting = 0;
     coast_armed = 0;
     reset_current_protection_state();
     state = MOTOR_IDLE;
+    irq_restore(irq_state);
 }
 
 motor_state_t motor_get_state(void)   { return state; }
@@ -529,15 +600,19 @@ void motor_poll_fast(void)
 
 /* ── Control tick ────────────────────────────────────────────────────── */
 
-void motor_tick_control(void)
+uint16_t motor_tick_control(void)
 {
     adc_snapshot_t adc_snapshot;
+    uint16_t elapsed_samples;
     uint32_t avg_current_ma;
     uint32_t peak_current_ma;
     int32_t duty;
+    uint8_t velocity_due = 0u;
+    uint8_t position_due = 0u;
 
-    /* Consume one ADC window accumulated at PWM rate since the previous control tick. */
+    /* Consume one ADC window accumulated at PWM rate since the previous fast tick. */
     adc_consume_snapshot(&adc_snapshot);
+    elapsed_samples = adc_snapshot.sample_count;
     avg_current_ma = adc_current_raw_to_ma(adc_snapshot.avg_current_raw);
     peak_current_ma = adc_current_raw_to_ma(adc_snapshot.peak_current_raw);
 
@@ -554,109 +629,112 @@ void motor_tick_control(void)
      * and impact/rebound transients are expected while the strike is floating. */
     if (state == MOTOR_RUN && !coasting) {
         if (peak_current_ma > CURRENT_PEAK_LIMIT_MA) {
-            if (peak_overcurrent_ticks < 0xFFFFu)
-                peak_overcurrent_ticks++;
+            uint32_t total = (uint32_t)peak_overcurrent_samples + elapsed_samples;
+            peak_overcurrent_samples = (total > 0xFFFFu) ? 0xFFFFu : (uint16_t)total;
         } else {
-            peak_overcurrent_ticks = 0u;
+            peak_overcurrent_samples = 0u;
         }
 
-        if (peak_overcurrent_ticks >= CURRENT_PEAK_FAULT_TICKS) {
+        if (peak_overcurrent_samples >= CURRENT_PEAK_FAULT_SAMPLES) {
             pwm_fault_brake();
             enter_fault(FAULT_OVERCURRENT);
-            return;
+            return elapsed_samples;
         }
 
         if (peak_current_ma > CURRENT_LIMIT_MA) {
-            if (overcurrent_ticks < 0xFFFFu)
-                overcurrent_ticks++;
+            uint32_t total = (uint32_t)overcurrent_samples + elapsed_samples;
+            overcurrent_samples = (total > 0xFFFFu) ? 0xFFFFu : (uint16_t)total;
         } else {
-            overcurrent_ticks = 0u;
+            overcurrent_samples = 0u;
         }
 
-        if (overcurrent_ticks >= OVERCURRENT_FAULT_TICKS) {
+        if (overcurrent_samples >= OVERCURRENT_FAULT_SAMPLES) {
             pwm_fault_brake();
             enter_fault(FAULT_OVERCURRENT);
-            return;
+            return elapsed_samples;
         }
     } else {
-        overcurrent_ticks = 0u;
-        peak_overcurrent_ticks = 0u;
+        overcurrent_samples = 0u;
+        peak_overcurrent_samples = 0u;
     }
 
-    /* Always update measured velocity (useful for status reporting) */
-    measured_velocity = estimate_velocity();
+    velocity_elapsed_samples += elapsed_samples;
+    if (schedule_latest_from_samples(&velocity_sched_accum, elapsed_samples, VELOCITY_LOOP_HZ)) {
+        velocity_due = 1u;
 
-    /* Coast detection at CONTROL_LOOP_HZ — armed by strike module.
-     * Must cut power before the mallet hits the drum. */
-    if (coast_armed && state == MOTOR_RUN) {
-        int32_t pos = -encoder_get_position();
-        uint8_t crossed = (coast_trip_dir > 0)
-            ? (pos >= coast_trip_pos)
-            : (pos <= coast_trip_pos);
-        if (crossed) {
-            motor_coast();
-            coast_armed = 0;
+        encoder_poll();
+        measured_velocity = estimate_velocity(velocity_elapsed_samples);
+        velocity_elapsed_samples = 0u;
+
+        /* Coast detection follows the encoder sampling cadence. Bit-banged SSI
+         * reads are too expensive to do at the current-loop rate. */
+        if (coast_armed && state == MOTOR_RUN) {
+            int32_t pos = -encoder_get_position();
+            uint8_t crossed = (coast_trip_dir > 0)
+                ? (pos >= coast_trip_pos)
+                : (pos <= coast_trip_pos);
+            if (crossed) {
+                motor_coast();
+                coast_armed = 0;
+            }
         }
+    }
+
+    if (schedule_latest_from_samples(&position_sched_accum, elapsed_samples, POSITION_LOOP_HZ)) {
+        position_due = 1u;
     }
 
     if (state != MOTOR_RUN)
-        return;
+        return elapsed_samples;
 
     /* ── Control mode dispatch ──────────────────────────────────────── */
     switch (ctrl_mode) {
 
     case CTRL_DUTY:
         if (coasting)
-            return;
+            return elapsed_samples;
         if (target_duty == 0) {
             motor_stop();
-            return;
+            return elapsed_samples;
         }
         duty = torque_clamp(target_duty);
         apply_duty(duty);
-        return;
+        return elapsed_samples;
 
     case CTRL_TORQUE:
         if (coasting)
-            return;
-        if (++cur_div >= CUR_LOOP_DIVIDER) {
-            cur_div = 0;
-            duty = run_current_loop(target_current);
-            apply_duty(duty);
-        }
-        return;
+            return elapsed_samples;
+        duty = run_current_loop(target_current);
+        apply_duty(duty);
+        return elapsed_samples;
 
     case CTRL_VELOCITY:
     case CTRL_POSITION:
         if (coasting)
-            return;
+            return elapsed_samples;
         break;
 
     default:
         apply_duty(0);
-        return;
+        return elapsed_samples;
     }
 
     /* ── Cascaded loops (velocity / position modes) ────────────────── */
 
     /* Position PID — outermost, only in CTRL_POSITION */
-    if (ctrl_mode == CTRL_POSITION && ++pos_div >= POS_LOOP_DIVIDER) {
-        pos_div = 0;
+    if (ctrl_mode == CTRL_POSITION && position_due) {
         int32_t pos = -encoder_get_position();
         int32_t pid_out = pid_update(&pos_pid, target_position, pos);
         target_velocity = pid_out / POS_ERROR_PRESCALE;
     }
 
     /* Velocity PID — outputs current setpoint in mA */
-    if (++vel_div >= VEL_LOOP_DIVIDER) {
-        vel_div = 0;
+    if (velocity_due) {
         current_setpoint = run_velocity_loop();
     }
 
     /* Current PI — innermost, outputs duty */
-    if (++cur_div >= CUR_LOOP_DIVIDER) {
-        cur_div = 0;
-        duty = run_current_loop(current_setpoint);
-        apply_duty(duty);
-    }
+    duty = run_current_loop(current_setpoint);
+    apply_duty(duty);
+    return elapsed_samples;
 }

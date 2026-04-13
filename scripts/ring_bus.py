@@ -56,6 +56,7 @@ SUBCMD_SAVE_SETTINGS = 0x12
 SUBCMD_CLEAR_SETTINGS = 0x13
 SUBCMD_SET_CUR_PID   = 0x14
 SUBCMD_SET_CURRENT   = 0x15
+SUBCMD_QUERY_TIMING  = 0x16
 SUBCMD_MASK          = 0x3F
 SUBCMD_REPLY_FULL    = 0x00
 SUBCMD_REPLY_ACK     = 0x40
@@ -137,6 +138,7 @@ SUBCMD_NAMES  = {
     SUBCMD_CLEAR_SETTINGS: "CLEAR_SETTINGS",
     SUBCMD_SET_CUR_PID: "SET_CUR_PID",
     SUBCMD_SET_CURRENT: "SET_CURRENT",
+    SUBCMD_QUERY_TIMING: "QUERY_TIMING",
 }
 ACK_RESULT_NAMES = {
     ACK_RESULT_OK: "OK",
@@ -255,7 +257,38 @@ class StrikeStatus:
         return bool(self.flags & STRIKE_TIMING_RETRIGGER_READY_VALID)
 
 
-AddressedReply = MotorStatus | CommandAck | None
+@dataclasses.dataclass
+class TimingStatus:
+    address: int
+    control_budget_us: int
+    control_last_us: int
+    control_max_us: int
+    control_overrun_count: int
+    hall_last_us: int
+    hall_max_us: int
+    uart_last_us: int
+    uart_max_us: int
+    adc_last_us: int
+    adc_max_us: int
+    protocol_poll_last_us: int
+    protocol_poll_max_us: int
+    protocol_backlog_max: int
+    uptime_ms: int
+
+    @property
+    def control_last_pct(self) -> float:
+        if self.control_budget_us <= 0:
+            return 0.0
+        return 100.0 * self.control_last_us / self.control_budget_us
+
+    @property
+    def control_max_pct(self) -> float:
+        if self.control_budget_us <= 0:
+            return 0.0
+        return 100.0 * self.control_max_us / self.control_budget_us
+
+
+AddressedReply = MotorStatus | CommandAck | TimingStatus | None
 
 
 # ── Exceptions ───────────────────────────────────────────────────────────────
@@ -623,6 +656,20 @@ class RingClientV2:
                 return self._parse_strike_status(payload)
             self._trace("skip", bytes([cmd]))
 
+    def query_timing(self, address: int) -> TimingStatus:
+        self._check_address(address)
+        self._flush_rx()
+        self._send_frame(self._build_addressed_payload(address, SUBCMD_QUERY_TIMING))
+        deadline = time.monotonic() + self.timeout_ms / 1000.0
+        expected_cmd = CMD_STATUS_BASE | address
+        while True:
+            remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
+            payload = self._recv_frame(timeout_ms=remaining_ms)
+            cmd = payload[0] if payload else 0
+            if cmd == expected_cmd and len(payload) == 33:
+                return self._parse_timing_status(payload)
+            self._trace("skip", bytes([cmd]))
+
     def _parse_strike_status(self, payload: bytes) -> StrikeStatus:
         cmd = payload[0]
         address = cmd & 0x0F
@@ -705,6 +752,30 @@ class RingClientV2:
             home_position=struct.unpack(">i", payload[7:11])[0],
         )
 
+    def _parse_timing_status(self, payload: bytes) -> TimingStatus:
+        cmd = payload[0]
+        address = cmd & 0x0F
+        if len(payload) != 33:
+            raise RingError(f"timing reply wrong size ({len(payload)} bytes): {payload.hex(' ')}")
+
+        return TimingStatus(
+            address=address,
+            control_budget_us=struct.unpack(">H", payload[1:3])[0],
+            control_last_us=struct.unpack(">H", payload[3:5])[0],
+            control_max_us=struct.unpack(">H", payload[5:7])[0],
+            control_overrun_count=struct.unpack(">I", payload[7:11])[0],
+            hall_last_us=struct.unpack(">H", payload[11:13])[0],
+            hall_max_us=struct.unpack(">H", payload[13:15])[0],
+            uart_last_us=struct.unpack(">H", payload[15:17])[0],
+            uart_max_us=struct.unpack(">H", payload[17:19])[0],
+            adc_last_us=struct.unpack(">H", payload[19:21])[0],
+            adc_max_us=struct.unpack(">H", payload[21:23])[0],
+            protocol_poll_last_us=struct.unpack(">H", payload[23:25])[0],
+            protocol_poll_max_us=struct.unpack(">H", payload[25:27])[0],
+            protocol_backlog_max=struct.unpack(">H", payload[27:29])[0],
+            uptime_ms=struct.unpack(">I", payload[29:33])[0],
+        )
+
     def broadcast_duty(self, duties: Iterable[int]) -> None:
         duty_list = list(duties)
         if not duty_list or len(duty_list) > MAX_DEVICES:
@@ -774,6 +845,19 @@ def format_status(status: MotorStatus) -> str:
         f"mode={status.mode_name} current={status.current_ma}mA hall={status.hall} "
         f"angle={status.angle} ({status.angle_deg:.1f}\u00b0) pos={status.position} "
         f"vel={status.velocity}rpm target_{target_label}={status.target}"
+    )
+
+
+def format_timing_status(status: TimingStatus) -> str:
+    return (
+        f"addr={status.address} control={status.control_last_us}/{status.control_budget_us}us "
+        f"({status.control_last_pct:.1f}%) control_max={status.control_max_us}us "
+        f"({status.control_max_pct:.1f}%) control_overruns={status.control_overrun_count} "
+        f"hall={status.hall_last_us}us hall_max={status.hall_max_us}us "
+        f"uart={status.uart_last_us}us uart_max={status.uart_max_us}us "
+        f"adc={status.adc_last_us}us adc_max={status.adc_max_us}us "
+        f"proto_poll={status.protocol_poll_last_us}us proto_poll_max={status.protocol_poll_max_us}us "
+        f"proto_backlog_max={status.protocol_backlog_max} uptime_ms={status.uptime_ms}"
     )
 
 
@@ -868,6 +952,7 @@ __all__ = [
     "SUBCMD_NAMES",
     "SUBCMD_QUERY_STATUS",
     "SUBCMD_QUERY_STRIKE",
+    "SUBCMD_QUERY_TIMING",
     "SUBCMD_REPLY_ACK",
     "SUBCMD_REPLY_FULL",
     "SUBCMD_REPLY_NONE",
@@ -889,8 +974,10 @@ __all__ = [
     "SUBCMD_STRIKE_HOME",
     "SUBCMD_ZERO_POS",
     "StrikeStatus",
+    "TimingStatus",
     "auto_detect_port",
     "crc16_ccitt",
     "format_status",
+    "format_timing_status",
     "list_ports",
 ]

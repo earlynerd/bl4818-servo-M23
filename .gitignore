@@ -19,3 +19,10 @@ build/
 .idea/
 __pycache__
 .pio/
+*.gbr
+*.drl
+*.pth
+*.npth
+*.lck
+pcb/interface/interface-backups/
+*_autosave*

@@ -23,7 +23,7 @@
 /* ── Framing constants ────────────────────────────────────────────────── */
 #define PREAMBLE_0              0xA5u
 #define PREAMBLE_1              0x5Au
-#define MAX_PAYLOAD             34u
+#define MAX_PAYLOAD             64u
 #define FRAME_BUF_SIZE          (1u + MAX_PAYLOAD + 2u) /* LEN + payload + CRC */
 #define ADDR_UNASSIGNED         0xFFu
 #define MAX_DEVICES             16u
@@ -314,12 +314,12 @@ static void send_strike_status_reply(void)
 static void send_timing_status_reply(void)
 {
     timing_snapshot_t snapshot;
-    uint8_t buf[36];
+    uint8_t buf[52];
     uint16_t crc;
 
     timing_get_snapshot(&snapshot);
 
-    buf[0]  = 33u;                                  /* LEN */
+    buf[0]  = 49u;                                  /* LEN */
     buf[1]  = CMD_STATUS_BASE | device_addr;
     buf[2]  = (uint8_t)(snapshot.control_budget_us >> 8);
     buf[3]  = (uint8_t)(snapshot.control_budget_us & 0xFFu);
@@ -331,34 +331,50 @@ static void send_timing_status_reply(void)
     buf[9]  = (uint8_t)(snapshot.control_overrun_count >> 16);
     buf[10] = (uint8_t)(snapshot.control_overrun_count >> 8);
     buf[11] = (uint8_t)(snapshot.control_overrun_count & 0xFFu);
-    buf[12] = (uint8_t)(snapshot.hall_last_us >> 8);
-    buf[13] = (uint8_t)(snapshot.hall_last_us & 0xFFu);
-    buf[14] = (uint8_t)(snapshot.hall_max_us >> 8);
-    buf[15] = (uint8_t)(snapshot.hall_max_us & 0xFFu);
-    buf[16] = (uint8_t)(snapshot.uart_last_us >> 8);
-    buf[17] = (uint8_t)(snapshot.uart_last_us & 0xFFu);
-    buf[18] = (uint8_t)(snapshot.uart_max_us >> 8);
-    buf[19] = (uint8_t)(snapshot.uart_max_us & 0xFFu);
-    buf[20] = (uint8_t)(snapshot.adc_last_us >> 8);
-    buf[21] = (uint8_t)(snapshot.adc_last_us & 0xFFu);
-    buf[22] = (uint8_t)(snapshot.adc_max_us >> 8);
-    buf[23] = (uint8_t)(snapshot.adc_max_us & 0xFFu);
-    buf[24] = (uint8_t)(snapshot.protocol_poll_last_us >> 8);
-    buf[25] = (uint8_t)(snapshot.protocol_poll_last_us & 0xFFu);
-    buf[26] = (uint8_t)(snapshot.protocol_poll_max_us >> 8);
-    buf[27] = (uint8_t)(snapshot.protocol_poll_max_us & 0xFFu);
-    buf[28] = (uint8_t)(snapshot.protocol_backlog_max >> 8);
-    buf[29] = (uint8_t)(snapshot.protocol_backlog_max & 0xFFu);
-    buf[30] = (uint8_t)(snapshot.uptime_ms >> 24);
-    buf[31] = (uint8_t)(snapshot.uptime_ms >> 16);
-    buf[32] = (uint8_t)(snapshot.uptime_ms >> 8);
-    buf[33] = (uint8_t)(snapshot.uptime_ms & 0xFFu);
+    buf[12] = (uint8_t)(snapshot.velocity_drop_count >> 24);
+    buf[13] = (uint8_t)(snapshot.velocity_drop_count >> 16);
+    buf[14] = (uint8_t)(snapshot.velocity_drop_count >> 8);
+    buf[15] = (uint8_t)(snapshot.velocity_drop_count & 0xFFu);
+    buf[16] = (uint8_t)(snapshot.position_drop_count >> 24);
+    buf[17] = (uint8_t)(snapshot.position_drop_count >> 16);
+    buf[18] = (uint8_t)(snapshot.position_drop_count >> 8);
+    buf[19] = (uint8_t)(snapshot.position_drop_count & 0xFFu);
+    buf[20] = (uint8_t)(snapshot.strike_drop_count >> 24);
+    buf[21] = (uint8_t)(snapshot.strike_drop_count >> 16);
+    buf[22] = (uint8_t)(snapshot.strike_drop_count >> 8);
+    buf[23] = (uint8_t)(snapshot.strike_drop_count & 0xFFu);
+    buf[24] = (uint8_t)(snapshot.protocol_drop_count >> 24);
+    buf[25] = (uint8_t)(snapshot.protocol_drop_count >> 16);
+    buf[26] = (uint8_t)(snapshot.protocol_drop_count >> 8);
+    buf[27] = (uint8_t)(snapshot.protocol_drop_count & 0xFFu);
+    buf[28] = (uint8_t)(snapshot.hall_last_us >> 8);
+    buf[29] = (uint8_t)(snapshot.hall_last_us & 0xFFu);
+    buf[30] = (uint8_t)(snapshot.hall_max_us >> 8);
+    buf[31] = (uint8_t)(snapshot.hall_max_us & 0xFFu);
+    buf[32] = (uint8_t)(snapshot.uart_last_us >> 8);
+    buf[33] = (uint8_t)(snapshot.uart_last_us & 0xFFu);
+    buf[34] = (uint8_t)(snapshot.uart_max_us >> 8);
+    buf[35] = (uint8_t)(snapshot.uart_max_us & 0xFFu);
+    buf[36] = (uint8_t)(snapshot.adc_last_us >> 8);
+    buf[37] = (uint8_t)(snapshot.adc_last_us & 0xFFu);
+    buf[38] = (uint8_t)(snapshot.adc_max_us >> 8);
+    buf[39] = (uint8_t)(snapshot.adc_max_us & 0xFFu);
+    buf[40] = (uint8_t)(snapshot.protocol_poll_last_us >> 8);
+    buf[41] = (uint8_t)(snapshot.protocol_poll_last_us & 0xFFu);
+    buf[42] = (uint8_t)(snapshot.protocol_poll_max_us >> 8);
+    buf[43] = (uint8_t)(snapshot.protocol_poll_max_us & 0xFFu);
+    buf[44] = (uint8_t)(snapshot.protocol_backlog_max >> 8);
+    buf[45] = (uint8_t)(snapshot.protocol_backlog_max & 0xFFu);
+    buf[46] = (uint8_t)(snapshot.uptime_ms >> 24);
+    buf[47] = (uint8_t)(snapshot.uptime_ms >> 16);
+    buf[48] = (uint8_t)(snapshot.uptime_ms >> 8);
+    buf[49] = (uint8_t)(snapshot.uptime_ms & 0xFFu);
 
-    crc = crc16_ccitt(buf, 34);
-    buf[34] = (uint8_t)(crc >> 8);
-    buf[35] = (uint8_t)(crc & 0xFFu);
+    crc = crc16_ccitt(buf, 50);
+    buf[50] = (uint8_t)(crc >> 8);
+    buf[51] = (uint8_t)(crc & 0xFFu);
 
-    send_frame(buf, 36);
+    send_frame(buf, 52);
 }
 
 static void send_ack_reply(uint8_t subcmd, uint8_t result, uint16_t detail)

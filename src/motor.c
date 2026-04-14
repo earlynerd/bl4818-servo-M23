@@ -22,6 +22,7 @@
 #include "commutation.h"
 #include "hall.h"
 #include "encoder.h"
+#include "timing.h"
 
 /* ── State ────────────────────────────────────────────────────────────── */
 static motor_state_t state;
@@ -85,15 +86,30 @@ static void reset_scheduler_state(void)
     velocity_elapsed_samples = 0u;
 }
 
-static uint8_t schedule_latest_from_samples(uint32_t *accum, uint32_t elapsed_samples, uint32_t target_hz)
+static uint8_t schedule_latest_from_samples(uint32_t *accum, uint32_t elapsed_samples,
+                                            uint32_t target_hz, uint32_t *dropped_updates)
 {
+    uint32_t extra_due;
+
     *accum += elapsed_samples * target_hz;
-    if (*accum < PWM_FREQ_HZ)
+    if (*accum < PWM_FREQ_HZ) {
+        if (dropped_updates != 0)
+            *dropped_updates = 0u;
         return 0u;
+    }
 
     *accum -= PWM_FREQ_HZ;
-    if (*accum >= PWM_FREQ_HZ)
-        *accum = 0u;
+    if (*accum < PWM_FREQ_HZ) {
+        if (dropped_updates != 0)
+            *dropped_updates = 0u;
+        return 1u;
+    }
+
+    extra_due = *accum / PWM_FREQ_HZ;
+    *accum -= extra_due * PWM_FREQ_HZ;
+
+    if (dropped_updates != 0)
+        *dropped_updates = extra_due;
 
     return 1u;
 }
@@ -606,6 +622,7 @@ uint16_t motor_tick_control(void)
     uint16_t elapsed_samples;
     uint32_t avg_current_ma;
     uint32_t peak_current_ma;
+    uint32_t dropped_updates;
     int32_t duty;
     uint8_t velocity_due = 0u;
     uint8_t position_due = 0u;
@@ -659,8 +676,11 @@ uint16_t motor_tick_control(void)
     }
 
     velocity_elapsed_samples += elapsed_samples;
-    if (schedule_latest_from_samples(&velocity_sched_accum, elapsed_samples, VELOCITY_LOOP_HZ)) {
+    if (schedule_latest_from_samples(&velocity_sched_accum, elapsed_samples,
+                                     VELOCITY_LOOP_HZ, &dropped_updates)) {
         velocity_due = 1u;
+        if (dropped_updates != 0u)
+            timing_note_velocity_drops(dropped_updates);
 
         encoder_poll();
         measured_velocity = estimate_velocity(velocity_elapsed_samples);
@@ -680,8 +700,11 @@ uint16_t motor_tick_control(void)
         }
     }
 
-    if (schedule_latest_from_samples(&position_sched_accum, elapsed_samples, POSITION_LOOP_HZ)) {
+    if (schedule_latest_from_samples(&position_sched_accum, elapsed_samples,
+                                     POSITION_LOOP_HZ, &dropped_updates)) {
         position_due = 1u;
+        if (dropped_updates != 0u)
+            timing_note_position_drops(dropped_updates);
     }
 
     if (state != MOTOR_RUN)

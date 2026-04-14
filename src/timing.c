@@ -20,6 +20,10 @@ static uint32_t control_budget_counts;
 static volatile uint32_t control_last_counts;
 static volatile uint32_t control_max_counts;
 static volatile uint32_t control_overrun_count;
+static volatile uint32_t velocity_drop_count;
+static volatile uint32_t position_drop_count;
+static volatile uint32_t strike_drop_count;
+static volatile uint32_t protocol_drop_count;
 static volatile uint32_t hall_last_counts;
 static volatile uint32_t hall_max_counts;
 static volatile uint32_t uart_last_counts;
@@ -83,6 +87,16 @@ static void update_max_u32(volatile uint32_t *dest, uint32_t value)
         *dest = value;
 }
 
+static void saturating_add_u32(volatile uint32_t *dest, uint32_t value)
+{
+    uint32_t next = *dest + value;
+
+    if (next < *dest)
+        *dest = 0xFFFFFFFFu;
+    else
+        *dest = next;
+}
+
 static void sync_uptime(uint32_t now)
 {
     uptime_us += timing_counts_to_us(timing_delta_counts(last_uptime_stamp, now));
@@ -106,6 +120,10 @@ void timing_init(void)
     control_last_counts = 0u;
     control_max_counts = 0u;
     control_overrun_count = 0u;
+    velocity_drop_count = 0u;
+    position_drop_count = 0u;
+    strike_drop_count = 0u;
+    protocol_drop_count = 0u;
     hall_last_counts = 0u;
     hall_max_counts = 0u;
     uart_last_counts = 0u;
@@ -169,6 +187,26 @@ void timing_record_protocol_poll(uint32_t start_stamp)
     update_max_u32(&protocol_poll_max_counts, elapsed_counts);
 }
 
+void timing_note_velocity_drops(uint32_t dropped_updates)
+{
+    saturating_add_u32(&velocity_drop_count, dropped_updates);
+}
+
+void timing_note_position_drops(uint32_t dropped_updates)
+{
+    saturating_add_u32(&position_drop_count, dropped_updates);
+}
+
+void timing_note_strike_drops(uint32_t dropped_updates)
+{
+    saturating_add_u32(&strike_drop_count, dropped_updates);
+}
+
+void timing_note_protocol_drops(uint32_t dropped_ticks)
+{
+    saturating_add_u32(&protocol_drop_count, dropped_ticks);
+}
+
 void timing_note_protocol_backlog(uint32_t pending_ticks)
 {
     uint16_t backlog = clamp_u16(pending_ticks);
@@ -193,6 +231,10 @@ void timing_get_snapshot(timing_snapshot_t *snapshot)
     snapshot->control_last_us = clamp_u16(timing_counts_to_us(control_last_counts));
     snapshot->control_max_us = clamp_u16(timing_counts_to_us(control_max_counts));
     snapshot->control_overrun_count = control_overrun_count;
+    snapshot->velocity_drop_count = velocity_drop_count;
+    snapshot->position_drop_count = position_drop_count;
+    snapshot->strike_drop_count = strike_drop_count;
+    snapshot->protocol_drop_count = protocol_drop_count;
     snapshot->hall_last_us = clamp_u16(timing_counts_to_us(hall_last_counts));
     snapshot->hall_max_us = clamp_u16(timing_counts_to_us(hall_max_counts));
     snapshot->uart_last_us = clamp_u16(timing_counts_to_us(uart_last_counts));

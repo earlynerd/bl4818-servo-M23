@@ -17,7 +17,7 @@ import serial.tools.list_ports
 # ── Framing ──────────────────────────────────────────────────────────────────
 
 PREAMBLE = b"\xA5\x5A"
-MAX_PAYLOAD = 34
+MAX_PAYLOAD = 64
 MAX_DEVICES = 16
 
 # ── Command types ────────────────────────────────────────────────────────────
@@ -264,6 +264,10 @@ class TimingStatus:
     control_last_us: int
     control_max_us: int
     control_overrun_count: int
+    velocity_drop_count: int
+    position_drop_count: int
+    strike_drop_count: int
+    protocol_drop_count: int
     hall_last_us: int
     hall_max_us: int
     uart_last_us: int
@@ -666,7 +670,7 @@ class RingClientV2:
             remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
             payload = self._recv_frame(timeout_ms=remaining_ms)
             cmd = payload[0] if payload else 0
-            if cmd == expected_cmd and len(payload) == 33:
+            if cmd == expected_cmd and len(payload) in (33, 49):
                 return self._parse_timing_status(payload)
             self._trace("skip", bytes([cmd]))
 
@@ -755,7 +759,30 @@ class RingClientV2:
     def _parse_timing_status(self, payload: bytes) -> TimingStatus:
         cmd = payload[0]
         address = cmd & 0x0F
-        if len(payload) != 33:
+        if len(payload) == 33:
+            return TimingStatus(
+                address=address,
+                control_budget_us=struct.unpack(">H", payload[1:3])[0],
+                control_last_us=struct.unpack(">H", payload[3:5])[0],
+                control_max_us=struct.unpack(">H", payload[5:7])[0],
+                control_overrun_count=struct.unpack(">I", payload[7:11])[0],
+                velocity_drop_count=0,
+                position_drop_count=0,
+                strike_drop_count=0,
+                protocol_drop_count=0,
+                hall_last_us=struct.unpack(">H", payload[11:13])[0],
+                hall_max_us=struct.unpack(">H", payload[13:15])[0],
+                uart_last_us=struct.unpack(">H", payload[15:17])[0],
+                uart_max_us=struct.unpack(">H", payload[17:19])[0],
+                adc_last_us=struct.unpack(">H", payload[19:21])[0],
+                adc_max_us=struct.unpack(">H", payload[21:23])[0],
+                protocol_poll_last_us=struct.unpack(">H", payload[23:25])[0],
+                protocol_poll_max_us=struct.unpack(">H", payload[25:27])[0],
+                protocol_backlog_max=struct.unpack(">H", payload[27:29])[0],
+                uptime_ms=struct.unpack(">I", payload[29:33])[0],
+            )
+
+        if len(payload) != 49:
             raise RingError(f"timing reply wrong size ({len(payload)} bytes): {payload.hex(' ')}")
 
         return TimingStatus(
@@ -764,16 +791,20 @@ class RingClientV2:
             control_last_us=struct.unpack(">H", payload[3:5])[0],
             control_max_us=struct.unpack(">H", payload[5:7])[0],
             control_overrun_count=struct.unpack(">I", payload[7:11])[0],
-            hall_last_us=struct.unpack(">H", payload[11:13])[0],
-            hall_max_us=struct.unpack(">H", payload[13:15])[0],
-            uart_last_us=struct.unpack(">H", payload[15:17])[0],
-            uart_max_us=struct.unpack(">H", payload[17:19])[0],
-            adc_last_us=struct.unpack(">H", payload[19:21])[0],
-            adc_max_us=struct.unpack(">H", payload[21:23])[0],
-            protocol_poll_last_us=struct.unpack(">H", payload[23:25])[0],
-            protocol_poll_max_us=struct.unpack(">H", payload[25:27])[0],
-            protocol_backlog_max=struct.unpack(">H", payload[27:29])[0],
-            uptime_ms=struct.unpack(">I", payload[29:33])[0],
+            velocity_drop_count=struct.unpack(">I", payload[11:15])[0],
+            position_drop_count=struct.unpack(">I", payload[15:19])[0],
+            strike_drop_count=struct.unpack(">I", payload[19:23])[0],
+            protocol_drop_count=struct.unpack(">I", payload[23:27])[0],
+            hall_last_us=struct.unpack(">H", payload[27:29])[0],
+            hall_max_us=struct.unpack(">H", payload[29:31])[0],
+            uart_last_us=struct.unpack(">H", payload[31:33])[0],
+            uart_max_us=struct.unpack(">H", payload[33:35])[0],
+            adc_last_us=struct.unpack(">H", payload[35:37])[0],
+            adc_max_us=struct.unpack(">H", payload[37:39])[0],
+            protocol_poll_last_us=struct.unpack(">H", payload[39:41])[0],
+            protocol_poll_max_us=struct.unpack(">H", payload[41:43])[0],
+            protocol_backlog_max=struct.unpack(">H", payload[43:45])[0],
+            uptime_ms=struct.unpack(">I", payload[45:49])[0],
         )
 
     def broadcast_duty(self, duties: Iterable[int]) -> None:
@@ -853,6 +884,8 @@ def format_timing_status(status: TimingStatus) -> str:
         f"addr={status.address} control={status.control_last_us}/{status.control_budget_us}us "
         f"({status.control_last_pct:.1f}%) control_max={status.control_max_us}us "
         f"({status.control_max_pct:.1f}%) control_overruns={status.control_overrun_count} "
+        f"vel_drops={status.velocity_drop_count} pos_drops={status.position_drop_count} "
+        f"strike_drops={status.strike_drop_count} proto_drops={status.protocol_drop_count} "
         f"hall={status.hall_last_us}us hall_max={status.hall_max_us}us "
         f"uart={status.uart_last_us}us uart_max={status.uart_max_us}us "
         f"adc={status.adc_last_us}us adc_max={status.adc_max_us}us "

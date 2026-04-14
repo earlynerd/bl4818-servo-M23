@@ -28,32 +28,64 @@ static volatile uint32_t protocol_tick_count;
 static volatile uint32_t strike_tick_accum;
 static volatile uint32_t protocol_tick_accum;
 
-static uint8_t schedule_latest_from_samples(volatile uint32_t *accum, uint32_t elapsed_samples, uint32_t target_hz)
+static uint8_t schedule_latest_from_samples(volatile uint32_t *accum, uint32_t elapsed_samples,
+                                            uint32_t target_hz, uint32_t *dropped_updates)
 {
+    uint32_t extra_due;
+
     *accum += elapsed_samples * target_hz;
-    if (*accum < PWM_FREQ_HZ)
+    if (*accum < PWM_FREQ_HZ) {
+        if (dropped_updates != 0u)
+            *dropped_updates = 0u;
         return 0u;
+    }
 
     *accum -= PWM_FREQ_HZ;
-    if (*accum >= PWM_FREQ_HZ)
-        *accum = 0u;
+    if (*accum < PWM_FREQ_HZ) {
+        if (dropped_updates != 0u)
+            *dropped_updates = 0u;
+        return 1u;
+    }
+
+    extra_due = *accum / PWM_FREQ_HZ;
+    *accum -= extra_due * PWM_FREQ_HZ;
+
+    if (dropped_updates != 0u)
+        *dropped_updates = extra_due;
 
     return 1u;
 }
 
-static uint32_t schedule_protocol_timeout_from_samples(volatile uint32_t *accum, uint32_t elapsed_samples)
+static uint32_t schedule_protocol_timeout_from_samples(volatile uint32_t *accum, uint32_t elapsed_samples,
+                                                       uint32_t *dropped_ticks)
 {
-    *accum += elapsed_samples * PROTOCOL_TICK_HZ;
-    if (*accum < PWM_FREQ_HZ)
-        return 0u;
+    uint32_t extra_due;
+    uint32_t total_due;
+    uint32_t timeout_ticks;
 
-    *accum -= PWM_FREQ_HZ;
-    if (*accum >= PWM_FREQ_HZ) {
-        *accum = 0u;
-        return HZ_TICKS_FROM_MS(PROTOCOL_TICK_HZ, PROTOCOL_FRAME_TIMEOUT_MS);
+    *accum += elapsed_samples * PROTOCOL_TICK_HZ;
+    if (*accum < PWM_FREQ_HZ) {
+        if (dropped_ticks != 0u)
+            *dropped_ticks = 0u;
+        return 0u;
     }
 
-    return 1u;
+    *accum -= PWM_FREQ_HZ;
+    extra_due = *accum / PWM_FREQ_HZ;
+    *accum -= extra_due * PWM_FREQ_HZ;
+    total_due = 1u + extra_due;
+    timeout_ticks = HZ_TICKS_FROM_MS(PROTOCOL_TICK_HZ, PROTOCOL_FRAME_TIMEOUT_MS);
+
+    if (total_due > timeout_ticks) {
+        if (dropped_ticks != 0u)
+            *dropped_ticks = total_due - timeout_ticks;
+        return timeout_ticks;
+    }
+
+    if (dropped_ticks != 0u)
+        *dropped_ticks = 0u;
+
+    return total_due;
 }
 
 static void clock_init(void)
@@ -80,17 +112,26 @@ static void clock_init(void)
 void SysTick_Handler(void)
 {
     uint32_t timing_start = timing_capture_stamp();
+    uint32_t dropped_updates;
+    uint32_t dropped_ticks;
     uint32_t protocol_ticks;
     uint16_t elapsed_samples;
 
     elapsed_samples = motor_tick_control();
 
-    if (schedule_latest_from_samples(&strike_tick_accum, elapsed_samples, STRIKE_LOOP_HZ)) {
+    if (schedule_latest_from_samples(&strike_tick_accum, elapsed_samples,
+                                     STRIKE_LOOP_HZ, &dropped_updates)) {
+        if (dropped_updates != 0u)
+            timing_note_strike_drops(dropped_updates);
         strike_tick();
     }
 
-    protocol_ticks = schedule_protocol_timeout_from_samples(&protocol_tick_accum, elapsed_samples);
+    protocol_ticks = schedule_protocol_timeout_from_samples(&protocol_tick_accum,
+                                                            elapsed_samples,
+                                                            &dropped_ticks);
     if (protocol_ticks != 0u) {
+        if (dropped_ticks != 0u)
+            timing_note_protocol_drops(dropped_ticks);
         protocol_tick_count += protocol_ticks;
     }
 

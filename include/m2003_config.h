@@ -48,11 +48,11 @@
 #define ENCODER_COUNTS_PER_REV  16384   /* 14-bit absolute encoder */
 
 /* ── Loop Rates ──────────────────────────────────────────────────────── */
-#define CURRENT_LOOP_HZ     5000    /* fastest software loop: ADC/protection/current PI */
-#define VELOCITY_LOOP_HZ    2500    /* velocity estimator + velocity PID               */
-#define POSITION_LOOP_HZ    1250    /* position PID (outermost)                        */
-#define STRIKE_LOOP_HZ      1250    /* strike state machine                            */
-#define PROTOCOL_TICK_HZ    1000    /* serial parser timeout aging                     */
+#define CURRENT_LOOP_HZ     4999    /* fastest software loop: ADC/protection/current PI */
+#define VELOCITY_LOOP_HZ    2531    /* velocity estimator + velocity PID               */
+#define POSITION_LOOP_HZ    1301    /* position PID (outermost)                        */
+#define STRIKE_LOOP_HZ      1009    /* strike state machine                            */
+#define PROTOCOL_TICK_HZ    1007    /* serial parser timeout aging                     */
 #define PROTOCOL_FRAME_TIMEOUT_MS 20u
 #define ENCODER_POLL_HZ     VELOCITY_LOOP_HZ /* bit-banged SSI read rate            */
 #define CONTROL_LOOP_HZ     CURRENT_LOOP_HZ  /* SysTick fast tick budget/reporting   */

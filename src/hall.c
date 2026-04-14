@@ -7,8 +7,8 @@
 #include "hall.h"
 #include "motor.h"
 #include "timing.h"
+#include "irq_util.h"
 
-static const uint8_t hall_decode[8] = { 0, 1, 2, 3, 4, 5, 6, 7 };
 static const uint8_t hall_forward_seq[8] = { 0xFF, 3, 6, 2, 5, 1, 4, 0xFF };
 static const uint8_t hall_to_sector[8] = { 0xFF, 0, 2, 1, 4, 5, 3, 0xFF };
 
@@ -25,20 +25,6 @@ static uint32_t last_transition_time;
 static uint32_t hall_counter_hz;
 static uint32_t hall_min_transition_counts;
 static volatile uint8_t hall_pending_result;
-
-static uint32_t irq_save(void)
-{
-    uint32_t primask = __get_PRIMASK();
-    __disable_irq();
-    return primask;
-}
-
-static void irq_restore(uint32_t primask)
-{
-    if ((primask & 1u) == 0u) {
-        __enable_irq();
-    }
-}
 
 static uint8_t hall_process_transition(uint8_t current)
 {
@@ -137,7 +123,7 @@ uint8_t hall_read_raw(void)
 
 uint8_t hall_decode_state(uint8_t raw_state)
 {
-    return hall_decode[raw_state & 0x07];
+    return raw_state & 0x07u;
 }
 
 uint8_t hall_read(void)

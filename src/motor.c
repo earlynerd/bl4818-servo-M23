@@ -23,6 +23,8 @@
 #include "hall.h"
 #include "encoder.h"
 #include "timing.h"
+#include "irq_util.h"
+#include "sched_util.h"
 
 /* ── State ────────────────────────────────────────────────────────────── */
 static motor_state_t state;
@@ -66,19 +68,6 @@ static uint32_t      velocity_elapsed_samples;
  */
 /* ── Helpers ─────────────────────────────────────────────────────────── */
 
-static uint32_t irq_save(void)
-{
-    uint32_t primask = __get_PRIMASK();
-    __disable_irq();
-    return primask;
-}
-
-static void irq_restore(uint32_t primask)
-{
-    if ((primask & 1u) == 0u)
-        __enable_irq();
-}
-
 static void reset_scheduler_state(void)
 {
     velocity_sched_accum = 0u;
@@ -86,40 +75,10 @@ static void reset_scheduler_state(void)
     velocity_elapsed_samples = 0u;
 }
 
-static uint8_t schedule_latest_from_samples(uint32_t *accum, uint32_t elapsed_samples,
-                                            uint32_t target_hz, uint32_t *dropped_updates)
-{
-    uint32_t extra_due;
-
-    *accum += elapsed_samples * target_hz;
-    if (*accum < PWM_FREQ_HZ) {
-        if (dropped_updates != 0)
-            *dropped_updates = 0u;
-        return 0u;
-    }
-
-    *accum -= PWM_FREQ_HZ;
-    if (*accum < PWM_FREQ_HZ) {
-        if (dropped_updates != 0)
-            *dropped_updates = 0u;
-        return 1u;
-    }
-
-    extra_due = *accum / PWM_FREQ_HZ;
-    *accum -= extra_due * PWM_FREQ_HZ;
-
-    if (dropped_updates != 0)
-        *dropped_updates = extra_due;
-
-    return 1u;
-}
-
 static int32_t estimate_velocity(uint32_t elapsed_samples)
 {
     int32_t pos = encoder_get_position();
     int32_t delta = pos - prev_enc_position;
-    int64_t numerator;
-    int64_t denominator;
     prev_enc_position = pos;
 
     if (!vel_initialized) {
@@ -130,10 +89,14 @@ static int32_t estimate_velocity(uint32_t elapsed_samples)
     if (elapsed_samples == 0u)
         elapsed_samples = 1u;
 
-    /* Negate: encoder counts positive in opposite direction to commutation forward */
-    numerator = -(int64_t)delta * 60LL * (int64_t)PWM_FREQ_HZ;
-    denominator = (int64_t)ENCODER_COUNTS_PER_REV * (int64_t)elapsed_samples;
-    int32_t raw_rpm = (int32_t)(numerator / denominator);
+    /* RPM = delta * 60 * PWM_FREQ_HZ / (ENCODER_COUNTS_PER_REV * elapsed)
+     *
+     * Negate: encoder counts positive in opposite direction to commutation forward.
+     * All 32-bit arithmetic — the numerator fits for |delta| < 1789 (>14 000 RPM),
+     * well beyond this motor's operating range.  Avoids a 64-bit software divide
+     * (~300 cycles on Cortex-M23) that ran every velocity tick. */
+    int32_t raw_rpm = (-delta * (int32_t)(60 * PWM_FREQ_HZ)) /
+                      ((int32_t)ENCODER_COUNTS_PER_REV * (int32_t)elapsed_samples);
 
     /* First-order IIR in Q8 for sub-RPM precision */
     int32_t raw_q8 = raw_rpm << PID_SCALE_SHIFT;
@@ -267,7 +230,7 @@ void motor_init(void)
              POS_PID_KP_DEFAULT, POS_PID_KI_DEFAULT, POS_PID_KD_DEFAULT, 0,
              -(int32_t)(POS_MAX_VEL_RPM * POS_ERROR_PRESCALE),
              (int32_t)(POS_MAX_VEL_RPM * POS_ERROR_PRESCALE));
-    pos_pid.int_max = (int64_t)POS_INT_MAX_RPM * POS_ERROR_PRESCALE * PID_SCALE;
+    pid_set_int_max(&pos_pid, (int64_t)POS_INT_MAX_RPM * POS_ERROR_PRESCALE * PID_SCALE);
 }
 
 void motor_set_mode(ctrl_mode_t mode)
@@ -325,7 +288,7 @@ void motor_set_mode(ctrl_mode_t mode)
                  * position controller starts from a clean state instead of
                  * inheriting a large homeward integrator/preload. */
                 pid_reset(&pos_pid);
-                pos_pid.prev_meas = -encoder_get_position();
+                pid_set_prev_meas(&pos_pid, -encoder_get_position());
                 target_velocity = 0;
                 break;
             case CTRL_TORQUE:
@@ -425,7 +388,7 @@ void motor_set_pos_pid(int32_t kp, int32_t ki, int32_t kd)
     pid_set_gains(&pos_pid, kp, ki, kd, 0,
                   -(int32_t)(POS_MAX_VEL_RPM * POS_ERROR_PRESCALE),
                   (int32_t)(POS_MAX_VEL_RPM * POS_ERROR_PRESCALE));
-    pos_pid.int_max = (int64_t)POS_INT_MAX_RPM * POS_ERROR_PRESCALE * PID_SCALE;
+    pid_set_int_max(&pos_pid, (int64_t)POS_INT_MAX_RPM * POS_ERROR_PRESCALE * PID_SCALE);
     irq_restore(irq_state);
 }
 
@@ -606,14 +569,6 @@ void motor_handle_hall_transition(uint8_t result)
         commutation_update(drive_dir);
 }
 
-/* ── Fast poll (main loop, every iteration) ──────────────────────────── */
-
-void motor_poll_fast(void)
-{
-    /* Hall transitions are processed in the GPIO IRQ path. Keep the hook so
-     * the main loop structure does not need to change. */
-}
-
 /* ── Control tick ────────────────────────────────────────────────────── */
 
 uint16_t motor_tick_control(void)
@@ -658,7 +613,8 @@ uint16_t motor_tick_control(void)
             return elapsed_samples;
         }
 
-        if (peak_current_ma > CURRENT_LIMIT_MA) {
+        /* Sustained overcurrent: filtered average above limit for OVERCURRENT_FAULT_TIME_MS */
+        if (current_ma > CURRENT_LIMIT_MA) {
             uint32_t total = (uint32_t)overcurrent_samples + elapsed_samples;
             overcurrent_samples = (total > 0xFFFFu) ? 0xFFFFu : (uint16_t)total;
         } else {

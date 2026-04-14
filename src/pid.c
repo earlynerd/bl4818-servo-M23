@@ -97,6 +97,21 @@ void pid_reset(pid_t *pid)
     pid->prev_d_term = 0;
 }
 
+void pid_set_int_max(pid_t *pid, int64_t int_max)
+{
+    pid->int_max = int_max;
+
+    if (pid->integral > int_max)
+        pid->integral = int_max;
+    else if (pid->integral < -int_max)
+        pid->integral = -int_max;
+}
+
+void pid_set_prev_meas(pid_t *pid, int32_t meas)
+{
+    pid->prev_meas = meas;
+}
+
 void pid_preload(pid_t *pid, int32_t current_output,
                  int32_t setpoint, int32_t current_meas)
 {

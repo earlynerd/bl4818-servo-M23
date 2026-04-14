@@ -33,5 +33,7 @@ int32_t pid_update(pid_t *pid, int32_t setpoint, int32_t measurement);
 void pid_reset(pid_t *pid);
 void pid_preload(pid_t *pid, int32_t current_output,
                  int32_t setpoint, int32_t current_meas);
+void pid_set_int_max(pid_t *pid, int64_t int_max);
+void pid_set_prev_meas(pid_t *pid, int32_t meas);
 
 #endif /* PID_H */

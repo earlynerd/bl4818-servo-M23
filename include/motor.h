@@ -66,7 +66,6 @@ uint8_t motor_is_coasting(void);
 void motor_clear_fault(void);
 
 void motor_handle_hall_transition(uint8_t hall_result); /* IRQ-side hall decode -> commutation/fault handling */
-void motor_poll_fast(void);     /* Legacy main-loop hook; hall commutation is IRQ-driven */
 uint16_t motor_tick_control(void);  /* SysTick-driven fast loop at CONTROL_LOOP_HZ; returns elapsed ADC samples */
 
 motor_state_t motor_get_state(void);

@@ -10,6 +10,7 @@
 #include "m2003_config.h"
 #include "M2003.h"
 #include "timing.h"
+#include "irq_util.h"
 
 #define TIMING_TIMER_FREQ   1000000UL
 #define TIMING_TIMER_MASK   0x00FFFFFFUL
@@ -36,19 +37,6 @@ static volatile uint16_t protocol_backlog_max;
 static volatile uint64_t uptime_us;
 static uint32_t last_uptime_stamp;
 
-static uint32_t irq_save(void)
-{
-    uint32_t primask = __get_PRIMASK();
-    __disable_irq();
-    return primask;
-}
-
-static void irq_restore(uint32_t primask)
-{
-    if ((primask & 1u) == 0u)
-        __enable_irq();
-}
-
 static uint32_t timing_now(void)
 {
     return TIMER_GetCounter(TIMER2) & TIMING_TIMER_MASK;
@@ -61,10 +49,18 @@ static uint32_t timing_delta_counts(uint32_t start, uint32_t end)
 
 static uint32_t timing_counts_to_us(uint32_t counts)
 {
+#if TIMING_TIMER_FREQ == 1000000UL
+    /* Timer prescaler divides 24 MHz HIRC to exactly 1 MHz, so one count
+     * equals one microsecond.  Compile-time guard avoids a 64-bit software
+     * divide (~300 cycles on Cortex-M23) in the SysTick hot path. */
+    (void)timing_counter_hz;
+    return counts;
+#else
     if (timing_counter_hz == 0u)
         return 0u;
 
     return (uint32_t)((((uint64_t)counts * 1000000ULL) + (timing_counter_hz / 2u)) / timing_counter_hz);
+#endif
 }
 
 static uint16_t clamp_u16(uint32_t value)

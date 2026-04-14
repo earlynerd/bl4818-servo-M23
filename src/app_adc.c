@@ -10,6 +10,7 @@
 #include "m2003_config.h"
 #include "M2003.h"
 #include "app_adc.h"
+#include "irq_util.h"
 
 static volatile uint16_t raw_current;
 static volatile uint16_t raw_voltage;
@@ -70,8 +71,7 @@ void adc_consume_snapshot(adc_snapshot_t *snapshot)
     uint16_t count;
     uint32_t irq_state;
 
-    irq_state = __get_PRIMASK();
-    __disable_irq();
+    irq_state = irq_save();
 
     latest_current = raw_current;
     latest_voltage = raw_voltage;
@@ -85,8 +85,7 @@ void adc_consume_snapshot(adc_snapshot_t *snapshot)
     peak_current_raw = 0u;
     sample_count = 0u;
 
-    if (irq_state == 0u)
-        __enable_irq();
+    irq_restore(irq_state);
 
     if (count == 0u) {
         snapshot->latest_current_raw = latest_current;

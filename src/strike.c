@@ -22,23 +22,11 @@
 #include "strike.h"
 #include "motor.h"
 #include "encoder.h"
+#include "irq_util.h"
 
 /* ── Helpers ─────────────────────────────────────────────────────────── */
 
 static int32_t abs_i32(int32_t x) { return (x < 0) ? -x : x; }
-
-static uint32_t irq_save(void)
-{
-    uint32_t primask = __get_PRIMASK();
-    __disable_irq();
-    return primask;
-}
-
-static void irq_restore(uint32_t primask)
-{
-    if ((primask & 1u) == 0u)
-        __enable_irq();
-}
 
 /* ── State ───────────────────────────────────────────────────────────── */
 
@@ -211,7 +199,6 @@ static void begin_strike(int32_t current_ma, uint8_t retriggered)
     trigger_to_retrigger_ready_ms = 0;
     trigger_to_ready_ms = 0;
     estimated_strike_velocity_dps = 0;
-    timing_flags |= STRIKE_TIMING_VELOCITY_VALID;
     active_start_tick = timebase_ticks;
 
     /* Coast threshold: coast_distance counts from drum, on the home side */
@@ -523,8 +510,10 @@ void strike_tick(void)
     case STRIKE_DRIVING:
         if (toward_drum_rpm > 0) {
             uint16_t velocity_dps = rpm_to_dps_clamped(toward_drum_rpm);
-            if (velocity_dps > estimated_strike_velocity_dps)
+            if (velocity_dps > estimated_strike_velocity_dps) {
                 estimated_strike_velocity_dps = velocity_dps;
+                timing_flags |= STRIKE_TIMING_VELOCITY_VALID;
+            }
         }
 
         /* Coast is triggered by the faster encoder/velocity cadence
@@ -541,8 +530,10 @@ void strike_tick(void)
     case STRIKE_COASTING:
         if (toward_drum_rpm > 0) {
             uint16_t velocity_dps = rpm_to_dps_clamped(toward_drum_rpm);
-            if (velocity_dps > estimated_strike_velocity_dps)
+            if (velocity_dps > estimated_strike_velocity_dps) {
                 estimated_strike_velocity_dps = velocity_dps;
+                timing_flags |= STRIKE_TIMING_VELOCITY_VALID;
+            }
         }
 
         coast_timeout++;

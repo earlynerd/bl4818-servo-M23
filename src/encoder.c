@@ -7,6 +7,7 @@
 #include "m2003_config.h"
 #include "M2003.h"
 #include "encoder.h"
+#include "irq_util.h"
 
 static uint32_t encoder_raw = 0;
 static uint16_t encoder_angle = 0;
@@ -16,19 +17,6 @@ static int32_t  encoder_position_raw = 0;      /* continuous unwrapped position 
 static int32_t  encoder_position_offset = 0;   /* logical zero reference */
 static uint8_t  encoder_initialized = 0;
 static uint8_t  encoder_zero_valid = 0;
-
-static uint32_t irq_save(void)
-{
-    uint32_t primask = __get_PRIMASK();
-    __disable_irq();
-    return primask;
-}
-
-static void irq_restore(uint32_t primask)
-{
-    if ((primask & 1u) == 0u)
-        __enable_irq();
-}
 
 static int16_t angle_delta(uint16_t current, uint16_t reference)
 {

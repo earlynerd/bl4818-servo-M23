@@ -15,6 +15,7 @@
 #include "protocol.h"
 #include "strike.h"
 #include "timing.h"
+#include "sched_util.h"
 
 extern uint32_t SystemCoreClock;
 extern uint32_t CyclesPerUs;
@@ -25,38 +26,10 @@ void Uart0DefaultMPF(void) {}
 #define UART_BAUD              250000UL
 
 static volatile uint32_t protocol_tick_count;
-static volatile uint32_t strike_tick_accum;
-static volatile uint32_t protocol_tick_accum;
+static uint32_t strike_tick_accum;
+static uint32_t protocol_tick_accum;
 
-static uint8_t schedule_latest_from_samples(volatile uint32_t *accum, uint32_t elapsed_samples,
-                                            uint32_t target_hz, uint32_t *dropped_updates)
-{
-    uint32_t extra_due;
-
-    *accum += elapsed_samples * target_hz;
-    if (*accum < PWM_FREQ_HZ) {
-        if (dropped_updates != 0u)
-            *dropped_updates = 0u;
-        return 0u;
-    }
-
-    *accum -= PWM_FREQ_HZ;
-    if (*accum < PWM_FREQ_HZ) {
-        if (dropped_updates != 0u)
-            *dropped_updates = 0u;
-        return 1u;
-    }
-
-    extra_due = *accum / PWM_FREQ_HZ;
-    *accum -= extra_due * PWM_FREQ_HZ;
-
-    if (dropped_updates != 0u)
-        *dropped_updates = extra_due;
-
-    return 1u;
-}
-
-static uint32_t schedule_protocol_timeout_from_samples(volatile uint32_t *accum, uint32_t elapsed_samples,
+static uint32_t schedule_protocol_timeout_from_samples(uint32_t *accum, uint32_t elapsed_samples,
                                                        uint32_t *dropped_ticks)
 {
     uint32_t extra_due;
@@ -163,7 +136,6 @@ int main(void)
         uint32_t protocol_poll_start;
         uint32_t pending_protocol_ticks;
 
-        motor_poll_fast();
         protocol_poll_start = timing_capture_stamp();
         protocol_poll();
         timing_record_protocol_poll(protocol_poll_start);

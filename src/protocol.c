@@ -17,6 +17,7 @@
 #include "persist.h"
 #include "strike.h"
 #include "timing.h"
+#include "irq_util.h"
 /* Enable for parser state tracing: #define DBG(c) uart_putc(c) */
 #define DBG(c) ((void)0)
 
@@ -105,19 +106,6 @@ static rx_phase_t rx_phase;
 static uint8_t rx_timeout;
 
 /* ── Helpers ──────────────────────────────────────────────────────────── */
-
-static uint32_t irq_save(void)
-{
-    uint32_t primask = __get_PRIMASK();
-    __disable_irq();
-    return primask;
-}
-
-static void irq_restore(uint32_t primask)
-{
-    if ((primask & 1u) == 0u)
-        __enable_irq();
-}
 
 static void send_raw(const uint8_t *data, uint8_t len)
 {
@@ -529,17 +517,14 @@ static void handle_addressed_cmd(uint8_t cmd_type, const uint8_t *payload, uint8
         ack_result = ACK_RESULT_INVALID_ARGUMENT;
         if (len >= 4u) {
             int16_t duty = (int16_t)(((uint16_t)payload[2] << 8) | payload[3]);
-            if (duty < -(int16_t)PWM_MAX_DUTY || duty > (int16_t)PWM_MAX_DUTY) {
-                ack_result = ACK_RESULT_INVALID_ARGUMENT;
-            } else if (duty == 0) {
-                motor_stop();
-                ack_result = ACK_RESULT_OK;
-            } else if (motor_get_state() == MOTOR_FAULT) {
+            if (duty != 0 && motor_get_state() == MOTOR_FAULT) {
                 ack_result = ACK_RESULT_REJECT_FAULT;
-            } else {
-                start_after = prepare_set_duty(duty);
+            } else if (prepare_set_duty(duty)) {
+                motor_start();
                 ack_result = ACK_RESULT_OK;
-                if (start_after) motor_start();
+            } else if (duty == 0) {
+                /* prepare_set_duty already stopped the motor */
+                ack_result = ACK_RESULT_OK;
             }
         }
         send_addressed_reply(reply_mode, subcmd, ack_result, 0u, FULL_REPLY_STATUS);
@@ -563,7 +548,7 @@ static void handle_addressed_cmd(uint8_t cmd_type, const uint8_t *payload, uint8
         break;
     case SUBCMD_SET_MODE:
         ack_result = ACK_RESULT_INVALID_ARGUMENT;
-        if (len >= 3u) {
+        if (len >= 3u && payload[2] <= CTRL_TORQUE) {
             motor_set_mode((ctrl_mode_t)payload[2]);
             ack_result = ACK_RESULT_OK;
         }

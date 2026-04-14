@@ -48,11 +48,11 @@
 #define ENCODER_COUNTS_PER_REV  16384   /* 14-bit absolute encoder */
 
 /* ── Loop Rates ──────────────────────────────────────────────────────── */
-#define CURRENT_LOOP_HZ     4999    /* fastest software loop: ADC/protection/current PI */
-#define VELOCITY_LOOP_HZ    2531    /* velocity estimator + velocity PID               */
-#define POSITION_LOOP_HZ    1301    /* position PID (outermost)                        */
-#define STRIKE_LOOP_HZ      1009    /* strike state machine                            */
-#define PROTOCOL_TICK_HZ    1007    /* serial parser timeout aging                     */
+#define CURRENT_LOOP_HZ     5000    /* fastest software loop: ADC/protection/current PI */
+#define VELOCITY_LOOP_HZ    2500    /* velocity estimator + velocity PID               */
+#define POSITION_LOOP_HZ    1250    /* position PID (outermost)                        */
+#define STRIKE_LOOP_HZ      1000    /* strike state machine                            */
+#define PROTOCOL_TICK_HZ    1000    /* serial parser timeout aging                     */
 #define PROTOCOL_FRAME_TIMEOUT_MS 20u
 #define ENCODER_POLL_HZ     VELOCITY_LOOP_HZ /* bit-banged SSI read rate            */
 #define CONTROL_LOOP_HZ     CURRENT_LOOP_HZ  /* SysTick fast tick budget/reporting   */
@@ -108,8 +108,7 @@
 /*this is used in the D term of both position and velocity loops*/
 #define PID_D_FILTER_SHIFT  2       /* D-term IIR alpha = 1/(1<<N): 2→1/4, 3→1/8 */
 
-/* Velocity PID defaults (Q8 — output is current command in mA, not duty)
- * Gains rescaled ×2.5 from duty-output era (3000 mA / 1200 duty). */
+/* Velocity PID defaults (Q8 — output is current command in mA, not duty) */
 #define VEL_PID_KP_DEFAULT  1536     /* 15.0 mA/RPM */
 #define VEL_PID_KI_DEFAULT  10       /* 0.29 */
 #define VEL_PID_KD_DEFAULT  20       /* 0.29 */
@@ -128,9 +127,9 @@
 
 /* ── Strike Defaults ──────────────────────────────────────────────────── */
 #define STRIKE_HOME_OFFSET_DEFAULT      1024    /* encoder counts above drum surface */
-#define STRIKE_COAST_DISTANCE_DEFAULT   128     /* cut power this far from drum (counts) */
+#define STRIKE_COAST_DISTANCE_DEFAULT   300     /* cut power this far from drum (counts) */
 #define STRIKE_HOMING_DUTY_DEFAULT      100  /* low duty toward drum (sign = toward drum) */
-#define STRIKE_MAX_REBOUND_OVERSHOOT    128     /* counts beyond home allowed before forced recapture */
+#define STRIKE_MAX_REBOUND_OVERSHOOT    512     /* counts beyond home allowed before forced recapture */
 #define STRIKE_RETRIGGER_DEADBAND       512     /* counts: must be this close to home for predictable retrigger */
 #define STRIKE_RETRIGGER_VEL_THRESHOLD  512     /* RPM: must be this slow near home for predictable retrigger */
 #define STRIKE_SETTLE_DEADBAND          200      /* counts: position "settled" threshold */

@@ -11,6 +11,7 @@
 #include "M2003.h"
 #include "app_adc.h"
 #include "irq_util.h"
+#include "timing.h"
 
 static volatile uint16_t raw_current;
 static volatile uint16_t raw_voltage;
@@ -42,6 +43,7 @@ void adc_irq_enable(void)
 
 void ADC_IRQHandler(void)
 {
+    uint32_t timing_start = timing_capture_stamp();
     uint16_t current_raw;
     uint16_t voltage_raw;
 
@@ -59,6 +61,7 @@ void ADC_IRQHandler(void)
     if ((sample_count == 0u) || (current_raw > peak_current_raw))
         peak_current_raw = current_raw;
     sample_count++;
+    timing_record_adc_isr(timing_start);
 }
 
 void adc_consume_snapshot(adc_snapshot_t *snapshot)

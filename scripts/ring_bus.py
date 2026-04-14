@@ -73,6 +73,7 @@ ACK_RESULT_REJECT_FAULT     = 0x03
 ACK_RESULT_REJECT_ZERO      = 0x04
 ACK_RESULT_REJECT_NOT_READY = 0x05
 ACK_RESULT_INVALID_ARGUMENT = 0x06
+ACK_RESULT_PERSIST_FAILED   = 0x07
 
 # ── Strike parameter IDs ───────────────────────────────────────────────────
 
@@ -148,6 +149,7 @@ ACK_RESULT_NAMES = {
     ACK_RESULT_REJECT_ZERO: "REJECT_ZERO",
     ACK_RESULT_REJECT_NOT_READY: "REJECT_NOT_READY",
     ACK_RESULT_INVALID_ARGUMENT: "INVALID_ARGUMENT",
+    ACK_RESULT_PERSIST_FAILED: "PERSIST_FAILED",
 }
 
 
@@ -601,13 +603,13 @@ class RingClientV2:
                 raise RingError(f"{name} must fit in int16")
         return self._addressed_command(address, SUBCMD_SET_CUR_PID, struct.pack(">hh", kp, ki), reply_mode)
 
-    def zero_position(self, address: int, reply_mode: str = REPLY_MODE_FULL) -> AddressedReply:
+    def zero_position(self, address: int, reply_mode: str = REPLY_MODE_ACK) -> AddressedReply:
         return self._addressed_command(address, SUBCMD_ZERO_POS, reply_mode=reply_mode)
 
-    def save_settings(self, address: int, reply_mode: str = REPLY_MODE_FULL) -> AddressedReply:
+    def save_settings(self, address: int, reply_mode: str = REPLY_MODE_ACK) -> AddressedReply:
         return self._addressed_command(address, SUBCMD_SAVE_SETTINGS, reply_mode=reply_mode)
 
-    def clear_settings(self, address: int, reply_mode: str = REPLY_MODE_FULL) -> AddressedReply:
+    def clear_settings(self, address: int, reply_mode: str = REPLY_MODE_ACK) -> AddressedReply:
         return self._addressed_command(address, SUBCMD_CLEAR_SETTINGS, reply_mode=reply_mode)
 
     def set_pid(
@@ -879,6 +881,13 @@ def format_status(status: MotorStatus) -> str:
     )
 
 
+def format_ack(ack: CommandAck) -> str:
+    return (
+        f"addr={ack.address} subcmd={ack.subcmd_name} "
+        f"result={ack.result_name} detail={ack.detail}"
+    )
+
+
 def format_timing_status(status: TimingStatus) -> str:
     return (
         f"addr={status.address} control={status.control_last_us}/{status.control_budget_us}us "
@@ -935,6 +944,7 @@ __all__ = [
     "ACK_RESULT_NAMES",
     "ACK_RESULT_OK",
     "ACK_RESULT_OK_RETRIGGERED",
+    "ACK_RESULT_PERSIST_FAILED",
     "ACK_RESULT_REJECT_FAULT",
     "ACK_RESULT_REJECT_NOT_HOMED",
     "ACK_RESULT_REJECT_NOT_READY",
@@ -1011,6 +1021,7 @@ __all__ = [
     "auto_detect_port",
     "crc16_ccitt",
     "format_status",
+    "format_ack",
     "format_timing_status",
     "list_ports",
 ]

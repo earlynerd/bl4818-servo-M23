@@ -95,7 +95,9 @@ def run_step(
     # 2. For position steps, zero the encoder first
     if position is not None:
         print("Zeroing encoder position...")
-        client.zero_position(address)
+        ack = client.zero_position(address)
+        if isinstance(ack, CommandAck) and not ack.accepted:
+            raise RingError(f"zero_position failed: {ack.result_name}")
         time.sleep(0.02)
 
     # 3. Optionally set velocity PID gains

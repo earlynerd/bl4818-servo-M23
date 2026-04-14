@@ -6,6 +6,7 @@
 #include "m2003_config.h"
 #include "M2003.h"
 #include "app_uart.h"
+#include "timing.h"
 
 #define UART_RX_BUF_SIZE 256
 #define UART_TX_BUF_SIZE 256
@@ -38,6 +39,7 @@ static void irq_restore(uint32_t primask)
 
 void UART1_IRQHandler(void)
 {
+    uint32_t timing_start = timing_capture_stamp();
     uint32_t status = UART1->INTSTS;
 
     if (status & UART_INTSTS_RLSINT_Msk) {
@@ -84,6 +86,7 @@ void UART1_IRQHandler(void)
         }
     }
 
+    timing_record_uart_isr(timing_start);
 }
 
 void uart_init(uint32_t baud)

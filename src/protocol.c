@@ -80,6 +80,7 @@
 #define ACK_RESULT_REJECT_ZERO      0x04u
 #define ACK_RESULT_REJECT_NOT_READY 0x05u
 #define ACK_RESULT_INVALID_ARGUMENT 0x06u
+#define ACK_RESULT_PERSIST_FAILED   0x07u
 
 /* ── Forwarding mode ──────────────────────────────────────────────────── */
 typedef enum {
@@ -404,6 +405,11 @@ static uint8_t ack_result_from_strike_trigger(strike_trigger_result_t result)
     }
 }
 
+static uint8_t ack_result_from_persist_status(int32_t status)
+{
+    return (status == 0) ? ACK_RESULT_OK : ACK_RESULT_PERSIST_FAILED;
+}
+
 static uint8_t sanitize_reply_mode(uint8_t reply_mode)
 {
     if (reply_mode == SUBCMD_REPLY_ACK || reply_mode == SUBCMD_REPLY_NONE)
@@ -619,6 +625,8 @@ static void handle_addressed_cmd(uint8_t cmd_type, const uint8_t *payload, uint8
     {
         uint32_t irq_state;
         int32_t current_pos;
+        int32_t persist_status;
+
         irq_state = irq_save();
         current_pos = -encoder_get_position();
         motor_shift_position_reference(current_pos);
@@ -626,8 +634,10 @@ static void handle_addressed_cmd(uint8_t cmd_type, const uint8_t *payload, uint8
         encoder_reset_position();
         irq_restore(irq_state);
         /* Persist the logical zero point so absolute angle reconstructs it. */
-        persist_save_runtime();
-        send_addressed_reply(reply_mode, subcmd, ACK_RESULT_OK, 0u, FULL_REPLY_STATUS);
+        persist_status = persist_save_runtime();
+        send_addressed_reply(reply_mode, subcmd,
+                             ack_result_from_persist_status(persist_status),
+                             0u, FULL_REPLY_STATUS);
         break;
     }
     case SUBCMD_STRIKE:
@@ -683,12 +693,12 @@ static void handle_addressed_cmd(uint8_t cmd_type, const uint8_t *payload, uint8
         send_addressed_reply(reply_mode, subcmd, ACK_RESULT_OK, 0u, FULL_REPLY_TIMING_STATUS);
         break;
     case SUBCMD_SAVE_SETTINGS:
-        persist_save_runtime();
-        send_addressed_reply(reply_mode, subcmd, ACK_RESULT_OK, 0u, FULL_REPLY_STATUS);
+        ack_result = ack_result_from_persist_status(persist_save_runtime());
+        send_addressed_reply(reply_mode, subcmd, ack_result, 0u, FULL_REPLY_STATUS);
         break;
     case SUBCMD_CLEAR_SETTINGS:
-        persist_clear();
-        send_addressed_reply(reply_mode, subcmd, ACK_RESULT_OK, 0u, FULL_REPLY_STATUS);
+        ack_result = ack_result_from_persist_status(persist_clear());
+        send_addressed_reply(reply_mode, subcmd, ack_result, 0u, FULL_REPLY_STATUS);
         break;
     case SUBCMD_SET_CUR_PID:
         ack_result = ACK_RESULT_INVALID_ARGUMENT;

@@ -394,13 +394,13 @@ def main() -> int:
             print(format_status(retry_after_enumerate(lambda: client.set_pos_pid(args.address, args.kp, args.ki, args.kd))))
 
         elif args.command == "zero-pos":
-            print(format_status(retry_after_enumerate(lambda: client.zero_position(args.address))))
+            print(format_ack(retry_after_enumerate(lambda: client.zero_position(args.address))))
 
         elif args.command == "save-settings":
-            print(format_status(retry_after_enumerate(lambda: client.save_settings(args.address))))
+            print(format_ack(retry_after_enumerate(lambda: client.save_settings(args.address))))
 
         elif args.command == "clear-settings":
-            print(format_status(retry_after_enumerate(lambda: client.clear_settings(args.address))))
+            print(format_ack(retry_after_enumerate(lambda: client.clear_settings(args.address))))
 
         elif args.command == "set-mode":
             print(format_status(retry_after_enumerate(lambda: client.set_mode(args.address, args.mode))))

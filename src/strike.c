@@ -397,17 +397,22 @@ strike_trigger_result_t strike_trigger(int32_t current_ma)
 void strike_cancel(void)
 {
     uint32_t irq_state = irq_save();
+    uint8_t was_active;
 
+    was_active = (state != STRIKE_IDLE) ? 1u : 0u;
     motor_disarm_coast();
     if (homed) {
         motor_set_position(home_position);
         motor_set_mode(CTRL_POSITION);
         motor_start();
+        settle_counter = 0;
+        if (was_active)
+            state = STRIKE_CATCHING;
     } else {
         motor_stop();
+        state = STRIKE_IDLE;
     }
     timing_flags &= (uint8_t)~STRIKE_TIMING_ACTIVE;
-    state = STRIKE_IDLE;
 
     irq_restore(irq_state);
 }

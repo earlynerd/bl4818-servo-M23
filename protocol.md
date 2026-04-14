@@ -62,7 +62,7 @@ The first payload byte is the command type.
 | 0x03 | SET_ADDRESS | `[counter]` | 2 | master -> ring (S&F) |
 | 0x10 | BROADCAST_DUTY | `[duty_hi duty_lo] x N` | 1 + 2*N | master -> ring |
 | 0x20+addr | ADDRESSED_CMD | `[subcmd_flags] [data...]` | 2..8 | master -> ring |
-| 0x40+addr | STATUS_REPLY | query-dependent status payload | 11, 17, or 32 | device -> master |
+| 0x40+addr | STATUS_REPLY | query-dependent status payload | 11, 17, 32, or 49 | device -> master |
 | 0x50+addr | ACK_REPLY | `[subcmd] [result] [detail_hi] [detail_lo]` | 5 | device -> master |
 
 ### Addressed Sub-Commands
@@ -139,10 +139,13 @@ Addressed commands sent with reply mode `ACK` reply with type `0x50 + addr` and
 | `0x04` | REJECT_ZERO |
 | `0x05` | REJECT_NOT_READY |
 | `0x06` | INVALID_ARGUMENT |
+| `0x07` | PERSIST_FAILED |
 
 `detail` is command-specific. For `STRIKE`, `STRIKE_HOME`, `STRIKE_CANCEL`, and
 `SET_STRIKE_PARAM`, it reports the current 16-bit strike sequence. Other
-commands currently return `detail = 0`.
+commands currently return `detail = 0`. Flash-backed maintenance commands
+(`ZERO_POSITION`, `SAVE_SETTINGS`, `CLEAR_SETTINGS`) return `PERSIST_FAILED`
+when the underlying erase/write/verify operation fails.
 
 ### Status Replies
 
@@ -215,7 +218,7 @@ COASTING, or CATCHING, firmware only accepts it once
 aborted and a new strike attempt starts immediately, and the `ACK_REPLY`
 reports `OK_RETRIGGERED`.
 
-`QUERY_TIMING` replies with the same type `0x40 + addr` and 33 payload bytes:
+`QUERY_TIMING` replies with the same type `0x40 + addr` and 49 payload bytes:
 
 ```
 [type]
@@ -223,6 +226,10 @@ reports `OK_RETRIGGERED`.
 [control_last_hi] [control_last_lo]
 [control_max_hi] [control_max_lo]
 [control_overrun_b3] [control_overrun_b2] [control_overrun_b1] [control_overrun_b0]
+[vel_drop_b3] [vel_drop_b2] [vel_drop_b1] [vel_drop_b0]
+[pos_drop_b3] [pos_drop_b2] [pos_drop_b1] [pos_drop_b0]
+[strike_drop_b3] [strike_drop_b2] [strike_drop_b1] [strike_drop_b0]
+[proto_drop_b3] [proto_drop_b2] [proto_drop_b1] [proto_drop_b0]
 [hall_last_hi] [hall_last_lo] [hall_max_hi] [hall_max_lo]
 [uart_last_hi] [uart_last_lo] [uart_max_hi] [uart_max_lo]
 [adc_last_hi] [adc_last_lo] [adc_max_hi] [adc_max_lo]
@@ -234,12 +241,14 @@ reports `OK_RETRIGGERED`.
 
 All timing fields are in microseconds except `uptime`, which is milliseconds
 since boot. `control_*` measures the full `SysTick` control service time against
-the configured control-period budget. `hall_*` measures GPIO hall IRQ service
-time. `uart_*` and `adc_*` measure the corresponding ISR wall times. 
-`proto_poll_*` measures foreground `protocol_poll()` wall time. The
-`proto_backlog` field is the maximum number of `protocol_tick()` periods that
-were pending before the main loop caught up, which is a direct signal that
-foreground work is starting to miss its schedule.
+the configured control-period budget. `vel_drop`, `pos_drop`, `strike_drop`,
+and `proto_drop` count scheduler events that were skipped because the lower-rate
+task had fallen behind. `hall_*` measures GPIO hall IRQ service time. `uart_*`
+and `adc_*` measure the corresponding ISR wall times. `proto_poll_*` measures
+foreground `protocol_poll()` wall time. The `proto_backlog` field is the
+maximum number of `protocol_tick()` periods that were pending before the main
+loop caught up, which is a direct signal that foreground work is starting to
+miss its schedule.
 
 ## Persistent Settings
 
@@ -256,7 +265,9 @@ Persisted items:
 `ZERO_POSITION` updates the logical zero point immediately and also saves the
 new absolute zero reference to flash. The other tunables are only committed
 when `SAVE_SETTINGS` is issued. `CLEAR_SETTINGS` erases the persisted block for
-the next boot; it does not change the current live runtime parameters.
+the next boot; it does not change the current live runtime parameters. Hosts
+that need the flash result should request an `ACK_REPLY` for these commands and
+check for `PERSIST_FAILED`.
 These flash operations should be treated as at-rest maintenance commands, not
 high-rate control traffic.
 

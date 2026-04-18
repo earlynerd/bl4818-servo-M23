@@ -107,6 +107,14 @@ void timing_init(void)
     CLK->CLKSEL1 = (CLK->CLKSEL1 & ~CLK_CLKSEL1_TMR2SEL_Msk) | CLK_CLKSEL1_TMR2SEL_HIRC;
     SYS_ResetModule(TMR2_RST);
     TIMER_Open(TIMER2, TIMER_CONTINUOUS_MODE, TIMING_TIMER_FREQ);
+    /* TIMER_Open sets PSC so TIF fires at TIMING_TIMER_FREQ, but in continuous
+     * mode the counter itself ticks at the undivided module clock.  Override
+     * PSC to divide the 24 MHz HIRC down to TIMING_TIMER_FREQ so CNT really
+     * advances at 1 µs per count.  CMP is widened to the full 24 bits — we
+     * don't use TIF on this timer, only CNT as a free-running timebase. */
+    TIMER2->CTL = (TIMER2->CTL & ~TIMER_CTL_PSC_Msk) |
+                  (((CLK_HIRC_24M / TIMING_TIMER_FREQ) - 1u) << TIMER_CTL_PSC_Pos);
+    TIMER2->CMP = TIMING_TIMER_MASK;
     TIMER_Start(TIMER2);
     while (!TIMER_IS_ACTIVE(TIMER2)) {
     }

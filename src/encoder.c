@@ -111,7 +111,7 @@ void encoder_poll(void)
             raw |= 1;
         }
     }
-    delay_nop(2); /* Minimum quiet time before next frame */
+    //delay_nop(2); /* Minimum quiet time before next frame */
     /* De-assert CSn to end the frame */
     PIN_SSI_CSN = 0;
     irq_restore(irq_state);

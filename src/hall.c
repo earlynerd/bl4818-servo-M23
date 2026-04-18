@@ -88,6 +88,12 @@ void hall_init(void)
     CLK->APBCLK0 |= CLK_APBCLK0_TMR1CKEN_Msk;
     CLK->CLKSEL1 = (CLK->CLKSEL1 & ~CLK_CLKSEL1_TMR1SEL_Msk) | CLK_CLKSEL1_TMR1SEL_HIRC;
     TIMER_Open(TIMER1, TIMER_CONTINUOUS_MODE, HALL_TIMER_FREQ);
+    /* See timing.c — TIMER_Open only targets the TIF interrupt rate.  Force
+     * PSC so CNT ticks at HALL_TIMER_FREQ and CMP to the full 24 bits so the
+     * counter wraps cleanly as a free-running transition-period reference. */
+    TIMER1->CTL = (TIMER1->CTL & ~TIMER_CTL_PSC_Msk) |
+                  (((CLK_HIRC_24M / HALL_TIMER_FREQ) - 1u) << TIMER_CTL_PSC_Pos);
+    TIMER1->CMP = HALL_TIMER_MASK;
     TIMER_Start(TIMER1);
     while (!TIMER_IS_ACTIVE(TIMER1)) {
     }
@@ -112,8 +118,8 @@ void hall_init(void)
     last_transition_time = TIMER_GetCounter(TIMER1) & HALL_TIMER_MASK;
     hall_pending_result = HALL_POLL_NO_CHANGE;
 
-    NVIC_SetPriority(GPB_IRQn, 0u);
-    NVIC_SetPriority(GPC_IRQn, 0u);
+    NVIC_SetPriority(GPB_IRQn, 1u);
+    NVIC_SetPriority(GPC_IRQn, 1u);
     NVIC_EnableIRQ(GPB_IRQn);
     NVIC_EnableIRQ(GPC_IRQn);
 }

@@ -126,7 +126,7 @@ void uart_init(uint32_t baud)
 
     UART1->INTEN |= (UART_INTEN_RDAIEN_Msk | UART_INTEN_RXTOIEN_Msk |
                      UART_INTEN_RLSIEN_Msk | UART_INTEN_BUFERRIEN_Msk);
-    NVIC_SetPriority(UART1_IRQn, 2u);
+    NVIC_SetPriority(UART1_IRQn, 3u);
     NVIC_EnableIRQ(UART1_IRQn);
 }
 

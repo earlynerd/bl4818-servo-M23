@@ -40,7 +40,7 @@ void adc_init(void)
     ADC->ADCR = ADC_ADCR_ADEN_Msk | (3 << ADC_ADCR_TRGS_Pos) | ADC_ADCR_TRGEN_Msk | ADC_ADCR_ADIE_Msk;
     ADC->ADCHER = (1 << ADC_CH_CURRENT) | (1 << ADC_CH_VOLTAGE);
 
-    NVIC_SetPriority(ADC_IRQn, 2u);
+    NVIC_SetPriority(ADC_IRQn, 0u);
 }
 
 void adc_irq_enable(void)

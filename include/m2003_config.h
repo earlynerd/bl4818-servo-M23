@@ -48,7 +48,7 @@
 #define ENCODER_COUNTS_PER_REV  16384   /* 14-bit absolute encoder */
 
 /* ── Loop Rates ──────────────────────────────────────────────────────── */
-#define CURRENT_LOOP_HZ     5000    /* fastest software loop: ADC/protection/current PI */
+#define CURRENT_LOOP_HZ     5000   /* fastest software loop: ADC/protection/current PI */
 #define VELOCITY_LOOP_HZ    2500    /* velocity estimator + velocity PID               */
 #define POSITION_LOOP_HZ    1250    /* position PID (outermost)                        */
 #define STRIKE_LOOP_HZ      1000    /* strike state machine                            */

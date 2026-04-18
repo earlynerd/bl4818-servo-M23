@@ -91,7 +91,7 @@ static void clock_init(void)
 
     timing_init();
     SysTick_Config(SystemCoreClock / CONTROL_LOOP_HZ);
-    NVIC_SetPriority(SysTick_IRQn, 1u);
+    NVIC_SetPriority(SysTick_IRQn, 2u);
 }
 
 static void watchdog_init(void)

@@ -25,6 +25,24 @@ void pid_init(pid_t *pid, int32_t kp, int32_t ki, int32_t kd, int32_t kf,
     pid->int_max = out_max * PID_SCALE;
 }
 
+void pid_set_gains(pid_t *pid, int32_t kp, int32_t ki, int32_t kd, int32_t kf,
+                   int32_t out_min, int32_t out_max)
+{
+    pid->kp = kp;
+    pid->ki = ki;
+    pid->kd = kd;
+    pid->kf = kf;
+    pid->out_min = out_min;
+    pid->out_max = out_max;
+    pid->int_max = out_max * PID_SCALE;
+
+    /* Clamp existing integral to new limits */
+    if (pid->integral > pid->int_max)
+        pid->integral = pid->int_max;
+    else if (pid->integral < -pid->int_max)
+        pid->integral = -pid->int_max;
+}
+
 int32_t pid_update(pid_t *pid, int32_t setpoint, int32_t measurement)
 {
     int32_t error = setpoint - measurement;
@@ -77,6 +95,21 @@ void pid_reset(pid_t *pid)
     pid->integral = 0;
     pid->prev_meas = 0;
     pid->prev_d_term = 0;
+}
+
+void pid_set_int_max(pid_t *pid, int64_t int_max)
+{
+    pid->int_max = int_max;
+
+    if (pid->integral > int_max)
+        pid->integral = int_max;
+    else if (pid->integral < -int_max)
+        pid->integral = -int_max;
+}
+
+void pid_set_prev_meas(pid_t *pid, int32_t meas)
+{
+    pid->prev_meas = meas;
 }
 
 void pid_preload(pid_t *pid, int32_t current_output,

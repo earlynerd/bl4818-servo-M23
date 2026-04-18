@@ -2,10 +2,9 @@
  * Strike Module — Mallet strike, rebound, and catch sequencer
  *
  * Orchestrates the motor control layer through a strike cycle:
- *   1. DRIVING   — open-loop duty toward drum (loudness control)
+ *   1. DRIVING   — current-controlled acceleration toward drum
  *   2. COASTING  — phases floating, momentum carries mallet to drum
- *   3. RETURNING — closed-loop velocity back toward home
- *   4. CATCHING  — position servo settles onto home
+ *   3. CATCHING  — position servo captures the rebound back to home
  *
  * A new strike command received during an active cycle aborts the current
  * recovery path and immediately launches a fresh strike attempt.
@@ -19,9 +18,11 @@
 
 #include <stdint.h>
 #include "m2003_config.h"
+#include "M2003.h"
 #include "strike.h"
 #include "motor.h"
 #include "encoder.h"
+#include "irq_util.h"
 
 /* ── Helpers ─────────────────────────────────────────────────────────── */
 
@@ -50,16 +51,15 @@ static int32_t        homing_duty;      /* signed duty toward drum */
 
 /* Runtime */
 static int32_t        coast_threshold;  /* absolute position of coast point */
-static int32_t        brake_target;     /* velocity ramp target during braking */
 static uint16_t       settle_counter;
 static uint16_t       stall_counter;
 static int32_t        stall_prev_pos;
 static uint16_t       coast_timeout;
-static uint32_t       timebase_ms;
-static uint32_t       active_start_ms;
+static uint32_t       timebase_ticks;
+static uint32_t       active_start_tick;
 static uint16_t       strike_sequence;
 static uint8_t        timing_flags;
-static int16_t        last_duty;
+static int16_t        last_current_ma;
 static uint16_t       trigger_to_coast_ms;
 static uint16_t       trigger_to_rebound_ms;
 static uint16_t       trigger_to_retrigger_ready_ms;
@@ -73,27 +73,23 @@ static int32_t get_pos(void)
     return -encoder_get_position();
 }
 
-static uint16_t elapsed_ms_since(uint32_t start_ms)
+static uint16_t elapsed_ms_since(uint32_t start_tick)
 {
-    uint32_t elapsed = timebase_ms - start_ms;
+    uint32_t elapsed_ticks = timebase_ticks - start_tick;
+    uint64_t elapsed_ms = ((uint64_t)elapsed_ticks * 1000ULL) / STRIKE_LOOP_HZ;
 
-    if (elapsed > 0xFFFFu)
+    if (elapsed_ms > 0xFFFFu)
         return 0xFFFFu;
 
-    return (uint16_t)elapsed;
+    return (uint16_t)elapsed_ms;
 }
 
-static int32_t orient_strike_duty(int32_t duty)
+static int32_t orient_strike_current(int32_t current_ma)
 {
-    if ((duty > 0 && drum_dir < 0) || (duty < 0 && drum_dir > 0))
-        return -duty;
+    if ((current_ma > 0 && drum_dir < 0) || (current_ma < 0 && drum_dir > 0))
+        return -current_ma;
 
-    return duty;
-}
-
-static int32_t home_direction_velocity(int32_t magnitude_rpm)
-{
-    return -drum_dir * magnitude_rpm;
+    return current_ma;
 }
 
 static int32_t home_side_error(int32_t pos)
@@ -184,37 +180,36 @@ static void maybe_mark_retrigger_ready(int32_t pos, int32_t vel)
     if (!retrigger_ready_now(pos, vel))
         return;
 
-    trigger_to_retrigger_ready_ms = elapsed_ms_since(active_start_ms);
+    trigger_to_retrigger_ready_ms = elapsed_ms_since(active_start_tick);
     timing_flags |= STRIKE_TIMING_RETRIGGER_READY_VALID;
 }
 
-static void begin_strike(int32_t duty, uint8_t retriggered)
+static void begin_strike(int32_t current_ma, uint8_t retriggered)
 {
-    duty = orient_strike_duty(duty);
+    current_ma = orient_strike_current(current_ma);
 
     strike_sequence++;
     timing_flags = STRIKE_TIMING_ACTIVE;
     if (retriggered)
         timing_flags |= STRIKE_TIMING_RETRIGGERED;
 
-    last_duty = (int16_t)duty;
+    last_current_ma = (int16_t)current_ma;
     trigger_to_coast_ms = 0;
     trigger_to_rebound_ms = 0;
     trigger_to_retrigger_ready_ms = 0;
     trigger_to_ready_ms = 0;
     estimated_strike_velocity_dps = 0;
-    timing_flags |= STRIKE_TIMING_VELOCITY_VALID;
-    active_start_ms = timebase_ms;
+    active_start_tick = timebase_ticks;
 
     /* Coast threshold: coast_distance counts from drum, on the home side */
     coast_threshold = drum_position - drum_dir * coast_distance;
 
-    motor_set_mode(CTRL_DUTY);
-    motor_set_duty(duty);
+    motor_set_current(current_ma);
+    motor_set_mode(CTRL_TORQUE);
     /* motor_start() is a no-op if already running (position hold) */
     motor_start();
 
-    /* Arm 5 kHz coast detection in motor tick — 1 kHz is too slow */
+    /* Arm coast detection on the encoder/velocity cadence so power cuts before impact. */
     motor_arm_coast(coast_threshold, drum_dir);
 
     state = STRIKE_DRIVING;
@@ -234,11 +229,11 @@ void strike_init(void)
     coast_distance = STRIKE_COAST_DISTANCE_DEFAULT;
     homing_duty    = STRIKE_HOMING_DUTY_DEFAULT;
 
-    timebase_ms = 0;
-    active_start_ms = 0;
+    timebase_ticks = 0;
+    active_start_tick = 0;
     strike_sequence = 0;
     timing_flags = 0;
-    last_duty = 0;
+    last_current_ma = 0;
     trigger_to_coast_ms = 0;
     trigger_to_rebound_ms = 0;
     trigger_to_retrigger_ready_ms = 0;
@@ -250,15 +245,29 @@ void strike_init(void)
 
 void strike_set_home_offset(int32_t counts)
 {
+    uint32_t irq_state = irq_save();
+
     home_offset = counts;
 
     if (homed || (state == STRIKE_HOMING && home_phase == HOME_MOVE_HOME)) {
         update_home_position_target();
         command_home_position_if_safe();
     }
+
+    irq_restore(irq_state);
 }
-void strike_set_coast_distance(int32_t counts) { coast_distance = counts; }
-void strike_set_homing_duty(int32_t duty)      { homing_duty = duty; }
+void strike_set_coast_distance(int32_t counts)
+{
+    uint32_t irq_state = irq_save();
+    coast_distance = counts;
+    irq_restore(irq_state);
+}
+void strike_set_homing_duty(int32_t duty)
+{
+    uint32_t irq_state = irq_save();
+    homing_duty = duty;
+    irq_restore(irq_state);
+}
 int32_t strike_get_home_offset(void)           { return home_offset; }
 int32_t strike_get_coast_distance(void)        { return coast_distance; }
 int32_t strike_get_homing_duty(void)           { return homing_duty; }
@@ -267,6 +276,8 @@ int32_t strike_get_homing_duty(void)           { return homing_duty; }
 
 void strike_shift_position_reference(int32_t delta)
 {
+    uint32_t irq_state = irq_save();
+
     if (homed || (state == STRIKE_HOMING && home_phase == HOME_MOVE_HOME)) {
         drum_position -= delta;
         home_position -= delta;
@@ -277,26 +288,43 @@ void strike_shift_position_reference(int32_t delta)
 
     if (state == STRIKE_DRIVING)
         coast_threshold -= delta;
+
+    irq_restore(irq_state);
 }
 
 void strike_restore_calibration(int32_t drum_pos, int32_t home_pos)
 {
+    uint32_t irq_state = irq_save();
+
     if (homing_duty == 0)
+    {
+        irq_restore(irq_state);
         return;
+    }
 
     drum_position = drum_pos;
     home_position = home_pos;
     drum_dir = (homing_duty > 0) ? 1 : -1;
     homed = 1;
     state = STRIKE_IDLE;
+
+    irq_restore(irq_state);
 }
 
 void strike_home(void)
 {
+    uint32_t irq_state = irq_save();
+
     if (state != STRIKE_IDLE)
+    {
+        irq_restore(irq_state);
         return;
+    }
     if (homing_duty == 0)
+    {
+        irq_restore(irq_state);
         return;
+    }
 
     drum_dir = (homing_duty > 0) ? 1 : -1;
     homed = 0;
@@ -313,20 +341,32 @@ void strike_home(void)
 
     state = STRIKE_HOMING;
     home_phase = HOME_SEEK_DRUM;
+
+    irq_restore(irq_state);
 }
 
-strike_trigger_result_t strike_trigger(int32_t duty)
+strike_trigger_result_t strike_trigger(int32_t current_ma)
 {
+    uint32_t irq_state = irq_save();
     int32_t pos;
     int32_t vel;
     uint8_t retriggered;
 
     if (!homed || state == STRIKE_HOMING)
+    {
+        irq_restore(irq_state);
         return STRIKE_TRIGGER_REJECT_NOT_HOMED;
+    }
     if (motor_get_state() == MOTOR_FAULT)
+    {
+        irq_restore(irq_state);
         return STRIKE_TRIGGER_REJECT_FAULT;
-    if (duty == 0)
+    }
+    if (current_ma == 0)
+    {
+        irq_restore(irq_state);
         return STRIKE_TRIGGER_REJECT_ZERO;
+    }
 
     retriggered = (state != STRIKE_IDLE);
     pos = get_pos();
@@ -334,10 +374,13 @@ strike_trigger_result_t strike_trigger(int32_t duty)
 
     if (retriggered) {
         if (!retrigger_ready_now(pos, vel))
+        {
+            irq_restore(irq_state);
             return STRIKE_TRIGGER_REJECT_NOT_READY;
+        }
 
         if ((timing_flags & STRIKE_TIMING_RETRIGGER_READY_VALID) == 0u) {
-            trigger_to_retrigger_ready_ms = elapsed_ms_since(active_start_ms);
+            trigger_to_retrigger_ready_ms = elapsed_ms_since(active_start_tick);
             timing_flags |= STRIKE_TIMING_RETRIGGER_READY_VALID;
         }
     }
@@ -346,22 +389,32 @@ strike_trigger_result_t strike_trigger(int32_t duty)
     if (retriggered)
         motor_stop();
 
-    begin_strike(duty, retriggered);
+    begin_strike(current_ma, retriggered);
+    irq_restore(irq_state);
     return retriggered ? STRIKE_TRIGGER_RETRIGGERED : STRIKE_TRIGGER_ACCEPTED;
 }
 
 void strike_cancel(void)
 {
+    uint32_t irq_state = irq_save();
+    uint8_t was_active;
+
+    was_active = (state != STRIKE_IDLE) ? 1u : 0u;
     motor_disarm_coast();
     if (homed) {
         motor_set_position(home_position);
         motor_set_mode(CTRL_POSITION);
         motor_start();
+        settle_counter = 0;
+        if (was_active)
+            state = STRIKE_CATCHING;
     } else {
         motor_stop();
+        state = STRIKE_IDLE;
     }
     timing_flags &= (uint8_t)~STRIKE_TIMING_ACTIVE;
-    state = STRIKE_IDLE;
+
+    irq_restore(irq_state);
 }
 
 /* ── Status ──────────────────────────────────────────────────────────── */
@@ -373,12 +426,15 @@ uint8_t  strike_is_homed(void)               { return homed; }
 uint16_t strike_get_sequence(void)           { return strike_sequence; }
 void strike_get_metrics(strike_metrics_t *metrics)
 {
+    uint32_t irq_state;
+
     if (metrics == 0)
         return;
 
+    irq_state = irq_save();
     metrics->flags = timing_flags;
     metrics->sequence = strike_sequence;
-    metrics->last_duty = last_duty;
+    metrics->last_current_ma = last_current_ma;
     metrics->trigger_to_coast_ms = trigger_to_coast_ms;
     metrics->trigger_to_rebound_ms = trigger_to_rebound_ms;
     metrics->trigger_to_retrigger_ready_ms = trigger_to_retrigger_ready_ms;
@@ -387,9 +443,10 @@ void strike_get_metrics(strike_metrics_t *metrics)
     metrics->home_offset = (int16_t)home_offset;
     metrics->coast_distance = (int16_t)coast_distance;
     metrics->homing_duty = (int16_t)homing_duty;
+    irq_restore(irq_state);
 }
 
-/* ── Tick (1 kHz) ────────────────────────────────────────────────────── */
+/* ── Tick (configured by STRIKE_LOOP_HZ) ─────────────────────────────── */
 
 void strike_tick(void)
 {
@@ -398,7 +455,7 @@ void strike_tick(void)
     int32_t toward_drum_rpm = vel * drum_dir;
     int32_t home_error = home_side_error(pos);
 
-    timebase_ms++;
+    timebase_ticks++;
 
     /* Abort on motor fault */
     if (motor_get_state() == MOTOR_FAULT) {
@@ -458,14 +515,16 @@ void strike_tick(void)
     case STRIKE_DRIVING:
         if (toward_drum_rpm > 0) {
             uint16_t velocity_dps = rpm_to_dps_clamped(toward_drum_rpm);
-            if (velocity_dps > estimated_strike_velocity_dps)
+            if (velocity_dps > estimated_strike_velocity_dps) {
                 estimated_strike_velocity_dps = velocity_dps;
+                timing_flags |= STRIKE_TIMING_VELOCITY_VALID;
+            }
         }
 
-        /* Coast is triggered by motor_tick at 5 kHz (motor_arm_coast).
-         * We just detect the transition here at 1 kHz. */
+        /* Coast is triggered by the faster encoder/velocity cadence
+         * (motor_arm_coast). We just detect the transition here. */
         if (motor_is_coasting()) {
-            trigger_to_coast_ms = elapsed_ms_since(active_start_ms);
+            trigger_to_coast_ms = elapsed_ms_since(active_start_tick);
             timing_flags |= STRIKE_TIMING_COAST_VALID;
             coast_timeout = 0;
             state = STRIKE_COASTING;
@@ -476,8 +535,10 @@ void strike_tick(void)
     case STRIKE_COASTING:
         if (toward_drum_rpm > 0) {
             uint16_t velocity_dps = rpm_to_dps_clamped(toward_drum_rpm);
-            if (velocity_dps > estimated_strike_velocity_dps)
+            if (velocity_dps > estimated_strike_velocity_dps) {
                 estimated_strike_velocity_dps = velocity_dps;
+                timing_flags |= STRIKE_TIMING_VELOCITY_VALID;
+            }
         }
 
         coast_timeout++;
@@ -487,49 +548,20 @@ void strike_tick(void)
             int32_t home_vel = -vel * drum_dir;  /* positive = toward home */
             if (home_vel > STRIKE_REBOUND_THRESHOLD ||
                 coast_timeout >= STRIKE_COAST_TIMEOUT_TICKS) {
-                trigger_to_rebound_ms = elapsed_ms_since(active_start_ms);
+                trigger_to_rebound_ms = elapsed_ms_since(active_start_tick);
                 timing_flags |= STRIKE_TIMING_REBOUND_VALID;
                 if (coast_timeout >= STRIKE_COAST_TIMEOUT_TICKS)
                     timing_flags |= STRIKE_TIMING_REBOUND_TIMEOUT;
                 else
                     timing_flags &= (uint8_t)~STRIKE_TIMING_REBOUND_TIMEOUT;
 
-                /* Re-enter control in velocity mode first, then hand off to
-                 * position hold once the mallet is close to home. This avoids
-                 * the immediate position-mode current spike that used to fault. */
-                brake_target = vel;
-                motor_set_velocity(brake_target);
-                motor_set_mode(CTRL_VELOCITY);
-                state = STRIKE_RETURNING;
+                /* Re-enter control directly in position mode and let the
+                 * cascaded position -> velocity -> current loops catch the
+                 * rebound at home. motor_set_mode() resets stale coast state. */
+                start_catching();
             }
         }
         break;
-
-    /* ── Returning: ramp into an aggressive homeward velocity target ── */
-    case STRIKE_RETURNING:
-    {
-        int32_t desired_home_vel = home_direction_velocity(STRIKE_RETURN_VELOCITY_RPM);
-
-        if (brake_target < desired_home_vel - STRIKE_RETURN_RAMP_RATE)
-            brake_target += STRIKE_RETURN_RAMP_RATE;
-        else if (brake_target > desired_home_vel + STRIKE_RETURN_RAMP_RATE)
-            brake_target -= STRIKE_RETURN_RAMP_RATE;
-        else
-            brake_target = desired_home_vel;
-
-        motor_set_velocity(brake_target);
-
-        /* The 1 kHz strike tick can skip over a small catch window. Once the
-         * mallet reaches or passes home, switch to position capture instead of
-         * continuing to drive away from home in velocity mode. */
-        if (home_error < -STRIKE_MAX_REBOUND_OVERSHOOT &&
-            toward_drum_rpm < 0) {
-            force_home_capture();
-        } else if (home_error <= STRIKE_CATCH_ENTRY_WINDOW) {
-            start_catching();
-        }
-        break;
-    }
 
     /* ── Catching: position hold at home ─────────────────────────────── */
     case STRIKE_CATCHING:
@@ -548,7 +580,7 @@ void strike_tick(void)
 
         if (settle_counter >= STRIKE_SETTLE_TICKS)
         {
-            trigger_to_ready_ms = elapsed_ms_since(active_start_ms);
+            trigger_to_ready_ms = elapsed_ms_since(active_start_tick);
             timing_flags |= STRIKE_TIMING_READY_VALID;
             timing_flags &= (uint8_t)~STRIKE_TIMING_ACTIVE;
             state = STRIKE_IDLE;

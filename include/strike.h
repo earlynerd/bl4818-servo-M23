@@ -2,9 +2,9 @@
  * Strike Module — Mallet strike, rebound, and catch sequencer
  *
  * State machine:
- *   IDLE (position hold at home) → DRIVING (open-loop toward drum)
- *   → COASTING (phases floating) → CATCHING (position servo to home)
- *   → IDLE
+ *   IDLE (position hold at home) → DRIVING (current-controlled toward drum)
+ *   → COASTING (phases floating through impact) → CATCHING
+ *   (position servo captures the rebound back to home) → IDLE
  *
  * Homing: low duty toward drum until stall → record drum surface →
  *         position servo to home offset above drum.
@@ -20,8 +20,7 @@ typedef enum {
     STRIKE_HOMING   = 1,
     STRIKE_DRIVING  = 2,
     STRIKE_COASTING = 3,
-    STRIKE_RETURNING = 4,
-    STRIKE_CATCHING = 5
+    STRIKE_CATCHING = 5  /* wire value 4 is left unused to preserve legacy protocol numbering */
 } strike_state_t;
 
 typedef enum {
@@ -45,7 +44,7 @@ typedef enum {
 typedef struct {
     uint8_t  flags;
     uint16_t sequence;
-    int16_t  last_duty;
+    int16_t  last_current_ma;
     uint16_t trigger_to_coast_ms;
     uint16_t trigger_to_rebound_ms;
     uint16_t trigger_to_retrigger_ready_ms;
@@ -57,10 +56,10 @@ typedef struct {
 } strike_metrics_t;
 
 void strike_init(void);
-void strike_tick(void);             /* call at 1 kHz */
+void strike_tick(void);             /* call at STRIKE_LOOP_HZ */
 
 /* Commands */
-strike_trigger_result_t strike_trigger(int32_t duty);  /* fire strike with given duty (loudness) */
+strike_trigger_result_t strike_trigger(int32_t current_ma);  /* fire strike with given current magnitude in mA */
 void strike_home(void);             /* run homing sequence */
 void strike_cancel(void);           /* abort sequence, return to idle */
 

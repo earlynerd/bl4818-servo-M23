@@ -17,7 +17,7 @@ import serial.tools.list_ports
 # ── Framing ──────────────────────────────────────────────────────────────────
 
 PREAMBLE = b"\xA5\x5A"
-MAX_PAYLOAD = 34
+MAX_PAYLOAD = 64
 MAX_DEVICES = 16
 
 # ── Command types ────────────────────────────────────────────────────────────
@@ -54,6 +54,9 @@ SUBCMD_QUERY_STATUS  = 0x10
 SUBCMD_QUERY_STRIKE  = 0x11
 SUBCMD_SAVE_SETTINGS = 0x12
 SUBCMD_CLEAR_SETTINGS = 0x13
+SUBCMD_SET_CUR_PID   = 0x14
+SUBCMD_SET_CURRENT   = 0x15
+SUBCMD_QUERY_TIMING  = 0x16
 SUBCMD_MASK          = 0x3F
 SUBCMD_REPLY_FULL    = 0x00
 SUBCMD_REPLY_ACK     = 0x40
@@ -70,6 +73,7 @@ ACK_RESULT_REJECT_FAULT     = 0x03
 ACK_RESULT_REJECT_ZERO      = 0x04
 ACK_RESULT_REJECT_NOT_READY = 0x05
 ACK_RESULT_INVALID_ARGUMENT = 0x06
+ACK_RESULT_PERSIST_FAILED   = 0x07
 
 # ── Strike parameter IDs ───────────────────────────────────────────────────
 
@@ -111,8 +115,8 @@ def crc16_ccitt(data: bytes, init: int = 0xFFFF) -> int:
 
 MOTOR_STATES  = {0: "IDLE", 1: "RUN", 2: "FAULT"}
 FAULT_CODES   = {0: "NONE", 1: "OVERCURRENT", 2: "HALL_INVALID"}
-CTRL_MODES    = {0: "DUTY", 1: "VELOCITY", 2: "POSITION"}
-STRIKE_STATES = {0: "IDLE", 1: "HOMING", 2: "DRIVING", 3: "COASTING", 4: "RETURNING", 5: "CATCHING"}
+CTRL_MODES    = {0: "DUTY", 1: "VELOCITY", 2: "POSITION", 3: "TORQUE"}
+STRIKE_STATES = {0: "IDLE", 1: "HOMING", 2: "DRIVING", 3: "COASTING", 4: "LEGACY_RETURNING", 5: "CATCHING"}
 SUBCMD_NAMES  = {
     SUBCMD_SET_DUTY: "SET_DUTY",
     SUBCMD_SET_TORQUE: "SET_TORQUE",
@@ -133,6 +137,9 @@ SUBCMD_NAMES  = {
     SUBCMD_QUERY_STRIKE: "QUERY_STRIKE",
     SUBCMD_SAVE_SETTINGS: "SAVE_SETTINGS",
     SUBCMD_CLEAR_SETTINGS: "CLEAR_SETTINGS",
+    SUBCMD_SET_CUR_PID: "SET_CUR_PID",
+    SUBCMD_SET_CURRENT: "SET_CURRENT",
+    SUBCMD_QUERY_TIMING: "QUERY_TIMING",
 }
 ACK_RESULT_NAMES = {
     ACK_RESULT_OK: "OK",
@@ -142,6 +149,7 @@ ACK_RESULT_NAMES = {
     ACK_RESULT_REJECT_ZERO: "REJECT_ZERO",
     ACK_RESULT_REJECT_NOT_READY: "REJECT_NOT_READY",
     ACK_RESULT_INVALID_ARGUMENT: "INVALID_ARGUMENT",
+    ACK_RESULT_PERSIST_FAILED: "PERSIST_FAILED",
 }
 
 
@@ -202,7 +210,7 @@ class StrikeStatus:
     homed: int
     flags: int = 0
     sequence: int = 0
-    last_duty: int = 0
+    last_current_ma: int = 0
     trigger_to_coast_ms: int = 0
     trigger_to_rebound_ms: int = 0
     trigger_to_retrigger_ready_ms: int = 0
@@ -251,7 +259,44 @@ class StrikeStatus:
         return bool(self.flags & STRIKE_TIMING_RETRIGGER_READY_VALID)
 
 
-AddressedReply = MotorStatus | CommandAck | None
+@dataclasses.dataclass
+class TimingStatus:
+    address: int
+    control_budget_us: int
+    control_last_us: int
+    control_max_us: int
+    control_overrun_count: int
+    velocity_drop_count: int
+    position_drop_count: int
+    strike_drop_count: int
+    protocol_drop_count: int
+    hall_last_us: int
+    hall_max_us: int
+    uart_last_us: int
+    uart_max_us: int
+    adc_last_us: int
+    adc_max_us: int
+    protocol_poll_last_us: int
+    protocol_poll_max_us: int
+    protocol_backlog_max: int
+    uptime_ms: int
+    uart_rx_overflow_count: int = 0
+    adc_overrun_count: int = 0
+
+    @property
+    def control_last_pct(self) -> float:
+        if self.control_budget_us <= 0:
+            return 0.0
+        return 100.0 * self.control_last_us / self.control_budget_us
+
+    @property
+    def control_max_pct(self) -> float:
+        if self.control_budget_us <= 0:
+            return 0.0
+        return 100.0 * self.control_max_us / self.control_budget_us
+
+
+AddressedReply = MotorStatus | CommandAck | TimingStatus | None
 
 
 # ── Exceptions ───────────────────────────────────────────────────────────────
@@ -543,13 +588,30 @@ class RingClientV2:
                 raise RingError(f"{name} must fit in int16")
         return self._addressed_command(address, SUBCMD_SET_POS_PID, struct.pack(">hhh", kp, ki, kd), reply_mode)
 
-    def zero_position(self, address: int, reply_mode: str = REPLY_MODE_FULL) -> AddressedReply:
+    def set_current(self, address: int, current_ma: int, reply_mode: str = REPLY_MODE_FULL) -> AddressedReply:
+        if current_ma < -32768 or current_ma > 32767:
+            raise RingError("current must fit in int16")
+        return self._addressed_command(address, SUBCMD_SET_CURRENT, struct.pack(">h", current_ma), reply_mode)
+
+    def set_cur_pid(
+        self,
+        address: int,
+        kp: int,
+        ki: int,
+        reply_mode: str = REPLY_MODE_FULL,
+    ) -> AddressedReply:
+        for name, value in [("kp", kp), ("ki", ki)]:
+            if value < -32768 or value > 32767:
+                raise RingError(f"{name} must fit in int16")
+        return self._addressed_command(address, SUBCMD_SET_CUR_PID, struct.pack(">hh", kp, ki), reply_mode)
+
+    def zero_position(self, address: int, reply_mode: str = REPLY_MODE_ACK) -> AddressedReply:
         return self._addressed_command(address, SUBCMD_ZERO_POS, reply_mode=reply_mode)
 
-    def save_settings(self, address: int, reply_mode: str = REPLY_MODE_FULL) -> AddressedReply:
+    def save_settings(self, address: int, reply_mode: str = REPLY_MODE_ACK) -> AddressedReply:
         return self._addressed_command(address, SUBCMD_SAVE_SETTINGS, reply_mode=reply_mode)
 
-    def clear_settings(self, address: int, reply_mode: str = REPLY_MODE_FULL) -> AddressedReply:
+    def clear_settings(self, address: int, reply_mode: str = REPLY_MODE_ACK) -> AddressedReply:
         return self._addressed_command(address, SUBCMD_CLEAR_SETTINGS, reply_mode=reply_mode)
 
     def set_pid(
@@ -565,8 +627,8 @@ class RingClientV2:
                 raise RingError(f"{name} must fit in int16")
         return self._addressed_command(address, SUBCMD_SET_PID, struct.pack(">hhh", kp, ki, kd), reply_mode)
 
-    def strike(self, address: int, duty: int, reply_mode: str = REPLY_MODE_FULL) -> AddressedReply:
-        return self._addressed_command(address, SUBCMD_STRIKE, struct.pack(">h", duty), reply_mode)
+    def strike(self, address: int, current_ma: int, reply_mode: str = REPLY_MODE_FULL) -> AddressedReply:
+        return self._addressed_command(address, SUBCMD_STRIKE, struct.pack(">h", current_ma), reply_mode)
 
     def strike_home(self, address: int, reply_mode: str = REPLY_MODE_FULL) -> AddressedReply:
         return self._addressed_command(address, SUBCMD_STRIKE_HOME, reply_mode=reply_mode)
@@ -602,6 +664,20 @@ class RingClientV2:
                 return self._parse_strike_status(payload)
             self._trace("skip", bytes([cmd]))
 
+    def query_timing(self, address: int) -> TimingStatus:
+        self._check_address(address)
+        self._flush_rx()
+        self._send_frame(self._build_addressed_payload(address, SUBCMD_QUERY_TIMING))
+        deadline = time.monotonic() + self.timeout_ms / 1000.0
+        expected_cmd = CMD_STATUS_BASE | address
+        while True:
+            remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
+            payload = self._recv_frame(timeout_ms=remaining_ms)
+            cmd = payload[0] if payload else 0
+            if cmd == expected_cmd and len(payload) in (33, 49, 53, 57):
+                return self._parse_timing_status(payload)
+            self._trace("skip", bytes([cmd]))
+
     def _parse_strike_status(self, payload: bytes) -> StrikeStatus:
         cmd = payload[0]
         address = cmd & 0x0F
@@ -612,7 +688,7 @@ class RingClientV2:
                 homed=payload[2],
                 flags=payload[3],
                 sequence=struct.unpack(">H", payload[4:6])[0],
-                last_duty=struct.unpack(">h", payload[6:8])[0],
+                last_current_ma=struct.unpack(">h", payload[6:8])[0],
                 trigger_to_coast_ms=struct.unpack(">H", payload[8:10])[0],
                 trigger_to_rebound_ms=struct.unpack(">H", payload[10:12])[0],
                 trigger_to_retrigger_ready_ms=struct.unpack(">H", payload[12:14])[0],
@@ -632,7 +708,7 @@ class RingClientV2:
                 homed=payload[2],
                 flags=payload[3],
                 sequence=struct.unpack(">H", payload[4:6])[0],
-                last_duty=struct.unpack(">h", payload[6:8])[0],
+                last_current_ma=struct.unpack(">h", payload[6:8])[0],
                 trigger_to_coast_ms=struct.unpack(">H", payload[8:10])[0],
                 trigger_to_rebound_ms=struct.unpack(">H", payload[10:12])[0],
                 trigger_to_ready_ms=struct.unpack(">H", payload[12:14])[0],
@@ -651,7 +727,7 @@ class RingClientV2:
                 homed=payload[2],
                 flags=payload[3],
                 sequence=struct.unpack(">H", payload[4:6])[0],
-                last_duty=struct.unpack(">h", payload[6:8])[0],
+                last_current_ma=struct.unpack(">h", payload[6:8])[0],
                 trigger_to_coast_ms=struct.unpack(">H", payload[8:10])[0],
                 trigger_to_rebound_ms=struct.unpack(">H", payload[10:12])[0],
                 trigger_to_ready_ms=struct.unpack(">H", payload[12:14])[0],
@@ -667,7 +743,7 @@ class RingClientV2:
                 homed=payload[2],
                 flags=payload[3],
                 sequence=struct.unpack(">H", payload[4:6])[0],
-                last_duty=struct.unpack(">h", payload[6:8])[0],
+                last_current_ma=struct.unpack(">h", payload[6:8])[0],
                 trigger_to_coast_ms=struct.unpack(">H", payload[8:10])[0],
                 trigger_to_rebound_ms=struct.unpack(">H", payload[10:12])[0],
                 trigger_to_ready_ms=struct.unpack(">H", payload[12:14])[0],
@@ -682,6 +758,66 @@ class RingClientV2:
             homed=payload[2],
             drum_position=struct.unpack(">i", payload[3:7])[0],
             home_position=struct.unpack(">i", payload[7:11])[0],
+        )
+
+    def _parse_timing_status(self, payload: bytes) -> TimingStatus:
+        cmd = payload[0]
+        address = cmd & 0x0F
+        if len(payload) == 33:
+            return TimingStatus(
+                address=address,
+                control_budget_us=struct.unpack(">H", payload[1:3])[0],
+                control_last_us=struct.unpack(">H", payload[3:5])[0],
+                control_max_us=struct.unpack(">H", payload[5:7])[0],
+                control_overrun_count=struct.unpack(">I", payload[7:11])[0],
+                velocity_drop_count=0,
+                position_drop_count=0,
+                strike_drop_count=0,
+                protocol_drop_count=0,
+                hall_last_us=struct.unpack(">H", payload[11:13])[0],
+                hall_max_us=struct.unpack(">H", payload[13:15])[0],
+                uart_last_us=struct.unpack(">H", payload[15:17])[0],
+                uart_max_us=struct.unpack(">H", payload[17:19])[0],
+                adc_last_us=struct.unpack(">H", payload[19:21])[0],
+                adc_max_us=struct.unpack(">H", payload[21:23])[0],
+                protocol_poll_last_us=struct.unpack(">H", payload[23:25])[0],
+                protocol_poll_max_us=struct.unpack(">H", payload[25:27])[0],
+                protocol_backlog_max=struct.unpack(">H", payload[27:29])[0],
+                uptime_ms=struct.unpack(">I", payload[29:33])[0],
+            )
+
+        if len(payload) not in (49, 53, 57):
+            raise RingError(f"timing reply wrong size ({len(payload)} bytes): {payload.hex(' ')}")
+
+        uart_rx_overflow_count = (
+            struct.unpack(">I", payload[49:53])[0] if len(payload) >= 53 else 0
+        )
+        adc_overrun_count = (
+            struct.unpack(">I", payload[53:57])[0] if len(payload) >= 57 else 0
+        )
+
+        return TimingStatus(
+            address=address,
+            control_budget_us=struct.unpack(">H", payload[1:3])[0],
+            control_last_us=struct.unpack(">H", payload[3:5])[0],
+            control_max_us=struct.unpack(">H", payload[5:7])[0],
+            control_overrun_count=struct.unpack(">I", payload[7:11])[0],
+            velocity_drop_count=struct.unpack(">I", payload[11:15])[0],
+            position_drop_count=struct.unpack(">I", payload[15:19])[0],
+            strike_drop_count=struct.unpack(">I", payload[19:23])[0],
+            protocol_drop_count=struct.unpack(">I", payload[23:27])[0],
+            hall_last_us=struct.unpack(">H", payload[27:29])[0],
+            hall_max_us=struct.unpack(">H", payload[29:31])[0],
+            uart_last_us=struct.unpack(">H", payload[31:33])[0],
+            uart_max_us=struct.unpack(">H", payload[33:35])[0],
+            adc_last_us=struct.unpack(">H", payload[35:37])[0],
+            adc_max_us=struct.unpack(">H", payload[37:39])[0],
+            protocol_poll_last_us=struct.unpack(">H", payload[39:41])[0],
+            protocol_poll_max_us=struct.unpack(">H", payload[41:43])[0],
+            protocol_backlog_max=struct.unpack(">H", payload[43:45])[0],
+            uptime_ms=struct.unpack(">I", payload[45:49])[0],
+            uart_rx_overflow_count=uart_rx_overflow_count,
+            adc_overrun_count=adc_overrun_count,
         )
 
     def broadcast_duty(self, duties: Iterable[int]) -> None:
@@ -747,12 +883,36 @@ class RingClientV2:
 
 
 def format_status(status: MotorStatus) -> str:
-    target_label = "duty" if status.mode == 0 else "rpm"
+    target_label = {0: "duty", 3: "mA"}.get(status.mode, "rpm")
     return (
         f"addr={status.address} state={status.state_name} fault={status.fault_name} "
         f"mode={status.mode_name} current={status.current_ma}mA hall={status.hall} "
         f"angle={status.angle} ({status.angle_deg:.1f}\u00b0) pos={status.position} "
         f"vel={status.velocity}rpm target_{target_label}={status.target}"
+    )
+
+
+def format_ack(ack: CommandAck) -> str:
+    return (
+        f"addr={ack.address} subcmd={ack.subcmd_name} "
+        f"result={ack.result_name} detail={ack.detail}"
+    )
+
+
+def format_timing_status(status: TimingStatus) -> str:
+    return (
+        f"addr={status.address} control={status.control_last_us}/{status.control_budget_us}us "
+        f"({status.control_last_pct:.1f}%) control_max={status.control_max_us}us "
+        f"({status.control_max_pct:.1f}%) control_overruns={status.control_overrun_count} "
+        f"vel_drops={status.velocity_drop_count} pos_drops={status.position_drop_count} "
+        f"strike_drops={status.strike_drop_count} proto_drops={status.protocol_drop_count} "
+        f"hall={status.hall_last_us}us hall_max={status.hall_max_us}us "
+        f"uart={status.uart_last_us}us uart_max={status.uart_max_us}us "
+        f"adc={status.adc_last_us}us adc_max={status.adc_max_us}us "
+        f"proto_poll={status.protocol_poll_last_us}us proto_poll_max={status.protocol_poll_max_us}us "
+        f"proto_backlog_max={status.protocol_backlog_max} uptime_ms={status.uptime_ms} "
+        f"uart_rx_overflow={status.uart_rx_overflow_count} "
+        f"adc_overrun={status.adc_overrun_count}"
     )
 
 
@@ -797,6 +957,7 @@ __all__ = [
     "ACK_RESULT_NAMES",
     "ACK_RESULT_OK",
     "ACK_RESULT_OK_RETRIGGERED",
+    "ACK_RESULT_PERSIST_FAILED",
     "ACK_RESULT_REJECT_FAULT",
     "ACK_RESULT_REJECT_NOT_HOMED",
     "ACK_RESULT_REJECT_NOT_READY",
@@ -847,10 +1008,13 @@ __all__ = [
     "SUBCMD_NAMES",
     "SUBCMD_QUERY_STATUS",
     "SUBCMD_QUERY_STRIKE",
+    "SUBCMD_QUERY_TIMING",
     "SUBCMD_REPLY_ACK",
     "SUBCMD_REPLY_FULL",
     "SUBCMD_REPLY_NONE",
     "SUBCMD_SAVE_SETTINGS",
+    "SUBCMD_SET_CUR_PID",
+    "SUBCMD_SET_CURRENT",
     "SUBCMD_SET_DUTY",
     "SUBCMD_SET_FF",
     "SUBCMD_SET_MODE",
@@ -866,8 +1030,11 @@ __all__ = [
     "SUBCMD_STRIKE_HOME",
     "SUBCMD_ZERO_POS",
     "StrikeStatus",
+    "TimingStatus",
     "auto_detect_port",
     "crc16_ccitt",
     "format_status",
+    "format_ack",
+    "format_timing_status",
     "list_ports",
 ]

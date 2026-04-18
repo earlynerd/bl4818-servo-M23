@@ -6,14 +6,16 @@
 #include "m2003_config.h"
 #include "M2003.h"
 #include "app_uart.h"
+#include "timing.h"
 
-#define UART_RX_BUF_SIZE 64
-#define UART_TX_BUF_SIZE 64
+#define UART_RX_BUF_SIZE 256
+#define UART_TX_BUF_SIZE 256
 
 static volatile uint8_t rx_buf[UART_RX_BUF_SIZE];
 static volatile uint16_t rx_head = 0;
 static volatile uint16_t rx_tail = 0;
 static volatile uint8_t rx_overflow = 0;
+static volatile uint32_t rx_overflow_count = 0;
 
 static volatile uint8_t tx_buf[UART_TX_BUF_SIZE];
 static volatile uint16_t tx_head = 0;
@@ -38,6 +40,7 @@ static void irq_restore(uint32_t primask)
 
 void UART1_IRQHandler(void)
 {
+    uint32_t timing_start = timing_capture_stamp();
     uint32_t status = UART1->INTSTS;
 
     if (status & UART_INTSTS_RLSINT_Msk) {
@@ -47,6 +50,7 @@ void UART1_IRQHandler(void)
 
     if (status & UART_INTSTS_BUFERRINT_Msk) {
         rx_overflow = 1u;
+        rx_overflow_count++;
         UART1->FIFOSTS = UART_FIFOSTS_RXOVIF_Msk | UART_FIFOSTS_TXOVIF_Msk;
     }
 
@@ -67,6 +71,7 @@ void UART1_IRQHandler(void)
                 rx_head = next;
             } else {
                 rx_overflow = 1u;
+                rx_overflow_count++;
             }
         }
     }
@@ -83,6 +88,8 @@ void UART1_IRQHandler(void)
             tx_running = 0;
         }
     }
+
+    timing_record_uart_isr(timing_start);
 }
 
 void uart_init(uint32_t baud)
@@ -119,7 +126,7 @@ void uart_init(uint32_t baud)
 
     UART1->INTEN |= (UART_INTEN_RDAIEN_Msk | UART_INTEN_RXTOIEN_Msk |
                      UART_INTEN_RLSIEN_Msk | UART_INTEN_BUFERRIEN_Msk);
-    NVIC_SetPriority(UART1_IRQn, 1u);
+    NVIC_SetPriority(UART1_IRQn, 3u);
     NVIC_EnableIRQ(UART1_IRQn);
 }
 
@@ -208,4 +215,13 @@ void uart_rx_clear_overflow(void)
     uint32_t primask = irq_save();
     rx_overflow = 0u;
     irq_restore(primask);
+}
+
+uint32_t uart_rx_overflow_count(void)
+{
+    uint32_t value;
+    uint32_t primask = irq_save();
+    value = rx_overflow_count;
+    irq_restore(primask);
+    return value;
 }

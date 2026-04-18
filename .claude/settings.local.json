@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3:*)",
+      "Bash(arm-none-eabi-objdump -d build/src/pid.o)",
+      "Bash(arm-none-eabi-nm -S build/m2003-motor.elf)"
+    ]
+  }
+}

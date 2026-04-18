@@ -7,6 +7,7 @@
 #include "m2003_config.h"
 #include "M2003.h"
 #include "encoder.h"
+#include "irq_util.h"
 
 static uint32_t encoder_raw = 0;
 static uint16_t encoder_angle = 0;
@@ -85,7 +86,10 @@ void encoder_init(void)
 void encoder_poll(void)
 {
     uint32_t raw = 0;
+    uint32_t irq_state;
     int i;
+
+    irq_state = irq_save();
 
     /* Assert CSn to start the frame */
     PIN_SSI_CSN = 1;
@@ -107,10 +111,10 @@ void encoder_poll(void)
             raw |= 1;
         }
     }
-    delay_nop(2); /* Minimum quiet time before next frame */
+    //delay_nop(2); /* Minimum quiet time before next frame */
     /* De-assert CSn to end the frame */
     PIN_SSI_CSN = 0;
-    
+    irq_restore(irq_state);
 
     encoder_raw = raw;
 

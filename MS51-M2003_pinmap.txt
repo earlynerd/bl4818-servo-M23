@@ -1,24 +1,24 @@
 ## Confirmed Pin Assignments
 
-| Pin | MS51Port | Datasheet Functions                  | Board Connection          |  M2003 pin |
-|-----|------|--------------------------------------|-------------------------------|------------------|
-|  1  | P0.5 | T0 / PWM0_CH2 / ADC_CH4             | Tach output (via N-FET, inverted) | PB.1
-|  2  | P0.6 | UART0_TXD / ADC_CH3                 | Current shunt (direct, no amp) | PB.2
-|  3  | P0.7 | UART0_RXD / ADC_CH2                 | Battery voltage divider (10k/10k) | PB.3
-|  4  | P2.0 | nRESET                               | Prog header "R" (reset)       | PE.15
-|  5  | P3.0 | INT0 / OSCIN / ADC_CH1              | **Hall sensor 3**             | PB.4
-|  6  | P1.7 | INT1 / ADC_CH0                       | **Hall sensor 2**             | PB.5
-|  7  | VSS  | Ground                               | GND                          | VSS
-|  8  | P1.6 | ICE_DAT / UART1_TXD / [I2C0_SDA]   | Prog header "P" (ICE_DAT)    | PF.0
-|  9  | VDD  | Power (2.4–5.5V)                     | **5V** from onboard regulator | VDD
-| 10  | P1.5 | SPI0_SS / PWM0_CH5                   | **Hall sensor 1**             | PC.14
-| 11  | P1.4 | PWM0_BRAKE / PWM0_CH1 / I2C0_SDA   | **Direction input**           | PB.15
-| 12  | P1.3 | I2C0_SCL / [STADC]                   | Possibly NC                  | PB.14
-| 13  | P1.2 | **PWM0_CH0** / IC0                   | **Phase U low-side gate**     | PB.13
-| 14  | P1.1 | ADC_CH7 / **PWM0_CH1** / IC1 / CLKO | **Phase U high-side gate**    | PB.12
-| 15  | P1.0 | **PWM0_CH2** / IC2 / SPI0_CLK       | **Phase V high-side gate**    | PB.7
-| 16  | P0.0 | **PWM0_CH3** / IC3 / SPI0_MOSI / T1 | **Phase V low-side gate**     | PB.8
-| 17  | P0.1 | **PWM0_CH4** / IC4 / SPI0_MISO      | **Phase W low-side gate**     | PB.9
-| 18  | P0.2 | ICE_CLK / UART1_RXD / [I2C0_SCL]    | Prog header "S" (ICE_CLK)    | PF.1
-| 19  | P0.3 | ADC_CH6 / **PWM0_CH5** / IC5        | **Phase W high-side gate**    | PB.11
-| 20  | P0.4 | ADC_CH5 / PWM0_CH3 / IC3 / STADC    | PWM speed input  | PB.0
+| Pin | MS51Port | Datasheet Functions                  | Board Connection                  |  M2003 pin       |
+|-----|----------|--------------------------------------|-----------------------------------|------------------|
+|  1  | P0.5     | T0 / PWM0_CH2 / ADC_CH4              | Tach output (via N-FET, inverted) | PB.1
+|  2  | P0.6  	 | UART0_TXD / ADC_CH3                  | Current shunt (direct, no amp)    | PB.2
+|  3  | P0.7     | UART0_RXD / ADC_CH2                  | Battery voltage divider (10k/10k) | PB.3
+|  4  | P2.0     | nRESET                               | Prog header "R" (reset)           | PE.15
+|  5  | P3.0     | INT0 / OSCIN / ADC_CH1               | **Hall sensor 3**                 | PB.4
+|  6  | P1.7     | INT1 / ADC_CH0                       | **Hall sensor 2**                 | PB.5
+|  7  | VSS      | Ground                               | GND                               | VSS
+|  8  | P1.6     | ICE_DAT / UART1_TXD / [I2C0_SDA]     | Prog header "P" (ICE_DAT)         | PF.0
+|  9  | VDD      | Power (2.4–5.5V)                     | **5V** from onboard regulator     | VDD
+| 10  | P1.5     | SPI0_SS / PWM0_CH5                   | **Hall sensor 1**                 | PC.14
+| 11  | P1.4     | PWM0_BRAKE / PWM0_CH1 / I2C0_SDA     | **Direction input**               | PB.15
+| 12  | P1.3     | I2C0_SCL / [STADC]                   | Possibly NC                       | PB.14
+| 13  | P1.2     | **PWM0_CH0** / IC0                   | **Phase U low-side gate**         | PB.13
+| 14  | P1.1     | ADC_CH7 / **PWM0_CH1** / IC1 / CLKO  | **Phase U high-side gate**        | PB.12
+| 15  | P1.0     | **PWM0_CH2** / IC2 / SPI0_CLK        | **Phase V high-side gate**        | PB.7
+| 16  | P0.0     | **PWM0_CH3** / IC3 / SPI0_MOSI / T1  | **Phase V low-side gate**         | PB.8
+| 17  | P0.1     | **PWM0_CH4** / IC4 / SPI0_MISO       | **Phase W low-side gate**         | PB.9
+| 18  | P0.2     | ICE_CLK / UART1_RXD / [I2C0_SCL]     | Prog header "S" (ICE_CLK)         | PF.1
+| 19  | P0.3     | ADC_CH6 / **PWM0_CH5** / IC5         | **Phase W high-side gate**        | PB.11
+| 20  | P0.4     | ADC_CH5 / PWM0_CH3 / IC3 / STADC     | PWM speed input  		    | PB.0

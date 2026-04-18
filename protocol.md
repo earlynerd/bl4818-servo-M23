@@ -62,7 +62,7 @@ The first payload byte is the command type.
 | 0x03 | SET_ADDRESS | `[counter]` | 2 | master -> ring (S&F) |
 | 0x10 | BROADCAST_DUTY | `[duty_hi duty_lo] x N` | 1 + 2*N | master -> ring |
 | 0x20+addr | ADDRESSED_CMD | `[subcmd_flags] [data...]` | 2..8 | master -> ring |
-| 0x40+addr | STATUS_REPLY | query-dependent status payload | 11, 17, or 32 | device -> master |
+| 0x40+addr | STATUS_REPLY | query-dependent status payload | 11, 17, 32, or 49 | device -> master |
 | 0x50+addr | ACK_REPLY | `[subcmd] [result] [detail_hi] [detail_lo]` | 5 | device -> master |
 
 ### Addressed Sub-Commands
@@ -83,7 +83,7 @@ sub-command ID; the top 2 bits select reply policy.
 | 0x09 | SET_POSITION | `[pos_b3] [pos_b2] [pos_b1] [pos_b0]` | 4 |
 | 0x0A | SET_POS_PID | `[kp_hi] [kp_lo] [ki_hi] [ki_lo] [kd_hi] [kd_lo]` | 6 |
 | 0x0B | ZERO_POSITION | -- | 0 |
-| 0x0C | STRIKE | `[duty_hi] [duty_lo]` | 2 |
+| 0x0C | STRIKE | `[current_hi] [current_lo]` | 2 |
 | 0x0D | STRIKE_HOME | -- | 0 |
 | 0x0E | STRIKE_CANCEL | -- | 0 |
 | 0x0F | SET_STRIKE_PARAM | `[param_id] [value_hi] [value_lo]` | 3 |
@@ -91,6 +91,7 @@ sub-command ID; the top 2 bits select reply policy.
 | 0x11 | QUERY_STRIKE | -- | 0 |
 | 0x12 | SAVE_SETTINGS | -- | 0 |
 | 0x13 | CLEAR_SETTINGS | -- | 0 |
+| 0x16 | QUERY_TIMING | -- | 0 |
 
 ### Addressed Reply Modes
 
@@ -111,6 +112,7 @@ bits 5:0 = sub-command ID
 Notes:
 
 - `QUERY_STATUS` and `QUERY_STRIKE` always return their full reply payloads.
+- `QUERY_TIMING` also always returns its full reply payload.
 - `NONE` only suppresses the device-generated reply. In cut-through mode the
   command frame itself still propagates around the ring and returns to the
   master RX path.
@@ -137,10 +139,13 @@ Addressed commands sent with reply mode `ACK` reply with type `0x50 + addr` and
 | `0x04` | REJECT_ZERO |
 | `0x05` | REJECT_NOT_READY |
 | `0x06` | INVALID_ARGUMENT |
+| `0x07` | PERSIST_FAILED |
 
 `detail` is command-specific. For `STRIKE`, `STRIKE_HOME`, `STRIKE_CANCEL`, and
 `SET_STRIKE_PARAM`, it reports the current 16-bit strike sequence. Other
-commands currently return `detail = 0`.
+commands currently return `detail = 0`. Flash-backed maintenance commands
+(`ZERO_POSITION`, `SAVE_SETTINGS`, `CLEAR_SETTINGS`) return `PERSIST_FAILED`
+when the underlying erase/write/verify operation fails.
 
 ### Status Replies
 
@@ -160,7 +165,7 @@ for `FAULT_OVERCURRENT`; the raw peak sample is not reported in this reply.
 
 ```
 [type] [strike_state] [homed] [timing_flags]
-[seq_hi] [seq_lo] [duty_hi] [duty_lo]
+[seq_hi] [seq_lo] [current_hi] [current_lo]
 [t_coast_hi] [t_coast_lo] [t_rebound_hi] [t_rebound_lo]
 [t_retrigger_ready_hi] [t_retrigger_ready_lo]
 [t_ready_hi] [t_ready_lo] [vel_dps_hi] [vel_dps_lo]
@@ -186,6 +191,11 @@ Timing fields are reported in milliseconds for the most recently accepted
 strike. `t_rebound` is an approximate impact proxy derived from rebound
 detection or coast timeout, not a direct drum-contact sensor.
 
+The `STRIKE` payload is a signed 16-bit current command in mA. Firmware
+orients that current toward the learned drum direction for the outbound hit.
+The `current` field in `QUERY_STRIKE` reports the last accepted strike current
+command in mA.
+
 `t_retrigger_ready` is earlier than `t_ready`. It marks the first moment when
 the mallet is both near the configured home position and moving slowly enough
 that a new strike can be accepted with predictable timing. Firmware rejects a
@@ -202,16 +212,60 @@ When `home_offset` is changed while the actuator is homed and not in the
 strike approach, the parked home target is updated immediately.
 
 If a `STRIKE` command arrives while the actuator is already in DRIVING,
-COASTING, RETURNING, or CATCHING, firmware only accepts it once
+COASTING, or CATCHING, firmware only accepts it once
 `t_retrigger_ready` has become valid. Before that point the compact
 `ACK_REPLY` returns `REJECT_NOT_READY`. Once accepted, the current recovery is
 aborted and a new strike attempt starts immediately, and the `ACK_REPLY`
 reports `OK_RETRIGGERED`.
 
+`QUERY_TIMING` replies with the same type `0x40 + addr` and 57 payload bytes:
+
+```
+[type]
+[control_budget_hi] [control_budget_lo]
+[control_last_hi] [control_last_lo]
+[control_max_hi] [control_max_lo]
+[control_overrun_b3] [control_overrun_b2] [control_overrun_b1] [control_overrun_b0]
+[vel_drop_b3] [vel_drop_b2] [vel_drop_b1] [vel_drop_b0]
+[pos_drop_b3] [pos_drop_b2] [pos_drop_b1] [pos_drop_b0]
+[strike_drop_b3] [strike_drop_b2] [strike_drop_b1] [strike_drop_b0]
+[proto_drop_b3] [proto_drop_b2] [proto_drop_b1] [proto_drop_b0]
+[hall_last_hi] [hall_last_lo] [hall_max_hi] [hall_max_lo]
+[uart_last_hi] [uart_last_lo] [uart_max_hi] [uart_max_lo]
+[adc_last_hi] [adc_last_lo] [adc_max_hi] [adc_max_lo]
+[proto_poll_last_hi] [proto_poll_last_lo]
+[proto_poll_max_hi] [proto_poll_max_lo]
+[proto_backlog_hi] [proto_backlog_lo]
+[uptime_b3] [uptime_b2] [uptime_b1] [uptime_b0]
+[uart_rx_overflow_b3] [uart_rx_overflow_b2] [uart_rx_overflow_b1] [uart_rx_overflow_b0]
+[adc_overrun_b3] [adc_overrun_b2] [adc_overrun_b1] [adc_overrun_b0]
+```
+
+All timing fields are in microseconds except `uptime`, which is milliseconds
+since boot. `control_*` measures the full `SysTick` control service time against
+the configured control-period budget. `vel_drop`, `pos_drop`, `strike_drop`,
+and `proto_drop` count scheduler events that were skipped because the lower-rate
+task had fallen behind. `hall_*` measures GPIO hall IRQ service time. `uart_*`
+and `adc_*` measure the corresponding ISR wall times. `proto_poll_*` measures
+foreground `protocol_poll()` wall time. The `proto_backlog` field is the
+maximum number of `protocol_tick()` periods that were pending before the main
+loop caught up, which is a direct signal that foreground work is starting to
+miss its schedule. `uart_rx_overflow` counts every UART1 buffer-overflow event
+(hardware FIFO or software ring); nonzero values mean the ring cable, baud
+setting, or UART ISR latency is on the edge of what the link can sustain.
+`adc_overrun` counts every ADC conversion whose previous sample had not yet
+been consumed when it landed; nonzero means ADC ISR latency is starving the
+pipeline and current/voltage samples are being silently dropped.
+
 ## Persistent Settings
 
-The firmware reserves the last 512-byte APROM page for a CRC-protected
-settings block that is loaded at boot.
+The firmware reserves the last two 512-byte APROM pages for a CRC-protected
+settings block that is loaded at boot. The two pages are used as a
+ping-pong pair with a monotonic sequence number in each record: on save,
+firmware writes the record to whichever page is not currently live, then
+adopts the new page on success. If power is lost mid-write, the previously
+live page is untouched and the device boots on the earlier record. This
+also doubles the flash-write endurance of the persist region.
 
 Persisted items:
 
@@ -223,7 +277,9 @@ Persisted items:
 `ZERO_POSITION` updates the logical zero point immediately and also saves the
 new absolute zero reference to flash. The other tunables are only committed
 when `SAVE_SETTINGS` is issued. `CLEAR_SETTINGS` erases the persisted block for
-the next boot; it does not change the current live runtime parameters.
+the next boot; it does not change the current live runtime parameters. Hosts
+that need the flash result should request an `ACK_REPLY` for these commands and
+check for `PERSIST_FAILED`.
 These flash operations should be treated as at-rest maintenance commands, not
 high-rate control traffic.
 

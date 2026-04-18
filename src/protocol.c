@@ -303,12 +303,12 @@ static void send_strike_status_reply(void)
 static void send_timing_status_reply(void)
 {
     timing_snapshot_t snapshot;
-    uint8_t buf[52];
+    uint8_t buf[60];
     uint16_t crc;
 
     timing_get_snapshot(&snapshot);
 
-    buf[0]  = 49u;                                  /* LEN */
+    buf[0]  = 57u;                                  /* LEN */
     buf[1]  = CMD_STATUS_BASE | device_addr;
     buf[2]  = (uint8_t)(snapshot.control_budget_us >> 8);
     buf[3]  = (uint8_t)(snapshot.control_budget_us & 0xFFu);
@@ -358,12 +358,20 @@ static void send_timing_status_reply(void)
     buf[47] = (uint8_t)(snapshot.uptime_ms >> 16);
     buf[48] = (uint8_t)(snapshot.uptime_ms >> 8);
     buf[49] = (uint8_t)(snapshot.uptime_ms & 0xFFu);
+    buf[50] = (uint8_t)(snapshot.uart_rx_overflow_count >> 24);
+    buf[51] = (uint8_t)(snapshot.uart_rx_overflow_count >> 16);
+    buf[52] = (uint8_t)(snapshot.uart_rx_overflow_count >> 8);
+    buf[53] = (uint8_t)(snapshot.uart_rx_overflow_count & 0xFFu);
+    buf[54] = (uint8_t)(snapshot.adc_overrun_count >> 24);
+    buf[55] = (uint8_t)(snapshot.adc_overrun_count >> 16);
+    buf[56] = (uint8_t)(snapshot.adc_overrun_count >> 8);
+    buf[57] = (uint8_t)(snapshot.adc_overrun_count & 0xFFu);
 
-    crc = crc16_ccitt(buf, 50);
-    buf[50] = (uint8_t)(crc >> 8);
-    buf[51] = (uint8_t)(crc & 0xFFu);
+    crc = crc16_ccitt(buf, 58);
+    buf[58] = (uint8_t)(crc >> 8);
+    buf[59] = (uint8_t)(crc & 0xFFu);
 
-    send_frame(buf, 52);
+    send_frame(buf, 60);
 }
 
 static void send_ack_reply(uint8_t subcmd, uint8_t result, uint16_t detail)

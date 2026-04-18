@@ -11,6 +11,8 @@
 #include "M2003.h"
 #include "timing.h"
 #include "irq_util.h"
+#include "app_uart.h"
+#include "app_adc.h"
 
 #define TIMING_TIMER_FREQ   1000000UL
 #define TIMING_TIMER_MASK   0x00FFFFFFUL
@@ -242,4 +244,7 @@ void timing_get_snapshot(timing_snapshot_t *snapshot)
     snapshot->protocol_backlog_max = protocol_backlog_max;
     snapshot->uptime_ms = (uint32_t)(uptime_now_us / 1000ULL);
     irq_restore(irq_state);
+
+    snapshot->uart_rx_overflow_count = uart_rx_overflow_count();
+    snapshot->adc_overrun_count = adc_overrun_count();
 }

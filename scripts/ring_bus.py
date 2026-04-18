@@ -280,6 +280,8 @@ class TimingStatus:
     protocol_poll_max_us: int
     protocol_backlog_max: int
     uptime_ms: int
+    uart_rx_overflow_count: int = 0
+    adc_overrun_count: int = 0
 
     @property
     def control_last_pct(self) -> float:
@@ -672,7 +674,7 @@ class RingClientV2:
             remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
             payload = self._recv_frame(timeout_ms=remaining_ms)
             cmd = payload[0] if payload else 0
-            if cmd == expected_cmd and len(payload) in (33, 49):
+            if cmd == expected_cmd and len(payload) in (33, 49, 53, 57):
                 return self._parse_timing_status(payload)
             self._trace("skip", bytes([cmd]))
 
@@ -784,8 +786,15 @@ class RingClientV2:
                 uptime_ms=struct.unpack(">I", payload[29:33])[0],
             )
 
-        if len(payload) != 49:
+        if len(payload) not in (49, 53, 57):
             raise RingError(f"timing reply wrong size ({len(payload)} bytes): {payload.hex(' ')}")
+
+        uart_rx_overflow_count = (
+            struct.unpack(">I", payload[49:53])[0] if len(payload) >= 53 else 0
+        )
+        adc_overrun_count = (
+            struct.unpack(">I", payload[53:57])[0] if len(payload) >= 57 else 0
+        )
 
         return TimingStatus(
             address=address,
@@ -807,6 +816,8 @@ class RingClientV2:
             protocol_poll_max_us=struct.unpack(">H", payload[41:43])[0],
             protocol_backlog_max=struct.unpack(">H", payload[43:45])[0],
             uptime_ms=struct.unpack(">I", payload[45:49])[0],
+            uart_rx_overflow_count=uart_rx_overflow_count,
+            adc_overrun_count=adc_overrun_count,
         )
 
     def broadcast_duty(self, duties: Iterable[int]) -> None:
@@ -899,7 +910,9 @@ def format_timing_status(status: TimingStatus) -> str:
         f"uart={status.uart_last_us}us uart_max={status.uart_max_us}us "
         f"adc={status.adc_last_us}us adc_max={status.adc_max_us}us "
         f"proto_poll={status.protocol_poll_last_us}us proto_poll_max={status.protocol_poll_max_us}us "
-        f"proto_backlog_max={status.protocol_backlog_max} uptime_ms={status.uptime_ms}"
+        f"proto_backlog_max={status.protocol_backlog_max} uptime_ms={status.uptime_ms} "
+        f"uart_rx_overflow={status.uart_rx_overflow_count} "
+        f"adc_overrun={status.adc_overrun_count}"
     )
 
 

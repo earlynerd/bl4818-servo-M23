@@ -15,5 +15,6 @@ void uart_tx_flush(void);
 void uart_rx_flush(void);
 uint8_t uart_rx_overflowed(void);
 void uart_rx_clear_overflow(void);
+uint32_t uart_rx_overflow_count(void);
 
 #endif /* UART_H */

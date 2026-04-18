@@ -15,6 +15,9 @@ typedef struct {
 void adc_init(void);
 void adc_irq_enable(void);
 void adc_consume_snapshot(adc_snapshot_t *snapshot);
+void adc_calibrate_current_offset(uint16_t settle_samples);
+uint16_t adc_get_current_offset(void);
+uint32_t adc_overrun_count(void);
 uint16_t adc_raw_current(void);
 uint16_t adc_raw_voltage(void);
 uint32_t adc_current_raw_to_ma(uint16_t raw);

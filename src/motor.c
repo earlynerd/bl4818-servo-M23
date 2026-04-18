@@ -48,6 +48,10 @@ static int32_t       prev_enc_position;
 static int32_t       vel_filt_q8;       /* IIR-filtered velocity in Q8 */
 static uint8_t       vel_initialized;
 
+static int32_t       last_enc_pos_seen;   /* encoder position observed at last motion */
+static uint32_t      enc_stall_samples;   /* PWM samples since last observed motion */
+static uint8_t       adc_silent_ticks;    /* consecutive fast ticks with zero ADC samples */
+
 static int32_t       last_applied_duty;  /* for bumpless transfer on mode switch */
 static uint8_t       coasting;           /* 1 = phases floating, skip duty dispatch */
 static int32_t       coast_trip_pos;     /* auto-coast position threshold */
@@ -86,8 +90,12 @@ static int32_t estimate_velocity(uint32_t elapsed_samples)
         return 0;
     }
 
+    /* A healthy fast loop accumulates several ADC samples between velocity
+     * ticks.  Zero here means ADC has gone silent — motor_tick_control's
+     * FAULT_ADC_TIMEOUT detector should have caught it first; treat this
+     * as a belt-and-braces fallback rather than silently dividing. */
     if (elapsed_samples == 0u)
-        elapsed_samples = 1u;
+        return measured_velocity;
 
     /* RPM = delta * 60 * PWM_FREQ_HZ / (ENCODER_COUNTS_PER_REV * elapsed)
      *
@@ -216,6 +224,9 @@ void motor_init(void)
     coasting = 0;
     coast_armed = 0;
     current_setpoint = 0;
+    last_enc_pos_seen = 0;
+    enc_stall_samples = 0u;
+    adc_silent_ticks = 0u;
     reset_scheduler_state();
 
     pid_init(&vel_pid,
@@ -588,6 +599,23 @@ uint16_t motor_tick_control(void)
     avg_current_ma = adc_current_raw_to_ma(adc_snapshot.avg_current_raw);
     peak_current_ma = adc_current_raw_to_ma(adc_snapshot.peak_current_raw);
 
+    /* ADC-silence detection — cheap: a single counter increment or reset per
+     * fast tick.  Fires only when the motor is actively being driven, so
+     * bench idle with paused PWM triggers won't false-trip. */
+    if (elapsed_samples == 0u) {
+        if (state == MOTOR_RUN && !coasting) {
+            if (adc_silent_ticks < 0xFFu)
+                adc_silent_ticks++;
+            if (adc_silent_ticks >= ADC_SILENCE_FAULT_TICKS) {
+                pwm_fault_brake();
+                enter_fault(FAULT_ADC_TIMEOUT);
+                return 0u;
+            }
+        }
+    } else {
+        adc_silent_ticks = 0u;
+    }
+
     if (!current_filt_initialized) {
         current_filt_q8 = (int32_t)(avg_current_ma << PID_SCALE_SHIFT);
         current_filt_initialized = 1u;
@@ -626,9 +654,29 @@ uint16_t motor_tick_control(void)
             enter_fault(FAULT_OVERCURRENT);
             return elapsed_samples;
         }
+
+        /* Encoder-alive check: if we are actively driving the bridge with
+         * enough duty that motion is expected, the encoder position must
+         * change within ENCODER_STALL_TIME_MS or we assume the SSI bus has
+         * failed.  Runs at fast-tick rate but only a compare + add. */
+        {
+            int32_t abs_duty = (last_applied_duty < 0) ? -last_applied_duty : last_applied_duty;
+            if (abs_duty >= ENCODER_STALL_MIN_DUTY) {
+                uint32_t next = enc_stall_samples + elapsed_samples;
+                enc_stall_samples = (next < enc_stall_samples) ? 0xFFFFFFFFu : next;
+                if (enc_stall_samples >= ENCODER_STALL_FAULT_SAMPLES) {
+                    pwm_fault_brake();
+                    enter_fault(FAULT_ENCODER_TIMEOUT);
+                    return elapsed_samples;
+                }
+            } else {
+                enc_stall_samples = 0u;
+            }
+        }
     } else {
         overcurrent_samples = 0u;
         peak_overcurrent_samples = 0u;
+        enc_stall_samples = 0u;
     }
 
     velocity_elapsed_samples += elapsed_samples;
@@ -641,6 +689,14 @@ uint16_t motor_tick_control(void)
         encoder_poll();
         measured_velocity = estimate_velocity(velocity_elapsed_samples);
         velocity_elapsed_samples = 0u;
+
+        {
+            int32_t enc_now = encoder_get_position();
+            if (enc_now != last_enc_pos_seen) {
+                last_enc_pos_seen = enc_now;
+                enc_stall_samples = 0u;
+            }
+        }
 
         /* Coast detection follows the encoder sampling cadence. Bit-banged SSI
          * reads are too expensive to do at the current-loop rate. */

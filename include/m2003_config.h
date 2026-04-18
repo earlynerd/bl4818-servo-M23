@@ -125,6 +125,20 @@
 #define POS_MAX_VEL_RPM     2000    /* position loop velocity clamp */
 #define POS_INT_MAX_RPM     4000    /* position integral velocity clamp (RPM) */
 
+/* ── Encoder Health ──────────────────────────────────────────────────── */
+/* If motor is being driven with meaningful duty for this long without any
+ * encoder position change, assume the SSI bus has died and fault out.
+ * Below ENCODER_STALL_MIN_DUTY we allow stasis (hold-at-target is normal). */
+#define ENCODER_STALL_TIME_MS        1000u
+#define ENCODER_STALL_MIN_DUTY       (PWM_MAX_DUTY / 8)    /* 12.5% — real drive, not a rest-hold */
+#define ENCODER_STALL_FAULT_SAMPLES  HZ_TICKS_FROM_MS(PWM_FREQ_HZ, ENCODER_STALL_TIME_MS)
+
+/* ── ADC Health ───────────────────────────────────────────────────────── */
+/* ADC is hardware-triggered at PWM rate (20 kHz), so every fast tick
+ * should normally see several samples.  If we see zero samples for this
+ * many consecutive fast ticks, the ADC/PWM trigger path has failed. */
+#define ADC_SILENCE_FAULT_TICKS      20u    /* 4 ms at CURRENT_LOOP_HZ = 5 kHz */
+
 /* ── Strike Defaults ──────────────────────────────────────────────────── */
 #define STRIKE_HOME_OFFSET_DEFAULT      1024    /* encoder counts above drum surface */
 #define STRIKE_COAST_DISTANCE_DEFAULT   300     /* cut power this far from drum (counts) */

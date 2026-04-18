@@ -10,9 +10,11 @@ typedef enum {
 } motor_state_t;
 
 typedef enum {
-    FAULT_NONE          = 0,
-    FAULT_OVERCURRENT   = 1,
-    FAULT_HALL_INVALID  = 2
+    FAULT_NONE             = 0,
+    FAULT_OVERCURRENT      = 1,
+    FAULT_HALL_INVALID     = 2,
+    FAULT_ENCODER_TIMEOUT  = 3,
+    FAULT_ADC_TIMEOUT      = 4
 } fault_code_t;
 
 typedef enum {

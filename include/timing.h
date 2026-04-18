@@ -22,6 +22,8 @@ typedef struct {
     uint16_t protocol_poll_max_us;
     uint16_t protocol_backlog_max;
     uint32_t uptime_ms;
+    uint32_t uart_rx_overflow_count;
+    uint32_t adc_overrun_count;
 } timing_snapshot_t;
 
 void timing_init(void);

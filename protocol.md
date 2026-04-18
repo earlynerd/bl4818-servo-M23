@@ -218,7 +218,7 @@ COASTING, or CATCHING, firmware only accepts it once
 aborted and a new strike attempt starts immediately, and the `ACK_REPLY`
 reports `OK_RETRIGGERED`.
 
-`QUERY_TIMING` replies with the same type `0x40 + addr` and 49 payload bytes:
+`QUERY_TIMING` replies with the same type `0x40 + addr` and 57 payload bytes:
 
 ```
 [type]
@@ -237,6 +237,8 @@ reports `OK_RETRIGGERED`.
 [proto_poll_max_hi] [proto_poll_max_lo]
 [proto_backlog_hi] [proto_backlog_lo]
 [uptime_b3] [uptime_b2] [uptime_b1] [uptime_b0]
+[uart_rx_overflow_b3] [uart_rx_overflow_b2] [uart_rx_overflow_b1] [uart_rx_overflow_b0]
+[adc_overrun_b3] [adc_overrun_b2] [adc_overrun_b1] [adc_overrun_b0]
 ```
 
 All timing fields are in microseconds except `uptime`, which is milliseconds
@@ -248,12 +250,22 @@ and `adc_*` measure the corresponding ISR wall times. `proto_poll_*` measures
 foreground `protocol_poll()` wall time. The `proto_backlog` field is the
 maximum number of `protocol_tick()` periods that were pending before the main
 loop caught up, which is a direct signal that foreground work is starting to
-miss its schedule.
+miss its schedule. `uart_rx_overflow` counts every UART1 buffer-overflow event
+(hardware FIFO or software ring); nonzero values mean the ring cable, baud
+setting, or UART ISR latency is on the edge of what the link can sustain.
+`adc_overrun` counts every ADC conversion whose previous sample had not yet
+been consumed when it landed; nonzero means ADC ISR latency is starving the
+pipeline and current/voltage samples are being silently dropped.
 
 ## Persistent Settings
 
-The firmware reserves the last 512-byte APROM page for a CRC-protected
-settings block that is loaded at boot.
+The firmware reserves the last two 512-byte APROM pages for a CRC-protected
+settings block that is loaded at boot. The two pages are used as a
+ping-pong pair with a monotonic sequence number in each record: on save,
+firmware writes the record to whichever page is not currently live, then
+adopts the new page on success. If power is lost mid-write, the previously
+live page is untouched and the device boots on the earlier record. This
+also doubles the flash-write endurance of the persist region.
 
 Persisted items:
 

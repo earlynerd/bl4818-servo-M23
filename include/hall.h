@@ -21,4 +21,9 @@ void hall_count_reset(void);
 #define HALL_POLL_INVALID    2
 uint8_t hall_poll(void);
 
+/* Called periodically from a slower context to prevent the 24-bit timing
+ * baseline from aliasing after long idle.  Cheap: one register read plus an
+ * IRQ-protected compare in the common path. */
+void hall_refresh_baseline(void);
+
 #endif /* HALL_H */

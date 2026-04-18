@@ -17,6 +17,12 @@ static const uint8_t hall_to_sector[8] = { 0xFF, 0, 2, 1, 4, 5, 3, 0xFF };
 #define HALL_PORTB_MASK (BIT4 | BIT5)
 #define HALL_PORTC_MASK BIT14
 
+/* Push the baseline forward once the age exceeds this threshold so the
+ * 24-bit delta in hall_process_transition can never alias across a wrap
+ * (wrap period is 2^24 counts = 16.777 s at 1 MHz).  2 s keeps us far from
+ * the wrap while being well above any plausible spin period. */
+#define HALL_BASELINE_REFRESH_AGE_COUNTS  (HALL_TIMER_FREQ * 2UL)
+
 static uint8_t prev_hall;
 static int8_t  detected_direction;
 static int32_t hall_position;
@@ -147,6 +153,25 @@ int32_t hall_count(void)     { return hall_position; }
 void hall_count_reset(void) { hall_position = 0; }
 uint32_t hall_period(void)  { return transition_period; }
 uint8_t hall_sector(void)   { return hall_to_sector[hall_read() & 0x07u]; }
+
+void hall_refresh_baseline(void)
+{
+    uint32_t now = TIMER_GetCounter(TIMER1) & HALL_TIMER_MASK;
+    uint32_t age;
+    uint32_t primask;
+
+    primask = irq_save();
+    age = (now - last_transition_time) & HALL_TIMER_MASK;
+    if (age >= HALL_BASELINE_REFRESH_AGE_COUNTS) {
+        /* No transitions for a while; advance the baseline so a future
+         * transition's delta can't be aliased down to a chatter-reject
+         * value after one wrap has elapsed.  The stored period is also
+         * invalidated so consumers know the spin rate is unknown. */
+        last_transition_time = now;
+        transition_period = 0xFFFFFFFFu;
+    }
+    irq_restore(primask);
+}
 
 void GPB_IRQHandler(void)
 {

@@ -15,6 +15,7 @@ static volatile uint8_t rx_buf[UART_RX_BUF_SIZE];
 static volatile uint16_t rx_head = 0;
 static volatile uint16_t rx_tail = 0;
 static volatile uint8_t rx_overflow = 0;
+static volatile uint32_t rx_overflow_count = 0;
 
 static volatile uint8_t tx_buf[UART_TX_BUF_SIZE];
 static volatile uint16_t tx_head = 0;
@@ -49,6 +50,7 @@ void UART1_IRQHandler(void)
 
     if (status & UART_INTSTS_BUFERRINT_Msk) {
         rx_overflow = 1u;
+        rx_overflow_count++;
         UART1->FIFOSTS = UART_FIFOSTS_RXOVIF_Msk | UART_FIFOSTS_TXOVIF_Msk;
     }
 
@@ -69,6 +71,7 @@ void UART1_IRQHandler(void)
                 rx_head = next;
             } else {
                 rx_overflow = 1u;
+                rx_overflow_count++;
             }
         }
     }
@@ -212,4 +215,13 @@ void uart_rx_clear_overflow(void)
     uint32_t primask = irq_save();
     rx_overflow = 0u;
     irq_restore(primask);
+}
+
+uint32_t uart_rx_overflow_count(void)
+{
+    uint32_t value;
+    uint32_t primask = irq_save();
+    value = rx_overflow_count;
+    irq_restore(primask);
+    return value;
 }

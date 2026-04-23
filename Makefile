@@ -33,6 +33,7 @@ SRCS = src/main.c \
        src/commutation.c \
        src/hall.c \
        src/encoder.c \
+       src/indicator.c \
        src/timing.c \
        src/persist.c \
        src/strike.c \

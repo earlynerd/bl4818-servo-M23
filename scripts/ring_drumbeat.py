@@ -3,10 +3,25 @@
 Exercise multiple strike actuators on the ring by homing them
 and then tapping out a drum pattern.
 
+Patterns come in two flavors:
+  * drumline exercises (2-4 voice) that just treat the actuators as
+    anonymous sticks (L/R/F) and test rudiments / rolls.
+  * traditional drumset beats (4-6 voice) where each voice index has
+    an expected physical role (kick, snare, hi-hat, tom, crash).
+    The script prints the voice legend on start so you know which
+    object to place under each actuator.
+
+Each step in a pattern may be:
+    int         -> fire that voice
+    [i, j, ...] -> fire those voices simultaneously (chord)
+    None        -> rest (silence for that step)
+
 Examples:
     python ring_drumbeat.py
     python ring_drumbeat.py --pattern paradiddle --beats 32 --interval-ms 120
-    python ring_drumbeat.py -p COM7 --current 1800 --pattern alternate
+    python ring_drumbeat.py -p COM7 --current 1800 --pattern rock-basic
+    python ring_drumbeat.py --pattern full-kit --beats 32 --interval-ms 180
+    python ring_drumbeat.py --list-patterns
 """
 
 from __future__ import annotations
@@ -14,6 +29,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+from dataclasses import dataclass, field
 from typing import Iterable
 
 from ring_bus import (
@@ -26,21 +42,168 @@ from ring_bus import (
 )
 
 
-PATTERNS: dict[str, list[int]] = {
-    # Values are indices into the available actuator list; out-of-range
-    # indices are silently skipped so a 3-voice pattern on 2 devices just
-    # drops the missing voice.
+Step = "int | list[int] | None"
+
+
+@dataclass
+class Pattern:
+    """A drum pattern plus the expected physical role of each voice."""
+    steps: list  # list[int | list[int] | None]
+    voices: list  # list[str] — description per voice index
+    description: str = ""
+
+    @property
+    def voice_count(self) -> int:
+        return len(self.voices)
+
+
+def _p(steps, voices, description=""):
+    return Pattern(steps=steps, voices=voices, description=description)
+
+
+# Voice-role shorthands used in the traditional kit beats.
+_KIT4 = ["kick", "snare", "hat", "crash"]
+_KIT5 = ["kick", "snare", "hat", "tom", "crash"]
+_KIT6 = ["kick", "snare-A", "snare-B", "hat", "tom", "crash"]
+_KIT10 = ["kick", "snare-A", "snare-B", "hat", "tom", "crash"]
+
+
+PATTERNS: dict[str, Pattern] = {
+    # ------------------------------------------------------------------
+    # Drumline exercises — anonymous voices (L / R / F / vN)
+    # ------------------------------------------------------------------
 
     # 2-voice
-    "alternate":   [0, 1, 0, 1, 0, 1, 0, 1],
-    "double":      [0, 0, 1, 1, 0, 0, 1, 1],
-    "paradiddle":  [0, 1, 0, 0, 1, 0, 1, 1],
-    "roll":        [0, 1] * 8,                                       # packed tightly; expect NOT_READY rejects
+    "alternate":   _p([0, 1] * 4,
+                       voices=["L", "R"],
+                       description="Straight single-stroke alternation"),
+    "double":      _p([0, 0, 1, 1] * 2,
+                       voices=["L", "R"],
+                       description="Double-stroke (LLRR) roll"),
+    "paradiddle":  _p([0, 1, 0, 0, 1, 0, 1, 1],
+                       voices=["L", "R"],
+                       description="Single paradiddle (LRLL RLRR)"),
+    "roll":        _p([0, 1] * 8,
+                       voices=["L", "R"],
+                       description="Tight roll; expect NOT_READY rejects at low intervals"),
 
     # 3-voice
-    "triplet":     [0, 1, 2, 0, 1, 2],                               # even round-robin across all three
-    "cascade":     [0, 1, 2, 2, 1, 0],                               # up-then-down fill across the kit
-    "tripplediddle": [0, 1, 2, 0, 0, 1, 2, 0, 1, 1, 2, 0, 1, 2, 2],  # rotates the "diddle" through each voice
+    "triplet":      _p([0, 1, 2] * 2,
+                        voices=["L", "R", "F"],
+                        description="Even round-robin triplet across all three voices"),
+    "cascade":      _p([0, 1, 2, 2, 1, 0],
+                        voices=["L", "R", "F"],
+                        description="Up-then-down fill across the kit"),
+    "tripplediddle": _p([0, 1, 2, 0, 0, 1, 2, 0, 1, 1, 2, 0, 1, 2, 2],
+                        voices=["L", "R", "F"],
+                        description="Rotating diddle across three voices"),
+
+    # 4-voice exercises (not kit-mapped)
+    "quartet":     _p([0, 1, 2, 3] * 2,
+                       voices=["v0", "v1", "v2", "v3"],
+                       description="Even round-robin across four voices"),
+    "cascade-4":   _p([0, 1, 2, 3, 3, 2, 1, 0],
+                       voices=["v0", "v1", "v2", "v3"],
+                       description="Up-then-down across four voices"),
+    "tetradiddle": _p([0, 1, 0, 0, 1, 0, 1, 1, 2, 3, 2, 2, 3, 2, 3, 3],
+                       voices=["v0", "v1", "v2", "v3"],
+                       description="Paradiddle rotated across two pairs"),
+
+    # ------------------------------------------------------------------
+    # 4-voice traditional kit: kick / snare / hat / crash
+    # ------------------------------------------------------------------
+
+    "rock-basic": _p(
+        [[0, 2], [2], [1, 2], [2], [0, 2], [2], [1, 2], [2]],
+        voices=_KIT4,
+        description="Classic 8th-note rock: kick 1&3, snare 2&4, hat every 8th",
+    ),
+    "backbeat": _p(
+        [[0, 2], [1, 2], [0, 2], [1, 2]],
+        voices=_KIT4,
+        description="Quarter-note backbeat; slower and easy to hear",
+    ),
+    "four-on-floor": _p(
+        [[0, 2], [2], [0, 1, 2], [2], [0, 2], [2], [0, 1, 2], [2]],
+        voices=_KIT4,
+        description="Disco/house: kick on every quarter, snare on 2 & 4, hats on 8ths",
+    ),
+    "waltz": _p(
+        [[0, 2], [2], [1, 2], [2], [1, 2], [2]],
+        voices=_KIT4,
+        description="3/4 waltz: kick on 1, snare on 2 & 3, hat on every 8th",
+    ),
+    "halftime": _p(
+        [[0, 2], [2], [2], [2], [1, 2], [2], [2], [2]],
+        voices=_KIT4,
+        description="Half-time feel: kick on 1, snare only on 3",
+    ),
+    "shuffle": _p(
+        # 12 steps = 1 bar at triplet resolution; play 1st & 3rd of each triplet
+        [[0, 2], None, [2], [2], None, [2],
+         [1, 2], None, [2], [2], None, [2]],
+        voices=_KIT4,
+        description="Triplet-feel shuffle (blues/swing). Uses rests between triplets",
+    ),
+
+    # ------------------------------------------------------------------
+    # 5-voice traditional kit: + tom
+    # ------------------------------------------------------------------
+
+    "rock-fill": _p(
+        # 3 bars of rock + 1 bar tom/crash fill = 32 eighth notes
+        [[0, 2], [2], [1, 2], [2], [0, 2], [2], [1, 2], [2]] * 3 +
+        [1, 1, 3, 3, [3, 4], None, [0, 4], None],
+        voices=_KIT5,
+        description="Rock beat for 3 bars then tom-and-crash fill",
+    ),
+    "tom-groove": _p(
+        [[0, 2], [2], [1, 2], 3, [0, 2], 3, [1, 2], [2]],
+        voices=_KIT5,
+        description="Rock feel with tom replacing offbeat hats as an accent",
+    ),
+    "funk": _p(
+        [[0, 2], [2], [2], [2], [1, 2], [2], [2], [2, 3],
+         [0, 2], [0, 2], [2], [2], [1, 2], [2], [2], [2, 3]],
+        voices=_KIT5,
+        description="Syncopated funk at 16ths; kick doubles and a tom ghost on 'a' of 4",
+    ),
+    "bossa": _p(
+        [[0, 2], [2], [2, 1], [2], [0, 2], [2], [2, 3], [2],
+         [0, 2], [2], [2, 1], [2], [0, 2], [2], [2, 3], [2]],
+        voices=_KIT5,
+        description="Latin bossa feel: steady kick, snare & tom on the 'and' of 2 / 3",
+    ),
+
+    # ------------------------------------------------------------------
+    # 6-voice traditional kit: + a second snare voice (fat snare / ghost)
+    # ------------------------------------------------------------------
+
+    "ghost-rock": _p(
+        [[0, 3], 2, [1, 3], 2, [0, 3], 2, [1, 3], [2, 3]],
+        voices=_KIT6,
+        description="Rock beat with ghost notes on the secondary snare",
+    ),
+    "double-snare": _p(
+        [[0, 3], [3], [1, 2, 3], [3], [0, 3], [3], [1, 2, 3], [3]],
+        voices=_KIT6,
+        description="Rock beat where both snares strike together for a fat backbeat",
+    ),
+    "full-kit": _p(
+        # 2 bars, 8ths: ghost-rock feel for bar 1, tom & crash fill end of bar 2
+        [[0, 3], 2, [1, 3], [3, 2], [0, 3], 2, [1, 3], [3],
+         [0, 3], 2, [1, 3], [3, 2], [0, 3], [4],  [1, 2, 4], [3, 5]],
+        voices=_KIT6,
+        description="Full-kit 2-bar groove: ghost snare embellishments, ends on crash+snare",
+    ),
+    # ------------------------------------------------------------------
+    # 10-voice traditional kit: + a second snare voice (fat snare / ghost)
+    # ------------------------------------------------------------------
+    "arpeggio": _p(
+         [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0],
+        voices=_KIT10,
+        description="arp? arp arp arp!",
+    ),
 }
 
 
@@ -88,54 +251,102 @@ def wait_all_idle(client: RingClientV2, addresses: Iterable[int], timeout_ms: in
             time.sleep(poll_s)
 
 
+def _normalize_step(step) -> list[int]:
+    """Turn a step value into a list of voice indices to strike (possibly empty)."""
+    if step is None:
+        return []
+    if isinstance(step, int):
+        return [step]
+    return list(step)
+
+
 def play_pattern(
     client: RingClientV2,
     addresses: list[int],
-    pattern: list[int],
+    pattern: Pattern,
     beats: int,
     interval_ms: int,
     current_ma: int,
 ) -> None:
     interval_s = interval_ms / 1000.0
+    steps = pattern.steps
     rejects = 0
     accepts = 0
     start = time.monotonic()
     next_time = start
 
     for beat in range(beats):
-        slot = pattern[beat % len(pattern)]
-        if slot >= len(addresses):
-            # Pattern references a voice we don't have; skip it
-            next_time += interval_s
-            continue
-        addr = addresses[slot]
+        raw = steps[beat % len(steps)]
+        voices = _normalize_step(raw)
 
-        # Busy-wait the last few ms for tight timing
+        # Wait until the next beat time before firing any voices, so the
+        # chord lands together rather than spreading across the previous
+        # inter-beat gap.
         now = time.monotonic()
         sleep_for = next_time - now
         if sleep_for > 0:
             time.sleep(sleep_for)
 
-        reply = client.strike(addr, current_ma, reply_mode=REPLY_MODE_ACK)
-        tag = "?"
-        if isinstance(reply, CommandAck):
-            if reply.accepted:
-                accepts += 1
-                tag = "OK" if reply.result == 0 else "RETRIG"
+        elapsed_ms = (time.monotonic() - start) * 1000.0
+
+        if not voices:
+            print(f"  beat {beat:3d}  t={elapsed_ms:7.1f}ms  (rest)")
+            next_time += interval_s
+            continue
+
+        tags: list[str] = []
+        for v in voices:
+            if v >= len(addresses):
+                tags.append(f"v{v}:SKIP")
+                continue
+            addr = addresses[v]
+            reply = client.strike(addr, current_ma, reply_mode=REPLY_MODE_ACK)
+            if isinstance(reply, CommandAck):
+                if reply.accepted:
+                    accepts += 1
+                    tag = "OK" if reply.result == 0 else "RETRIG"
+                else:
+                    rejects += 1
+                    tag = reply.result_name
             else:
                 rejects += 1
-                tag = reply.result_name
-        else:
-            rejects += 1
-            tag = "NO-ACK"
+                tag = "NO-ACK"
+            tags.append(f"{addr}:{tag}")
 
-        elapsed_ms = (time.monotonic() - start) * 1000.0
-        print(f"  beat {beat:3d}  t={elapsed_ms:7.1f}ms  addr={addr}  {tag}")
+        print(f"  beat {beat:3d}  t={elapsed_ms:7.1f}ms  [{' '.join(tags)}]")
         next_time += interval_s
 
     total_ms = (time.monotonic() - start) * 1000.0
     print(f"\nPlayed {beats} beats in {total_ms:.1f}ms "
           f"(target {beats * interval_ms}ms)  accepted={accepts}  rejected={rejects}")
+
+
+def print_voice_layout(pattern: Pattern, addresses: list[int]) -> None:
+    """Tell the user which physical object to place under each actuator."""
+    print("  Role map:")
+    for idx, role in enumerate(pattern.voices):
+        if idx < len(addresses):
+            print(f"    addr {addresses[idx]}  ->  {role}")
+        else:
+            print(f"    (missing)    ->  {role}  [no actuator available; will be silent]")
+    if len(addresses) > len(pattern.voices):
+        extra = addresses[len(pattern.voices):]
+        print(f"    extra actuators not used by this pattern: {extra}")
+
+
+def list_patterns() -> None:
+    """Print every pattern with its voice count and description."""
+    # Group by voice count for readability.
+    by_count: dict[int, list[tuple[str, Pattern]]] = {}
+    for name, pat in PATTERNS.items():
+        by_count.setdefault(pat.voice_count, []).append((name, pat))
+    for count in sorted(by_count):
+        print(f"\n  {count}-voice patterns:")
+        for name, pat in sorted(by_count[count]):
+            voices = "/".join(pat.voices)
+            print(f"    {name:<15}  [{voices}]")
+            if pat.description:
+                print(f"                     {pat.description}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -157,7 +368,13 @@ def main(argv: list[str] | None = None) -> int:
                     help="Status polling interval in ms (default: 20)")
     ap.add_argument("--skip-home", action="store_true",
                     help="Assume devices are already homed (will still verify)")
+    ap.add_argument("--list-patterns", action="store_true",
+                    help="Print every pattern with its voice roles and exit")
     args = ap.parse_args(argv)
+
+    if args.list_patterns:
+        list_patterns()
+        return 0
 
     port = args.port or auto_detect_port()
     if not port:
@@ -182,6 +399,11 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"Requested address {a} not present on ring (have {available})", file=sys.stderr)
                 return 2
 
+        pattern = PATTERNS[args.pattern]
+
+        if len(addresses) < pattern.voice_count:
+            print(f"Note: pattern '{args.pattern}' wants {pattern.voice_count} voice(s) "
+                  f"but only {len(addresses)} actuator(s) selected — higher voices will be silent.")
         if len(addresses) < 2:
             print(f"Note: only {len(addresses)} actuator(s) selected — pattern will collapse to that voice.")
 
@@ -196,10 +418,15 @@ def main(argv: list[str] | None = None) -> int:
 
         print(f"\nPlaying '{args.pattern}' — {args.beats} beats at {args.interval_ms}ms "
               f"on addresses {addresses}, {args.current_ma}mA")
+        if pattern.description:
+            print(f"  {pattern.description}")
+        print_voice_layout(pattern, addresses)
+        print()
+
         play_pattern(
             client,
             addresses=addresses,
-            pattern=PATTERNS[args.pattern],
+            pattern=pattern,
             beats=args.beats,
             interval_ms=args.interval_ms,
             current_ma=args.current_ma,

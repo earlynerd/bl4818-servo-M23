@@ -48,12 +48,13 @@
 #define ENCODER_COUNTS_PER_REV  16384   /* 14-bit absolute encoder */
 
 /* ── Loop Rates ──────────────────────────────────────────────────────── */
-#define CURRENT_LOOP_HZ     5000   /* fastest software loop: ADC/protection/current PI */
-#define VELOCITY_LOOP_HZ    2500    /* velocity estimator + velocity PID               */
-#define POSITION_LOOP_HZ    1250    /* position PID (outermost)                        */
-#define STRIKE_LOOP_HZ      1000    /* strike state machine                            */
-#define PROTOCOL_TICK_HZ    1000    /* serial parser timeout aging                     */
+#define CURRENT_LOOP_HZ     6000   /* fastest software loop: ADC/protection/current PI */
+#define VELOCITY_LOOP_HZ    1500    /* velocity estimator + velocity PID               */
+#define POSITION_LOOP_HZ    1000    /* position PID (outermost)                        */
+#define STRIKE_LOOP_HZ      500    /* strike state machine                            */
+#define PROTOCOL_TICK_HZ    500    /* serial parser timeout aging                     */
 #define PROTOCOL_FRAME_TIMEOUT_MS 20u
+#define INDICATOR_TICK_HZ   100u    /* status LED pattern step rate                    */
 #define ENCODER_POLL_HZ     VELOCITY_LOOP_HZ /* bit-banged SSI read rate            */
 #define CONTROL_LOOP_HZ     CURRENT_LOOP_HZ  /* SysTick fast tick budget/reporting   */
 
@@ -79,6 +80,10 @@
 
 #if PROTOCOL_TICK_HZ > CONTROL_LOOP_HZ
 #error "PROTOCOL_TICK_HZ must be <= CONTROL_LOOP_HZ"
+#endif
+
+#if INDICATOR_TICK_HZ > CONTROL_LOOP_HZ
+#error "INDICATOR_TICK_HZ must be <= CONTROL_LOOP_HZ"
 #endif
 
 #if ENCODER_POLL_HZ != VELOCITY_LOOP_HZ

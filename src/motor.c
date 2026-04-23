@@ -51,6 +51,7 @@ static uint8_t       vel_initialized;
 static int32_t       last_enc_pos_seen;   /* encoder position observed at last motion */
 static uint32_t      enc_stall_samples;   /* PWM samples since last observed motion */
 static uint8_t       adc_silent_ticks;    /* consecutive fast ticks with zero ADC samples */
+static uint16_t      idle_encoder_divider;/* velocity ticks skipped while not in MOTOR_RUN */
 
 static int32_t       last_applied_duty;  /* for bumpless transfer on mode switch */
 static uint8_t       coasting;           /* 1 = phases floating, skip duty dispatch */
@@ -220,6 +221,7 @@ void motor_init(void)
     prev_enc_position = 0;
     vel_filt_q8 = 0;
     vel_initialized = 0;
+    idle_encoder_divider = 0;
     last_applied_duty = 0;
     coasting = 0;
     coast_armed = 0;
@@ -686,7 +688,27 @@ uint16_t motor_tick_control(void)
         if (dropped_updates != 0u)
             timing_note_velocity_drops(dropped_updates);
 
-        encoder_poll();
+        /* While running, poll the encoder every velocity tick as before.
+         * When idle or faulted, the SSI CSn line is shared with an external
+         * status LED — holding CSn asserted between frames breaks the MT6701
+         * and polling continuously defeats the LED — so slow the poll to
+         * ~20 Hz so multi-turn unwrap still tracks hand-spun motion while
+         * the indicator owns the pin the rest of the time. */
+        {
+            uint8_t do_poll = 1u;
+            if (state != MOTOR_RUN) {
+                const uint16_t idle_period = (uint16_t)(VELOCITY_LOOP_HZ / 20u);
+                if (++idle_encoder_divider < idle_period) {
+                    do_poll = 0u;
+                } else {
+                    idle_encoder_divider = 0u;
+                }
+            } else {
+                idle_encoder_divider = 0u;
+            }
+            if (do_poll)
+                encoder_poll();
+        }
         measured_velocity = estimate_velocity(velocity_elapsed_samples);
         velocity_elapsed_samples = 0u;
 

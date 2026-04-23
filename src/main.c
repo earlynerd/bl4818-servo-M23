@@ -11,6 +11,7 @@
 #include "app_adc.h"
 #include "hall.h"
 #include "encoder.h"
+#include "indicator.h"
 #include "motor.h"
 #include "persist.h"
 #include "protocol.h"
@@ -29,6 +30,7 @@ void Uart0DefaultMPF(void) {}
 static volatile uint32_t protocol_tick_count;
 static uint32_t strike_tick_accum;
 static uint32_t protocol_tick_accum;
+static uint32_t indicator_tick_accum;
 static uint32_t hall_baseline_divider;
 
 /* Refresh the hall timing baseline once per second to prevent the
@@ -176,6 +178,11 @@ void SysTick_Handler(void)
         strike_tick();
     }
 
+    if (schedule_latest_from_samples(&indicator_tick_accum, elapsed_samples,
+                                     INDICATOR_TICK_HZ, &dropped_updates)) {
+        indicator_tick();
+    }
+
     protocol_ticks = schedule_protocol_timeout_from_samples(&protocol_tick_accum,
                                                             elapsed_samples,
                                                             &dropped_ticks);
@@ -205,6 +212,7 @@ int main(void)
     motor_init();
     strike_init();
     persist_init();
+    indicator_init();
 
     adc_irq_enable();
 

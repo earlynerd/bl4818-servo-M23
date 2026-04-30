@@ -70,6 +70,8 @@
   .piano-grid { flex: 1; overflow-x: auto; position: relative; }
   .note-bar { position: absolute; border-radius: 2px; transition: opacity 0.1s; }
   .note-bar.unmapped { background: var(--text-dim) !important; opacity: 0.25 !important; }
+  .note-bar.fallback { box-shadow: inset 0 0 0 1px rgba(232,184,80,0.55); }
+  .note-bar.suppressed { opacity: 0.18 !important; background: var(--text-dim) !important; }
   .note-bar.fired { box-shadow: 0 0 0 1px var(--accent-bright); }
   .progress-bar { height: 4px; background: var(--border); border-radius: 2px; }
   .progress-fill { height: 100%; background: var(--accent); border-radius: 2px; transition: width 0.05s linear; }
@@ -134,6 +136,20 @@
         <button class="pill" id="resetMapBtn" style="flex:1">Reset map</button>
         <button class="pill" id="resetTrimBtn" style="flex:1">Reset trim</button>
         <button class="pill" id="refreshStatusBtn" style="flex:1">Refresh state</button>
+      </div>
+    </div>
+
+    <div class="panel" id="fallbackPanel" style="display:none">
+      <label class="label">Unmapped Pitches in File</label>
+      <table class="map-table" id="fallbackTable">
+        <thead>
+          <tr><th>Pitch</th><th>Note</th><th>Count</th><th>Route to</th></tr>
+        </thead>
+        <tbody id="fallbackTableBody"></tbody>
+      </table>
+      <p style="font-size:11px;color:var(--text-dim);margin-top:6px">Pitches that don't match any slot. Pick a mallet to redirect, or leave as drop. Saved across files.</p>
+      <div style="display:flex;gap:6px;margin-top:8px">
+        <button class="pill" id="resetFallbackBtn" style="flex:1">Clear routing</button>
       </div>
     </div>
 
@@ -215,6 +231,7 @@ const API_BASE = ""; // same-origin (the Python bridge serves this page)
 const STORAGE_KEY = "robotdrum.mapping.v1";
 const STORAGE_KEY_TRIM = "robotdrum.trim.v1";
 const STORAGE_KEY_VEL = "robotdrum.velfloor.v1";
+const STORAGE_KEY_FB = "robotdrum.fallback.v1";
 const STRIKE_MA_MIN = 0;
 const STRIKE_MA_MAX = 3000;
 const DEFAULT_VEL_FLOOR = 0.5; // 50% — softest note still strikes meaningfully
@@ -238,6 +255,7 @@ const S = {
   homed: [],
   mapping: [], // mapping[slot] = midi pitch (or null to disable that slot)
   trim: [],    // trim[slot] = scalar multiplier on global current (1.0 = no change)
+  fallback: {}, // fallback[pitch] = slot, for pitches not directly in mapping
   velFloor: DEFAULT_VEL_FLOOR, // fraction of target at MIDI vel=1 (1.0 = velocity ignored)
   composition: null, // { title, notes:[{pitch,timeMs,vel}], maxMs }
   playing: false,
@@ -349,6 +367,27 @@ function loadTrim() {
 }
 function saveTrim() {
   localStorage.setItem(STORAGE_KEY_TRIM, JSON.stringify(S.trim));
+}
+function loadFallback() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_FB);
+    if (raw) {
+      const obj = JSON.parse(raw);
+      if (obj && typeof obj === "object") {
+        const out = {};
+        for (const k of Object.keys(obj)) {
+          const p = parseInt(k, 10);
+          const s = obj[k];
+          if (Number.isInteger(p) && p >= 0 && p <= 127 && Number.isInteger(s) && s >= 0) out[p] = s;
+        }
+        return out;
+      }
+    }
+  } catch {}
+  return {};
+}
+function saveFallback() {
+  localStorage.setItem(STORAGE_KEY_FB, JSON.stringify(S.fallback));
 }
 function loadVelFloor() {
   try {
@@ -612,7 +651,36 @@ function loadFromMIDI(buf, filename) {
 
 function pitchToSlot(pitch) {
   for (let i = 0; i < S.mapping.length; i++) if (S.mapping[i] === pitch) return i;
-  return -1;
+  const fb = S.fallback[pitch];
+  const limit = Math.max(S.count, S.mapping.length);
+  return Number.isInteger(fb) && fb >= 0 && fb < limit ? fb : -1;
+}
+function pitchIsFallback(pitch) {
+  if (S.mapping.includes(pitch)) return false;
+  return Number.isInteger(S.fallback[pitch]);
+}
+
+// Resolve every event to its slot and collapse near-simultaneous strikes
+// to the same slot. Without this, a chord whose pitches all share a mallet
+// (typical once the user routes extra MIDI pitches via the fallback table)
+// would queue several strike commands back-to-back at one address — the
+// mallet can only swing once. We keep the highest-velocity event in each
+// cluster and tag the others as suppressed.
+const DEDUP_WINDOW_MS = 5;
+function buildSchedule(events) {
+  const out = events.map(e => ({ ...e, slot: pitchToSlot(e.pitch), suppressed: false }));
+  const winnerBySlot = {};
+  for (const e of out) {
+    if (e.slot < 0) continue;
+    const w = winnerBySlot[e.slot];
+    if (w && (e.timeMs - w.timeMs) <= DEDUP_WINDOW_MS) {
+      if (e.vel > w.vel) { w.suppressed = true; winnerBySlot[e.slot] = e; }
+      else { e.suppressed = true; }
+    } else {
+      winnerBySlot[e.slot] = e;
+    }
+  }
+  return out;
 }
 
 function showComposition() {
@@ -623,13 +691,16 @@ function showComposition() {
   document.getElementById("pieceTitle").textContent = c.title;
   document.getElementById("playBtn").disabled = false;
 
-  // Compute mapped vs dropped using current mapping.
-  let mapped = 0, dropped = 0;
+  // Build the post-routing, post-dedup schedule. Counts and visualization
+  // both work off this so the user sees exactly what will fire.
+  c.scheduled = buildSchedule(c.events);
+  let mapped = 0, rerouted = 0, dropped = 0, merged = 0;
   const counts = new Map();
-  for (const e of c.events) {
-    const slot = pitchToSlot(e.pitch);
-    if (slot >= 0) mapped++; else dropped++;
+  for (const e of c.scheduled) {
     counts.set(e.pitch, (counts.get(e.pitch) || 0) + 1);
+    if (e.slot < 0) { dropped++; continue; }
+    if (e.suppressed) { merged++; continue; }
+    if (pitchIsFallback(e.pitch)) rerouted++; else mapped++;
   }
   const distinctPitches = counts.size;
   const scale = getTempoScale();
@@ -639,10 +710,61 @@ function showComposition() {
   document.getElementById("pieceInfo").textContent =
     `${c.events.length} note-ons · ${distinctPitches} pitches · ${baseSec}s${tempoTag}`;
   document.getElementById("statsBar").innerHTML =
-    `<span>mapped: ${mapped}</span><span>unmapped: ${dropped}</span>` +
+    `<span>mapped: ${mapped}</span><span>rerouted: ${rerouted}</span>` +
+    `<span>merged: ${merged}</span><span>dropped: ${dropped}</span>` +
     `<span>pitches: ${[...counts.keys()].sort((a,b)=>a-b).map(p => `${midiName(p)}(${counts.get(p)})`).join(" ")}</span>`;
 
+  renderFallbackTable(counts);
   renderPianoRoll();
+}
+
+// Fallback (unmapped pitch) routing UI. Lists every pitch in the composition
+// that isn't directly in S.mapping, with a per-pitch dropdown to redirect
+// it to a chosen slot. Saved across files in localStorage.
+function renderFallbackTable(counts) {
+  const panel = document.getElementById("fallbackPanel");
+  const tbody = document.getElementById("fallbackTableBody");
+  const directPitches = new Set(S.mapping.filter(p => p != null));
+  const unmapped = [...counts.keys()].filter(p => !directPitches.has(p)).sort((a, b) => a - b);
+  if (unmapped.length === 0) { panel.style.display = "none"; tbody.innerHTML = ""; return; }
+  panel.style.display = "block";
+
+  // Build the slot-options markup once and reuse per row.
+  const slotCount = Math.max(S.count, S.mapping.length);
+  let optsBase = `<option value="">(drop)</option>`;
+  for (let i = 0; i < slotCount; i++) {
+    const sp = S.mapping[i];
+    const lbl = sp == null ? "—" : midiName(sp);
+    optsBase += `<option value="${i}">addr ${i} (${lbl})</option>`;
+  }
+
+  let h = "";
+  for (const p of unmapped) {
+    const cur = S.fallback[p];
+    let opts = optsBase;
+    if (Number.isInteger(cur)) {
+      opts = opts.replace(`value="${cur}"`, `value="${cur}" selected`);
+    } else {
+      opts = opts.replace(`value=""`, `value="" selected`);
+    }
+    h += `<tr>
+      <td>${p}</td>
+      <td style="color:var(--text-muted)">${midiName(p)}</td>
+      <td>${counts.get(p)}</td>
+      <td><select data-fb-pitch="${p}" style="background:var(--surface);border:1px solid var(--border);border-radius:3px;padding:3px 4px;color:var(--text);font-family:'JetBrains Mono',monospace;font-size:11px;width:100%">${opts}</select></td>
+    </tr>`;
+  }
+  tbody.innerHTML = h;
+
+  tbody.querySelectorAll("select[data-fb-pitch]").forEach(sel => {
+    sel.addEventListener("change", () => {
+      const p = +sel.dataset.fbPitch;
+      const v = sel.value;
+      if (v === "") delete S.fallback[p]; else S.fallback[p] = +v;
+      saveFallback();
+      showComposition();
+    });
+  });
 }
 
 function renderPianoRoll() {
@@ -651,13 +773,28 @@ function renderPianoRoll() {
   const grid = document.getElementById("pianoGrid");
   const labelsEl = document.getElementById("pianoLabels");
 
-  // Y axis: one row per ring address slot.
+  // Y axis: one row per ring address slot, ordered by mapped pitch ascending
+  // (lowest pitch at the bottom). Slots with no pitch sink to the bottom.
   const slotCount = Math.max(S.count, 1);
+  const slotOrder = [];
+  for (let i = 0; i < slotCount; i++) slotOrder.push({ slot: i, pitch: S.mapping[i] });
+  slotOrder.sort((a, b) => {
+    const an = a.pitch == null, bn = b.pitch == null;
+    if (an && bn) return a.slot - b.slot;
+    if (an) return -1; // unassigned slots sink to the bottom of the ascending list
+    if (bn) return 1;
+    if (a.pitch !== b.pitch) return a.pitch - b.pitch;
+    return a.slot - b.slot;
+  });
+  // slotOrder is ascending; display rows go top->bottom = highest pitch first.
+  const slotToRow = new Array(slotCount);
+  for (let r = 0; r < slotOrder.length; r++) slotToRow[slotOrder[r].slot] = slotOrder.length - 1 - r;
+
   let labels = "";
-  for (let i = slotCount - 1; i >= 0; i--) {
-    const pitch = S.mapping[i];
-    const col = SLOT_COLORS[i] || "var(--text-muted)";
-    labels += `<div class="piano-label" style="color:${col}"><span>${pitch == null ? "—" : midiName(pitch)}</span><span class="addr">#${i}</span></div>`;
+  for (let r = slotOrder.length - 1; r >= 0; r--) {
+    const { slot, pitch } = slotOrder[r];
+    const col = SLOT_COLORS[slot] || "var(--text-muted)";
+    labels += `<div class="piano-label" style="color:${col}"><span>${pitch == null ? "—" : midiName(pitch)}</span><span class="addr">#${slot}</span></div>`;
   }
   labelsEl.innerHTML = labels;
 
@@ -682,10 +819,11 @@ function renderPianoRoll() {
   // Cursor.
   h += `<div id="cursor" style="position:absolute;left:20px;top:0;bottom:0;width:2px;background:var(--accent-bright);opacity:0;z-index:10"></div>`;
 
-  // Notes — display rows are inverted (slot 0 at bottom).
+  // Notes — rows already sorted by pitch (slotToRow gives top-down index).
   const rh = 100 / slotCount;
-  for (const e of c.events) {
-    const slot = pitchToSlot(e.pitch);
+  const sched = c.scheduled || c.events;
+  for (const e of sched) {
+    const slot = e.slot != null ? e.slot : pitchToSlot(e.pitch);
     const x = (e.timeMs / 1000) * 80 + 20;
     // Bar width tracks note duration (1s = 80px). Floor at 4px so very
     // short notes stay visible. Notes with no recorded note-off get the
@@ -696,10 +834,16 @@ function renderPianoRoll() {
       h += `<div class="note-bar unmapped" title="unmapped pitch ${e.pitch} (${midiName(e.pitch)}) @ ${(e.timeMs/1000).toFixed(2)}s · ${(e.durMs/1000).toFixed(2)}s" style="left:${x}px;width:${widthPx}px;top:0;height:6px"></div>`;
       continue;
     }
-    const ri = slotCount - 1 - slot;
+    const ri = slotToRow[slot];
     const opacity = 0.45 + (e.vel / 127) * 0.55;
     const color = SLOT_COLORS[slot] || "var(--accent)";
-    h += `<div class="note-bar" title="${midiName(e.pitch)} v${e.vel} @ ${(e.timeMs/1000).toFixed(2)}s · ${(e.durMs/1000).toFixed(2)}s -> addr ${slot}" style="left:${x}px;width:${widthPx}px;top:calc(${ri*rh}% + 3px);height:calc(${rh}% - 6px);background:${color};opacity:${opacity}"></div>`;
+    const fb = pitchIsFallback(e.pitch);
+    const classes = ["note-bar"];
+    if (fb) classes.push("fallback");
+    if (e.suppressed) classes.push("suppressed");
+    const arrow = fb ? ` (rerouted from ${midiName(e.pitch)})` : "";
+    const tail = e.suppressed ? ` · merged into earlier strike` : "";
+    h += `<div class="${classes.join(" ")}" title="${midiName(e.pitch)} v${e.vel} @ ${(e.timeMs/1000).toFixed(2)}s · ${(e.durMs/1000).toFixed(2)}s -> addr ${slot}${arrow}${tail}" style="left:${x}px;width:${widthPx}px;top:calc(${ri*rh}% + 3px);height:calc(${rh}% - 6px);background:${color};opacity:${opacity}"></div>`;
   }
   h += `</div>`;
   grid.innerHTML = h;
@@ -735,15 +879,16 @@ function play() {
   const cur = getCurrentMa();
   const scale = getTempoScale();
   const wallTotal = c.maxMs / scale;
-  let scheduled = 0, dropped = 0;
+  let scheduled = 0, dropped = 0, merged = 0;
+  const sched = c.scheduled || buildSchedule(c.events);
 
   S.startWall = performance.now();
   S.scale = scale;
-  for (const e of c.events) {
-    const slot = pitchToSlot(e.pitch);
-    if (slot < 0) { dropped++; continue; }
+  for (const e of sched) {
+    if (e.slot < 0) { dropped++; continue; }
+    if (e.suppressed) { merged++; continue; }
     scheduled++;
-    const vel = e.vel;
+    const slot = e.slot, vel = e.vel;
     S.timeouts.push(setTimeout(() => {
       // Read live so the global slider, per-slot trim, and velocity floor
       // can all be adjusted mid-playback for ear-tuning.
@@ -758,7 +903,7 @@ function play() {
   document.getElementById("progressContainer").style.display = "block";
   const curEl = document.getElementById("cursor"); if (curEl) curEl.style.opacity = "0.8";
 
-  log(`play: ${scheduled} scheduled, ${dropped} unmapped (target=${cur} mA, vfloor=${Math.round(S.velFloor*100)}%, ${scale.toFixed(2)}x)`);
+  log(`play: ${scheduled} scheduled, ${merged} merged, ${dropped} unmapped (target=${cur} mA, vfloor=${Math.round(S.velFloor*100)}%, ${scale.toFixed(2)}x)`);
 
   (function animate() {
     const elapsed = performance.now() - S.startWall;
@@ -776,6 +921,7 @@ function play() {
 document.addEventListener("DOMContentLoaded", async () => {
   S.mapping = loadMapping();
   S.trim = loadTrim();
+  S.fallback = loadFallback();
   S.velFloor = loadVelFloor();
 
   // File / drop zone
@@ -842,6 +988,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     S.trim = new Array(Math.max(S.count, S.mapping.length)).fill(1.0);
     saveTrim();
     renderMapTable();
+  });
+  document.getElementById("resetFallbackBtn").addEventListener("click", () => {
+    S.fallback = {};
+    saveFallback();
+    if (S.composition) showComposition();
   });
   document.getElementById("refreshStatusBtn").addEventListener("click", refreshStatus);
   document.getElementById("enumBtn").addEventListener("click", async () => {

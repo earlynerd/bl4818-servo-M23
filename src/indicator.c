@@ -35,7 +35,7 @@ void indicator_init(void)
     phase_ticks = 0u;
     prev_state = MOTOR_IDLE;
     prev_fault = FAULT_NONE;
-    PIN_SSI_CSN = 0;
+    //PIN_SSI_CSN = 0;
 }
 
 static uint8_t pattern_idle(uint16_t t)
@@ -99,7 +99,7 @@ void indicator_tick(void)
     }
 
     csn_level = level;
-    PIN_SSI_CSN = level;
+    //PIN_SSI_CSN = level;
 
     /* Wrap well above the longest pattern period (fault at code 9 ≈ 2.8 s). */
     if (++phase_ticks >= (uint16_t)(INDICATOR_TICK_HZ * 10u)) {

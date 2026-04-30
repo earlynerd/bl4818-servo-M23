@@ -35,7 +35,19 @@ void pwm_init(void)
     SYS->GPB_MFPH = (SYS->GPB_MFPH & ~SYS_GPB_MFPH_PB9MFP_Msk)  | SYS_GPB_MFPH_PB9MFP_PWM0_CH4;
     SYS->GPB_MFPH = (SYS->GPB_MFPH & ~SYS_GPB_MFPH_PB11MFP_Msk) | SYS_GPB_MFPH_PB11MFP_PWM0_CH5;
 
-    /* Force Push-Pull output mode and High Slew Rate for strong, fast gate drive */
+    /* Force push-pull multi-function output and high slew rate for gate drive. */
+    SYS->GPB_MFOS &= ~(SYS_GPB_MFOS_PB7MFOS_Msk |
+                       SYS_GPB_MFOS_PB8MFOS_Msk |
+                       SYS_GPB_MFOS_PB9MFOS_Msk |
+                       SYS_GPB_MFOS_PB11MFOS_Msk |
+                       SYS_GPB_MFOS_PB12MFOS_Msk |
+                       SYS_GPB_MFOS_PB13MFOS_Msk);
+    PB->PUSEL &= ~(GPIO_PUSEL_PUSEL7_Msk |
+                   GPIO_PUSEL_PUSEL8_Msk |
+                   GPIO_PUSEL_PUSEL9_Msk |
+                   GPIO_PUSEL_PUSEL11_Msk |
+                   GPIO_PUSEL_PUSEL12_Msk |
+                   GPIO_PUSEL_PUSEL13_Msk);
     GPIO_SetMode(PB, BIT7 | BIT8 | BIT9 | BIT11 | BIT12 | BIT13, GPIO_MODE_OUTPUT);
     GPIO_SetSlewCtl(PB, BIT7 | BIT8 | BIT9 | BIT11 | BIT12 | BIT13, GPIO_SLEWCTL_HIGH);
 

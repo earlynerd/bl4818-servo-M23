@@ -1,0 +1,876 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RobotDrum MIDI Player</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Crimson+Pro:wght@300;400;600&family=JetBrains+Mono:wght@300;400&display=swap');
+  :root {
+    --bg: #121010; --surface: #1c1816; --surface-alt: #231f1b;
+    --border: #302a24; --border-light: #3d352d;
+    --accent: #c89640; --accent-dim: #8a6830; --accent-bright: #e8b850;
+    --text: #e4dbd0; --text-muted: #8a7e72; --text-dim: #5a5048;
+    --error: #c45050; --success: #6a9955; --blue: #5588cc;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: 'Crimson Pro', Georgia, serif; min-height: 100vh; }
+  ::selection { background: #c8964060; }
+  textarea:focus, input:focus, select:focus { outline: none; }
+
+  .label { font-size: 11px; text-transform: uppercase; letter-spacing: 1.5px; color: var(--text-muted); display: block; margin-bottom: 8px; font-family: 'JetBrains Mono', monospace; }
+  .pill {
+    background: var(--surface-alt); border: 1px solid var(--border); border-radius: 4px;
+    padding: 5px 10px; color: var(--text-muted); font-size: 12px; cursor: pointer;
+    font-family: 'Crimson Pro', serif; transition: all 0.15s;
+  }
+  .pill:hover { border-color: var(--accent); color: var(--text); }
+  .pill.active { background: var(--accent-dim); border-color: var(--accent); color: var(--accent-bright); }
+  .pill:disabled { opacity: 0.4; cursor: default; }
+  .panel { background: var(--surface-alt); border-radius: 6px; padding: 14px; border: 1px solid var(--border); }
+
+  .header { border-bottom: 1px solid var(--border); padding: 18px 28px; display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+  .header h1 { font-family: 'Crimson Pro', Georgia, serif; font-weight: 300; font-size: 26px; color: var(--accent); letter-spacing: 1px; }
+  .header p { margin-top: 2px; font-size: 12px; color: var(--text-muted); }
+  .conn-pill {
+    font-size: 12px; font-family: 'JetBrains Mono', monospace;
+    padding: 6px 10px; border-radius: 4px; border: 1px solid var(--border);
+    background: var(--surface-alt); color: var(--text-muted);
+  }
+  .conn-pill.ok { color: var(--success); border-color: #2c4225; }
+  .conn-pill.err { color: var(--error); border-color: #4a2828; }
+
+  .layout { display: flex; min-height: calc(100vh - 80px); }
+  .sidebar { width: 400px; flex-shrink: 0; padding: 20px; border-right: 1px solid var(--border); background: var(--surface); display: flex; flex-direction: column; gap: 16px; overflow-y: auto; }
+  .main { flex: 1; padding: 20px; display: flex; flex-direction: column; gap: 14px; overflow: hidden; }
+
+  .drop-zone {
+    border: 2px dashed var(--border); border-radius: 8px; padding: 22px; text-align: center;
+    cursor: pointer; transition: all 0.2s; background: var(--surface-alt);
+  }
+  .drop-zone:hover, .drop-zone.dragover { border-color: var(--accent); background: rgba(200,150,64,0.05); }
+  .drop-zone input { display: none; }
+
+  .play-btn, .stop-btn {
+    border-radius: 6px; padding: 10px 22px; font-size: 15px; cursor: pointer;
+    font-family: 'Crimson Pro', serif; font-weight: 600; transition: all 0.15s;
+  }
+  .play-btn {
+    background: linear-gradient(135deg, var(--accent), var(--accent-dim));
+    border: none; color: var(--bg);
+  }
+  .play-btn:disabled { opacity: 0.4; cursor: default; }
+  .play-btn.playing { background: var(--accent); }
+  .stop-btn { background: var(--surface-alt); border: 1px solid var(--border); color: var(--text); }
+
+  .piano-roll { flex: 1; min-height: 220px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; display: flex; }
+  .piano-labels { width: 56px; flex-shrink: 0; border-right: 1px solid var(--border); display: flex; flex-direction: column; }
+  .piano-label { flex: 1; display: flex; align-items: center; justify-content: center; font-size: 10px; font-family: 'JetBrains Mono', monospace; padding: 0 6px; gap: 4px; }
+  .piano-label .addr { color: var(--text-dim); }
+  .piano-grid { flex: 1; overflow-x: auto; position: relative; }
+  .note-bar { position: absolute; border-radius: 2px; transition: opacity 0.1s; }
+  .note-bar.unmapped { background: var(--text-dim) !important; opacity: 0.25 !important; }
+  .note-bar.fired { box-shadow: 0 0 0 1px var(--accent-bright); }
+  .progress-bar { height: 4px; background: var(--border); border-radius: 2px; }
+  .progress-fill { height: 100%; background: var(--accent); border-radius: 2px; transition: width 0.05s linear; }
+
+  .stats { display: flex; gap: 18px; font-size: 12px; font-family: 'JetBrains Mono', monospace; color: var(--text-muted); flex-wrap: wrap; }
+
+  .map-table { width: 100%; border-collapse: collapse; font-family: 'JetBrains Mono', monospace; font-size: 12px; }
+  .map-table th { font-weight: normal; color: var(--text-dim); text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--border); font-size: 10px; text-transform: uppercase; letter-spacing: 1px; }
+  .map-table td { padding: 4px 6px; border-bottom: 1px solid rgba(48,42,36,0.4); }
+  .map-table input[type=number] {
+    width: 60px; background: var(--surface); border: 1px solid var(--border); border-radius: 3px;
+    padding: 3px 6px; color: var(--text); font-family: 'JetBrains Mono', monospace; font-size: 12px;
+  }
+  .map-table .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
+  .map-table .test-btn { padding: 2px 8px; font-size: 11px; }
+  .map-table .homed { color: var(--success); }
+  .map-table .unhomed { color: var(--error); }
+
+  .error-box { background: #2a1515; border: 1px solid var(--error); border-radius: 6px; padding: 10px; font-size: 13px; color: var(--error); }
+  .success-box { background: #1a2a15; border: 1px solid var(--success); border-radius: 6px; padding: 10px; font-size: 13px; color: var(--success); }
+
+  .slider { flex: 1; -webkit-appearance: none; appearance: none; height: 4px; border-radius: 2px; background: var(--border); cursor: pointer; }
+  .slider::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 14px; height: 14px; border-radius: 50%; background: var(--accent); cursor: pointer; }
+
+  pre.log { background: var(--surface-alt); border: 1px solid var(--border); border-radius: 6px; padding: 8px; font-size: 11px; font-family: 'JetBrains Mono', monospace; color: var(--text-muted); height: 110px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; margin: 0; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div>
+    <h1>RobotDrum MIDI Player</h1>
+    <p>Browser-side MIDI scheduler driving the ring bus through a local Python bridge</p>
+  </div>
+  <div id="connPill" class="conn-pill">connecting…</div>
+</div>
+
+<div class="layout">
+  <div class="sidebar">
+
+    <div>
+      <label class="label">Load MIDI File</label>
+      <div class="drop-zone" id="dropZone">
+        <div style="font-size:24px;margin-bottom:6px;opacity:0.4">🎵</div>
+        <div style="color:var(--text-muted);font-size:13px">Drop a .mid file or click to browse</div>
+        <input type="file" id="fileInput" accept=".mid,.midi">
+      </div>
+    </div>
+
+    <div id="errorBox" class="error-box" style="display:none"></div>
+    <div id="successBox" class="success-box" style="display:none"></div>
+
+    <div class="panel">
+      <label class="label">Pitch → Address Mapping</label>
+      <table class="map-table" id="mapTable">
+        <thead>
+          <tr><th>Addr</th><th>Pitch</th><th>Note</th><th>State</th><th>Trim</th><th></th></tr>
+        </thead>
+        <tbody id="mapTableBody"></tbody>
+      </table>
+      <div style="display:flex;gap:6px;margin-top:8px">
+        <button class="pill" id="resetMapBtn" style="flex:1">Reset map</button>
+        <button class="pill" id="resetTrimBtn" style="flex:1">Reset trim</button>
+        <button class="pill" id="refreshStatusBtn" style="flex:1">Refresh state</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <label class="label">Strike Current</label>
+      <div style="display:flex;align-items:center;gap:12px">
+        <input type="range" id="currentSlider" min="500" max="3000" step="50" value="1500" class="slider">
+        <span id="currentDisplay" style="font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--accent);min-width:62px;text-align:right">1500 mA</span>
+      </div>
+      <p style="font-size:11px;color:var(--text-dim);margin-top:6px">Master strike current. Per-mallet trim and per-note velocity multiply on top of this.</p>
+    </div>
+
+    <div class="panel">
+      <label class="label">Velocity Floor</label>
+      <div style="display:flex;align-items:center;gap:12px">
+        <input type="range" id="velFloorSlider" min="0" max="100" step="5" value="50" class="slider">
+        <span id="velFloorDisplay" style="font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--accent);min-width:62px;text-align:right">50%</span>
+        <button class="pill" id="velFloorOffBtn" style="padding:4px 8px;font-size:11px">Off</button>
+      </div>
+      <p style="font-size:11px;color:var(--text-dim);margin-top:6px">Strike current at MIDI velocity 1, as a fraction of target. 100% = velocity ignored. 0% = soft notes barely strike.</p>
+    </div>
+
+    <div class="panel">
+      <label class="label">Tempo</label>
+      <div style="display:flex;align-items:center;gap:12px">
+        <input type="range" id="tempoSlider" min="0.25" max="2.5" step="0.05" value="1.00" class="slider">
+        <span id="tempoDisplay" style="font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--accent);min-width:62px;text-align:right">1.00x</span>
+        <button class="pill" id="tempoResetBtn" style="padding:4px 8px;font-size:11px">1x</button>
+      </div>
+      <p style="font-size:11px;color:var(--text-dim);margin-top:6px">Playback speed multiplier. No note trimming — every note-on fires.</p>
+    </div>
+
+    <div class="panel">
+      <label class="label">Hardware</label>
+      <div style="display:flex;gap:6px">
+        <button class="pill" id="homeBtn" style="flex:1;color:var(--accent)">Home All</button>
+        <button class="pill" id="cancelBtn" style="flex:1;color:var(--error)">Cancel</button>
+        <button class="pill" id="enumBtn" style="flex:1">Enumerate</button>
+      </div>
+    </div>
+
+    <div>
+      <label class="label">Log</label>
+      <pre id="log" class="log"></pre>
+    </div>
+
+  </div>
+
+  <div class="main">
+    <div id="emptyState" style="flex:1;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:12px;opacity:0.4">
+      <div style="font-size:48px">🎵</div>
+      <p style="font-size:16px;color:var(--text-muted)">Drop a MIDI file in the sidebar</p>
+    </div>
+
+    <div id="resultPanel" style="display:none;flex-direction:column;gap:14px;flex:1;min-height:0">
+      <div style="display:flex;align-items:flex-end;justify-content:space-between;flex-wrap:wrap;gap:12px">
+        <div>
+          <h2 id="pieceTitle" style="font-family:'Crimson Pro',serif;font-weight:300;font-size:24px;color:var(--accent-bright)"></h2>
+          <p id="pieceInfo" style="margin-top:4px;font-size:12px;color:var(--text-muted);font-family:'JetBrains Mono',monospace"></p>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button class="play-btn" id="playBtn" disabled>▶ Play</button>
+          <button class="stop-btn" id="stopBtn" style="display:none">■ Stop</button>
+        </div>
+      </div>
+      <div id="progressContainer" class="progress-bar" style="display:none"><div id="progressFill" class="progress-fill" style="width:0%"></div></div>
+      <div class="piano-roll">
+        <div class="piano-labels" id="pianoLabels"></div>
+        <div class="piano-grid" id="pianoGrid"></div>
+      </div>
+      <div class="stats" id="statsBar"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ─── Config ──────────────────────────────────────────────────
+const API_BASE = ""; // same-origin (the Python bridge serves this page)
+const STORAGE_KEY = "robotdrum.mapping.v1";
+const STORAGE_KEY_TRIM = "robotdrum.trim.v1";
+const STORAGE_KEY_VEL = "robotdrum.velfloor.v1";
+const STRIKE_MA_MIN = 0;
+const STRIKE_MA_MAX = 3000;
+const DEFAULT_VEL_FLOOR = 0.5; // 50% — softest note still strikes meaningfully
+
+// Default pitch per address slot, matching the steel-tongue scale
+// the previous player used. Index = ring address.
+const DEFAULT_MAPPING = [52, 55, 57, 60, 62, 64, 65, 67, 69, 72];
+// A pleasing color per slot index, reused for the piano roll.
+const SLOT_COLORS = [
+  "#8B5E3C", "#9B6B42", "#A87D50", "#B8915E", "#C4A46E",
+  "#D4B87E", "#DCBE70", "#E8CC78", "#E8C050", "#F0D060",
+  "#A85070", "#7050A8", "#4080B0", "#40A080", "#A0A040", "#806060",
+];
+
+const NOTE_NAMES = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
+function midiName(p) { return NOTE_NAMES[p % 12] + (Math.floor(p/12) - 1); }
+
+// ─── State ───────────────────────────────────────────────────
+const S = {
+  count: 0,
+  homed: [],
+  mapping: [], // mapping[slot] = midi pitch (or null to disable that slot)
+  trim: [],    // trim[slot] = scalar multiplier on global current (1.0 = no change)
+  velFloor: DEFAULT_VEL_FLOOR, // fraction of target at MIDI vel=1 (1.0 = velocity ignored)
+  composition: null, // { title, notes:[{pitch,timeMs,vel}], maxMs }
+  playing: false,
+  timeouts: [],
+  animFrame: null,
+  startWall: 0,
+};
+
+// ─── Logging helpers ─────────────────────────────────────────
+function log(line) {
+  const el = document.getElementById("log");
+  const ts = new Date().toLocaleTimeString();
+  el.textContent += `[${ts}] ${line}\n`;
+  el.scrollTop = el.scrollHeight;
+}
+function showError(msg) {
+  const el = document.getElementById("errorBox");
+  el.textContent = msg; el.style.display = "block";
+  document.getElementById("successBox").style.display = "none";
+}
+function showSuccess(msg) {
+  const el = document.getElementById("successBox");
+  el.textContent = msg; el.style.display = "block";
+  document.getElementById("errorBox").style.display = "none";
+}
+function hideMessages() {
+  document.getElementById("errorBox").style.display = "none";
+  document.getElementById("successBox").style.display = "none";
+}
+
+// ─── HTTP API ────────────────────────────────────────────────
+async function api(method, path, body) {
+  const opts = { method, headers: {} };
+  if (body !== undefined) {
+    opts.headers["Content-Type"] = "application/json";
+    opts.body = JSON.stringify(body);
+  }
+  const r = await fetch(API_BASE + path, opts);
+  if (!r.ok) {
+    let detail = `${r.status}`;
+    try { const j = await r.json(); detail = j.error || detail; } catch {}
+    throw new Error(`${method} ${path}: ${detail}`);
+  }
+  return r.json();
+}
+
+// Fire-and-forget strike — used by the playback scheduler. We don't
+// await; the bridge serializes ring access on its own lock so multiple
+// in-flight POSTs won't collide.
+function strikeAsync(addr, currentMa, label) {
+  fetch(API_BASE + "/api/strike", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ address: addr, current_ma: currentMa }),
+    keepalive: true,
+  }).then(r => r.ok ? r.json() : null).then(j => {
+    if (j && !j.accepted && j.result_name && j.result_name !== "OK") {
+      log(`strike addr=${addr} -> ${j.result_name}`);
+    }
+  }).catch(e => log(`strike addr=${addr} ${label||""} failed: ${e.message}`));
+}
+
+async function refreshStatus() {
+  try {
+    const j = await api("GET", "/api/status");
+    S.count = j.count || 0;
+    S.homed = j.homed || [];
+    setConn(true, `${S.count} device(s) on ring`);
+    rebuildMappingIfNeeded();
+    renderMapTable();
+    return j;
+  } catch (e) {
+    setConn(false, "bridge offline");
+    log("status failed: " + e.message);
+    return null;
+  }
+}
+
+function setConn(ok, text) {
+  const el = document.getElementById("connPill");
+  el.textContent = text;
+  el.classList.remove("ok", "err");
+  el.classList.add(ok ? "ok" : "err");
+}
+
+// ─── Mapping & trim persistence ──────────────────────────────
+function loadMapping() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) {
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) return arr.map(v => (Number.isInteger(v) ? v : null));
+    }
+  } catch {}
+  return DEFAULT_MAPPING.slice();
+}
+function saveMapping() {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(S.mapping));
+}
+function loadTrim() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_TRIM);
+    if (raw) {
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) return arr.map(v => Number.isFinite(v) ? Math.max(0, v) : 1.0);
+    }
+  } catch {}
+  return [];
+}
+function saveTrim() {
+  localStorage.setItem(STORAGE_KEY_TRIM, JSON.stringify(S.trim));
+}
+function loadVelFloor() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_VEL);
+    if (raw != null) {
+      const v = parseFloat(raw);
+      if (Number.isFinite(v)) return Math.max(0, Math.min(1, v));
+    }
+  } catch {}
+  return DEFAULT_VEL_FLOOR;
+}
+function saveVelFloor() {
+  localStorage.setItem(STORAGE_KEY_VEL, String(S.velFloor));
+}
+function rebuildMappingIfNeeded() {
+  const want = Math.max(S.count, S.mapping.length);
+  while (S.mapping.length < want) {
+    const i = S.mapping.length;
+    S.mapping.push(DEFAULT_MAPPING[i] ?? null);
+  }
+  while (S.trim.length < want) S.trim.push(1.0);
+}
+// Linear MIDI velocity -> current scale, with a configurable floor so soft
+// notes still trigger reliably. velocity defaults to 127 (full) for
+// non-MIDI strikes like the per-row test buttons.
+function velocityScale(velocity) {
+  const v = Math.max(0, Math.min(127, velocity ?? 127));
+  const f = Math.max(0, Math.min(1, S.velFloor));
+  return f + (1 - f) * (v / 127);
+}
+function effectiveCurrentForSlot(slot, velocity = 127) {
+  const base = getCurrentMa();
+  const t = S.trim[slot];
+  const trim = Number.isFinite(t) ? t : 1.0;
+  const scaled = base * trim * velocityScale(velocity);
+  return Math.max(STRIKE_MA_MIN, Math.min(STRIKE_MA_MAX, Math.round(scaled)));
+}
+
+// ─── Mapping UI ──────────────────────────────────────────────
+function renderMapTable() {
+  const tbody = document.getElementById("mapTableBody");
+  const rows = Math.max(S.count, 0);
+  if (rows === 0) {
+    tbody.innerHTML = `<tr><td colspan="5" style="color:var(--text-dim);font-style:italic;padding:10px 6px">No devices enumerated</td></tr>`;
+    return;
+  }
+  let h = "";
+  for (let i = 0; i < rows; i++) {
+    const pitch = S.mapping[i];
+    const color = SLOT_COLORS[i] || "var(--text-muted)";
+    const homed = !!S.homed[i];
+    const noteText = pitch == null ? "—" : midiName(pitch);
+    const trimPct = Math.round((S.trim[i] ?? 1.0) * 100);
+    h += `<tr>
+      <td><span class="swatch" style="background:${color}"></span>${i}</td>
+      <td><input type="number" min="0" max="127" step="1" data-slot="${i}" value="${pitch == null ? "" : pitch}" placeholder="—"></td>
+      <td style="color:var(--text-muted)">${noteText}</td>
+      <td class="${homed ? 'homed' : 'unhomed'}">${homed ? 'HOMED' : '—'}</td>
+      <td style="white-space:nowrap">
+        <input type="range" min="25" max="200" step="5" value="${trimPct}" data-trim-slot="${i}" class="slider" style="width:74px;vertical-align:middle">
+        <span class="trim-label" data-trim-label="${i}" style="display:inline-block;min-width:36px;font-size:11px;color:var(--text-muted);text-align:right">${trimPct}%</span>
+      </td>
+      <td><button class="pill test-btn" data-test="${i}">strike</button></td>
+    </tr>`;
+  }
+  tbody.innerHTML = h;
+  tbody.querySelectorAll("input[data-slot]").forEach(inp => {
+    inp.addEventListener("change", () => {
+      const slot = +inp.dataset.slot;
+      const v = inp.value.trim();
+      S.mapping[slot] = v === "" ? null : Math.max(0, Math.min(127, parseInt(v, 10) || 0));
+      saveMapping();
+      renderMapTable();
+      if (S.composition) showComposition();
+    });
+  });
+  tbody.querySelectorAll("input[data-trim-slot]").forEach(inp => {
+    inp.addEventListener("input", () => {
+      const slot = +inp.dataset.trimSlot;
+      const pct = +inp.value;
+      S.trim[slot] = pct / 100;
+      saveTrim();
+      const lbl = tbody.querySelector(`[data-trim-label="${slot}"]`);
+      if (lbl) lbl.textContent = `${pct}%`;
+    });
+  });
+  tbody.querySelectorAll("button[data-test]").forEach(b => {
+    b.addEventListener("click", () => {
+      const slot = +b.dataset.test;
+      const ma = effectiveCurrentForSlot(slot);
+      strikeAsync(slot, ma, `(test slot ${slot})`);
+      log(`test strike addr=${slot} ${ma} mA (trim ${Math.round((S.trim[slot] ?? 1)*100)}%)`);
+    });
+  });
+}
+
+// ─── MIDI parsing ────────────────────────────────────────────
+// Returns absolute-time note-ons in milliseconds. Tempo map aware
+// (single-track tempo events are honored; multi-track tempo handled
+// per-track in playback order — fine for Format-1 files where tempo
+// lives on track 0).
+function parseMidiFile(buf) {
+  const d = new DataView(buf);
+  if (d.getUint32(0) !== 0x4d546864) throw new Error("Not a MIDI file");
+  const format = d.getUint16(8);
+  const ntrks = d.getUint16(10);
+  const tpb = d.getUint16(12);
+  if (tpb & 0x8000) throw new Error("SMPTE timing not supported");
+
+  // First pass: collect tempo map from any track that has tempo meta events.
+  // Each entry: { tick, usPerBeat }.
+  const tempoMap = [{ tick: 0, usPerBeat: 500000 }];
+  let off = 14;
+  for (let t = 0; t < ntrks; t++) {
+    if (off + 8 > buf.byteLength) break;
+    if (d.getUint32(off) !== 0x4d54726b) { off++; continue; }
+    const tlen = d.getUint32(off + 4);
+    let pos = off + 8;
+    const end = pos + tlen;
+    let tick = 0, running = 0;
+    while (pos < end) {
+      let delta = 0;
+      while (pos < end) { const b = d.getUint8(pos++); delta = (delta << 7) | (b & 0x7f); if (!(b & 0x80)) break; }
+      tick += delta;
+      if (pos >= end) break;
+      let status = d.getUint8(pos);
+      if (status === 0xff) {
+        pos++;
+        const type = d.getUint8(pos++);
+        let len = 0;
+        while (pos < end) { const b = d.getUint8(pos++); len = (len << 7) | (b & 0x7f); if (!(b & 0x80)) break; }
+        if (type === 0x51 && len === 3) {
+          const us = (d.getUint8(pos) << 16) | (d.getUint8(pos+1) << 8) | d.getUint8(pos+2);
+          // keep in tick order, dedup if duplicate at same tick
+          tempoMap.push({ tick, usPerBeat: us });
+        }
+        pos += len;
+        continue;
+      }
+      if (status === 0xf0 || status === 0xf7) {
+        pos++;
+        let len = 0;
+        while (pos < end) { const b = d.getUint8(pos++); len = (len << 7) | (b & 0x7f); if (!(b & 0x80)) break; }
+        pos += len;
+        continue;
+      }
+      if (status < 0x80) status = running; else { running = status; pos++; }
+      const cmd = status & 0xf0;
+      if (cmd === 0xc0 || cmd === 0xd0) pos += 1; else pos += 2;
+    }
+    off = end;
+  }
+  tempoMap.sort((a, b) => a.tick - b.tick);
+  // Dedup by tick: keep last for each tick.
+  const dedup = [];
+  for (const e of tempoMap) {
+    if (dedup.length && dedup[dedup.length - 1].tick === e.tick) dedup[dedup.length - 1] = e;
+    else dedup.push(e);
+  }
+  // Convert tick -> ms using tempoMap.
+  function tickToMs(targetTick) {
+    let ms = 0, prevTick = 0, us = dedup[0].usPerBeat;
+    for (let i = 1; i < dedup.length; i++) {
+      const seg = dedup[i];
+      if (seg.tick > targetTick) break;
+      ms += (seg.tick - prevTick) * us / tpb / 1000;
+      prevTick = seg.tick;
+      us = seg.usPerBeat;
+    }
+    ms += (targetTick - prevTick) * us / tpb / 1000;
+    return ms;
+  }
+
+  // Second pass: collect note-ons (with durations) across all tracks.
+  const events = [];
+  off = 14;
+  for (let t = 0; t < ntrks; t++) {
+    if (off + 8 > buf.byteLength) break;
+    if (d.getUint32(off) !== 0x4d54726b) { off++; continue; }
+    const tlen = d.getUint32(off + 4);
+    let pos = off + 8;
+    const end = pos + tlen;
+    let tick = 0, running = 0;
+    // Per-track pending map: pitch -> index into events[]. Per-track so
+    // that two tracks playing the same pitch concurrently don't collide.
+    const pending = {};
+    while (pos < end) {
+      let delta = 0;
+      while (pos < end) { const b = d.getUint8(pos++); delta = (delta << 7) | (b & 0x7f); if (!(b & 0x80)) break; }
+      tick += delta;
+      if (pos >= end) break;
+      let status = d.getUint8(pos);
+      if (status === 0xff) {
+        pos++; pos++; // type
+        let len = 0;
+        while (pos < end) { const b = d.getUint8(pos++); len = (len << 7) | (b & 0x7f); if (!(b & 0x80)) break; }
+        pos += len;
+        continue;
+      }
+      if (status === 0xf0 || status === 0xf7) {
+        pos++;
+        let len = 0;
+        while (pos < end) { const b = d.getUint8(pos++); len = (len << 7) | (b & 0x7f); if (!(b & 0x80)) break; }
+        pos += len;
+        continue;
+      }
+      if (status < 0x80) status = running; else { running = status; pos++; }
+      const cmd = status & 0xf0;
+      if (cmd === 0x90 || cmd === 0x80) {
+        const pitch = d.getUint8(pos++);
+        const vel = d.getUint8(pos++);
+        const nowMs = tickToMs(tick);
+        const isOn = (cmd === 0x90 && vel > 0);
+        if (isOn) {
+          // If a previous on for this pitch never got a matching off,
+          // close it at the new on time so durations don't overlap.
+          if (pending[pitch] !== undefined) {
+            const prev = events[pending[pitch]];
+            if (prev.durMs === 0) prev.durMs = Math.max(0, nowMs - prev.timeMs);
+          }
+          pending[pitch] = events.length;
+          events.push({ pitch, vel, timeMs: nowMs, durMs: 0 });
+        } else if (pending[pitch] !== undefined) {
+          const ev = events[pending[pitch]];
+          ev.durMs = Math.max(0, nowMs - ev.timeMs);
+          delete pending[pitch];
+        }
+      } else if (cmd === 0xa0 || cmd === 0xb0 || cmd === 0xe0) {
+        pos += 2;
+      } else if (cmd === 0xc0 || cmd === 0xd0) {
+        pos += 1;
+      } else {
+        pos += 2;
+      }
+    }
+    off = end;
+  }
+  events.sort((a, b) => a.timeMs - b.timeMs);
+  return { events, tpb, format, ntrks };
+}
+
+// ─── Composition handling ───────────────────────────────────
+function loadFromMIDI(buf, filename) {
+  hideMessages();
+  try {
+    const { events } = parseMidiFile(buf);
+    if (!events.length) throw new Error("No note-ons found in file");
+    const maxMs = events.length ? events[events.length - 1].timeMs + 50 : 0;
+    const name = filename.replace(/\.[^.]+$/, "").replace(/[_-]/g, " ");
+    S.composition = {
+      title: name,
+      events,
+      maxMs,
+    };
+    showComposition();
+    showSuccess(`Loaded "${name}" — ${events.length} note-ons over ${(maxMs/1000).toFixed(1)}s`);
+  } catch (e) {
+    showError("MIDI parse error: " + e.message);
+  }
+}
+
+function pitchToSlot(pitch) {
+  for (let i = 0; i < S.mapping.length; i++) if (S.mapping[i] === pitch) return i;
+  return -1;
+}
+
+function showComposition() {
+  const c = S.composition;
+  if (!c) return;
+  document.getElementById("emptyState").style.display = "none";
+  document.getElementById("resultPanel").style.display = "flex";
+  document.getElementById("pieceTitle").textContent = c.title;
+  document.getElementById("playBtn").disabled = false;
+
+  // Compute mapped vs dropped using current mapping.
+  let mapped = 0, dropped = 0;
+  const counts = new Map();
+  for (const e of c.events) {
+    const slot = pitchToSlot(e.pitch);
+    if (slot >= 0) mapped++; else dropped++;
+    counts.set(e.pitch, (counts.get(e.pitch) || 0) + 1);
+  }
+  const distinctPitches = counts.size;
+  const scale = getTempoScale();
+  const baseSec = (c.maxMs / 1000).toFixed(1);
+  const playSec = (c.maxMs / scale / 1000).toFixed(1);
+  const tempoTag = scale !== 1 ? ` · ${scale.toFixed(2)}x → ${playSec}s` : "";
+  document.getElementById("pieceInfo").textContent =
+    `${c.events.length} note-ons · ${distinctPitches} pitches · ${baseSec}s${tempoTag}`;
+  document.getElementById("statsBar").innerHTML =
+    `<span>mapped: ${mapped}</span><span>unmapped: ${dropped}</span>` +
+    `<span>pitches: ${[...counts.keys()].sort((a,b)=>a-b).map(p => `${midiName(p)}(${counts.get(p)})`).join(" ")}</span>`;
+
+  renderPianoRoll();
+}
+
+function renderPianoRoll() {
+  const c = S.composition;
+  if (!c) return;
+  const grid = document.getElementById("pianoGrid");
+  const labelsEl = document.getElementById("pianoLabels");
+
+  // Y axis: one row per ring address slot.
+  const slotCount = Math.max(S.count, 1);
+  let labels = "";
+  for (let i = slotCount - 1; i >= 0; i--) {
+    const pitch = S.mapping[i];
+    const col = SLOT_COLORS[i] || "var(--text-muted)";
+    labels += `<div class="piano-label" style="color:${col}"><span>${pitch == null ? "—" : midiName(pitch)}</span><span class="addr">#${i}</span></div>`;
+  }
+  labelsEl.innerHTML = labels;
+
+  const totalSec = c.maxMs / 1000;
+  const w = Math.max(600, totalSec * 80 + 40);
+  let h = `<div style="position:relative;width:${w}px;height:100%;min-height:220px">`;
+
+  // Time grid every second.
+  for (let s = 0; s <= Math.ceil(totalSec); s++) {
+    const x = s * 80 + 20;
+    h += `<div style="position:absolute;left:${x}px;top:0;bottom:0;width:1px;background:${s%4===0?'var(--border-light)':'rgba(48,42,36,0.25)'}"></div>`;
+    if (s % 2 === 0) {
+      h += `<div style="position:absolute;left:${x+2}px;top:2px;font-size:9px;color:var(--text-dim);font-family:'JetBrains Mono',monospace">${s}s</div>`;
+    }
+  }
+
+  // Row backgrounds.
+  for (let i = 0; i < slotCount; i++) {
+    h += `<div style="position:absolute;left:0;right:0;top:${(i/slotCount)*100}%;height:${100/slotCount}%;background:${i%2?'rgba(48,42,36,0.08)':'transparent'};border-bottom:1px solid rgba(48,42,36,0.1)"></div>`;
+  }
+
+  // Cursor.
+  h += `<div id="cursor" style="position:absolute;left:20px;top:0;bottom:0;width:2px;background:var(--accent-bright);opacity:0;z-index:10"></div>`;
+
+  // Notes — display rows are inverted (slot 0 at bottom).
+  const rh = 100 / slotCount;
+  for (const e of c.events) {
+    const slot = pitchToSlot(e.pitch);
+    const x = (e.timeMs / 1000) * 80 + 20;
+    // Bar width tracks note duration (1s = 80px). Floor at 4px so very
+    // short notes stay visible. Notes with no recorded note-off get the
+    // floor as well.
+    const widthPx = Math.max(4, (e.durMs / 1000) * 80);
+    if (slot < 0 || slot >= slotCount) {
+      // Park unmapped notes along the very top edge for visibility.
+      h += `<div class="note-bar unmapped" title="unmapped pitch ${e.pitch} (${midiName(e.pitch)}) @ ${(e.timeMs/1000).toFixed(2)}s · ${(e.durMs/1000).toFixed(2)}s" style="left:${x}px;width:${widthPx}px;top:0;height:6px"></div>`;
+      continue;
+    }
+    const ri = slotCount - 1 - slot;
+    const opacity = 0.45 + (e.vel / 127) * 0.55;
+    const color = SLOT_COLORS[slot] || "var(--accent)";
+    h += `<div class="note-bar" title="${midiName(e.pitch)} v${e.vel} @ ${(e.timeMs/1000).toFixed(2)}s · ${(e.durMs/1000).toFixed(2)}s -> addr ${slot}" style="left:${x}px;width:${widthPx}px;top:calc(${ri*rh}% + 3px);height:calc(${rh}% - 6px);background:${color};opacity:${opacity}"></div>`;
+  }
+  h += `</div>`;
+  grid.innerHTML = h;
+}
+
+// ─── Playback ────────────────────────────────────────────────
+function getCurrentMa() {
+  return parseInt(document.getElementById("currentSlider").value, 10);
+}
+function getTempoScale() {
+  const v = parseFloat(document.getElementById("tempoSlider").value);
+  return Number.isFinite(v) && v > 0 ? v : 1.0;
+}
+
+function stopPlayback() {
+  S.timeouts.forEach(id => clearTimeout(id));
+  S.timeouts = [];
+  if (S.animFrame) cancelAnimationFrame(S.animFrame);
+  S.playing = false;
+  document.getElementById("playBtn").textContent = "▶ Play";
+  document.getElementById("playBtn").classList.remove("playing");
+  document.getElementById("stopBtn").style.display = "none";
+  document.getElementById("progressContainer").style.display = "none";
+  const cur = document.getElementById("cursor"); if (cur) cur.style.opacity = "0";
+}
+
+function play() {
+  if (!S.composition) return;
+  if (S.playing) { stopPlayback(); return; }
+  hideMessages();
+
+  const c = S.composition;
+  const cur = getCurrentMa();
+  const scale = getTempoScale();
+  const wallTotal = c.maxMs / scale;
+  let scheduled = 0, dropped = 0;
+
+  S.startWall = performance.now();
+  S.scale = scale;
+  for (const e of c.events) {
+    const slot = pitchToSlot(e.pitch);
+    if (slot < 0) { dropped++; continue; }
+    scheduled++;
+    const vel = e.vel;
+    S.timeouts.push(setTimeout(() => {
+      // Read live so the global slider, per-slot trim, and velocity floor
+      // can all be adjusted mid-playback for ear-tuning.
+      strikeAsync(slot, effectiveCurrentForSlot(slot, vel));
+    }, e.timeMs / scale));
+  }
+  S.timeouts.push(setTimeout(stopPlayback, wallTotal + 500));
+
+  S.playing = true;
+  document.getElementById("playBtn").textContent = "■ Stop";
+  document.getElementById("playBtn").classList.add("playing");
+  document.getElementById("progressContainer").style.display = "block";
+  const curEl = document.getElementById("cursor"); if (curEl) curEl.style.opacity = "0.8";
+
+  log(`play: ${scheduled} scheduled, ${dropped} unmapped (target=${cur} mA, vfloor=${Math.round(S.velFloor*100)}%, ${scale.toFixed(2)}x)`);
+
+  (function animate() {
+    const elapsed = performance.now() - S.startWall;
+    const songMs = elapsed * scale; // piano roll x-axis is in original time
+    const p = Math.min(1, songMs / c.maxMs);
+    document.getElementById("progressFill").style.width = (p * 100) + "%";
+    const totalSec = c.maxMs / 1000;
+    const w = Math.max(600, totalSec * 80 + 40);
+    if (curEl) curEl.style.left = (p * (w - 40) + 20) + "px";
+    if (p < 1 && S.playing) S.animFrame = requestAnimationFrame(animate);
+  })();
+}
+
+// ─── UI wiring ───────────────────────────────────────────────
+document.addEventListener("DOMContentLoaded", async () => {
+  S.mapping = loadMapping();
+  S.trim = loadTrim();
+  S.velFloor = loadVelFloor();
+
+  // File / drop zone
+  const dz = document.getElementById("dropZone");
+  const fi = document.getElementById("fileInput");
+  dz.addEventListener("click", () => fi.click());
+  dz.addEventListener("dragover", e => { e.preventDefault(); dz.classList.add("dragover"); });
+  dz.addEventListener("dragleave", () => dz.classList.remove("dragover"));
+  dz.addEventListener("drop", e => {
+    e.preventDefault(); dz.classList.remove("dragover");
+    if (e.dataTransfer.files[0]) readMidiFile(e.dataTransfer.files[0]);
+  });
+  fi.addEventListener("change", () => { if (fi.files[0]) readMidiFile(fi.files[0]); });
+
+  function readMidiFile(file) {
+    const r = new FileReader();
+    r.onload = () => loadFromMIDI(r.result, file.name);
+    r.readAsArrayBuffer(file);
+  }
+
+  // Strike current
+  const cs = document.getElementById("currentSlider");
+  const cd = document.getElementById("currentDisplay");
+  cs.addEventListener("input", () => { cd.textContent = `${cs.value} mA`; });
+
+  // Velocity floor
+  const vfs = document.getElementById("velFloorSlider");
+  const vfd = document.getElementById("velFloorDisplay");
+  vfs.value = String(Math.round(S.velFloor * 100));
+  vfd.textContent = `${vfs.value}%`;
+  vfs.addEventListener("input", () => {
+    S.velFloor = (+vfs.value) / 100;
+    vfd.textContent = `${vfs.value}%`;
+    saveVelFloor();
+  });
+  document.getElementById("velFloorOffBtn").addEventListener("click", () => {
+    vfs.value = "100";
+    vfs.dispatchEvent(new Event("input"));
+  });
+
+  // Tempo scale
+  const ts = document.getElementById("tempoSlider");
+  const td = document.getElementById("tempoDisplay");
+  function refreshTempoLabel() {
+    td.textContent = `${(+ts.value).toFixed(2)}x`;
+    if (S.composition) showComposition();
+  }
+  ts.addEventListener("input", refreshTempoLabel);
+  document.getElementById("tempoResetBtn").addEventListener("click", () => {
+    ts.value = "1.00"; refreshTempoLabel();
+  });
+
+  // Buttons
+  document.getElementById("playBtn").addEventListener("click", play);
+  document.getElementById("stopBtn").addEventListener("click", stopPlayback);
+  document.getElementById("resetMapBtn").addEventListener("click", () => {
+    S.mapping = DEFAULT_MAPPING.slice();
+    rebuildMappingIfNeeded();
+    saveMapping();
+    renderMapTable();
+    if (S.composition) showComposition();
+  });
+  document.getElementById("resetTrimBtn").addEventListener("click", () => {
+    S.trim = new Array(Math.max(S.count, S.mapping.length)).fill(1.0);
+    saveTrim();
+    renderMapTable();
+  });
+  document.getElementById("refreshStatusBtn").addEventListener("click", refreshStatus);
+  document.getElementById("enumBtn").addEventListener("click", async () => {
+    log("enumerate…");
+    try {
+      const j = await api("POST", "/api/enumerate");
+      log(`enumerated ${j.count} device(s)`);
+      await refreshStatus();
+    } catch (e) { log("enumerate failed: " + e.message); }
+  });
+  document.getElementById("homeBtn").addEventListener("click", async () => {
+    log("home all…");
+    try {
+      await api("POST", "/api/home", {});
+      log("home complete");
+      await refreshStatus();
+      showSuccess("All actuators homed");
+    } catch (e) {
+      log("home failed: " + e.message);
+      showError("Home failed: " + e.message);
+    }
+  });
+  document.getElementById("cancelBtn").addEventListener("click", async () => {
+    try { await api("POST", "/api/cancel"); log("cancel sent"); } catch (e) { log("cancel failed: " + e.message); }
+  });
+
+  // Initial connection
+  await refreshStatus();
+});
+</script>
+</body>
+</html>

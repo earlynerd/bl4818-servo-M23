@@ -200,7 +200,7 @@ PATTERNS: dict[str, Pattern] = {
     # 10-voice traditional kit: + a second snare voice (fat snare / ghost)
     # ------------------------------------------------------------------
     "arpeggio": _p(
-         [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0],
+         [2, 0, 4, 8, 6, 9, 5, 1, 3, 7, 3, 1, 5, 9, 6, 8, 4, 0, 2],
         voices=_KIT10,
         description="arp? arp arp arp!",
     ),

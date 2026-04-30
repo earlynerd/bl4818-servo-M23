@@ -80,7 +80,7 @@ void encoder_init(void)
      * pull-up pulls the pad high (de-asserted).
      */
     PIN_SSI_CLK = 1;
-    PIN_SSI_CSN = 0;
+    PIN_SSI_CSN = 1;
 }
 
 void encoder_poll(void)
@@ -92,7 +92,7 @@ void encoder_poll(void)
     irq_state = irq_save();
 
     /* Assert CSn to start the frame */
-    PIN_SSI_CSN = 1;
+    PIN_SSI_CSN = 0;
     delay_nop(2);
 
     /* Read 24 bits */
@@ -113,7 +113,7 @@ void encoder_poll(void)
     }
     //delay_nop(2); /* Minimum quiet time before next frame */
     /* De-assert CSn to end the frame */
-    PIN_SSI_CSN = 0;
+    PIN_SSI_CSN = 1;
     irq_restore(irq_state);
 
     encoder_raw = raw;

@@ -270,10 +270,15 @@ void motor_set_mode(ctrl_mode_t mode)
             switch (mode) {
             case CTRL_VELOCITY:
                 if (ctrl_mode == CTRL_DUTY || ctrl_mode == CTRL_TORQUE) {
-                    /* vel_pid wasn't running — seed with current draw */
+                    /* vel_pid wasn't running — seed with current draw.
+                     * Preload at zero-error (setpoint = measurement) so the
+                     * integrator state is independent of whatever stale
+                     * target_velocity the host left lying around.  When the
+                     * host writes a fresh target, the P+FF terms step in
+                     * cleanly on top of the seeded integrator. */
                     int32_t signed_ma = (int32_t)current_ma * drive_dir;
                     pid_preload(&vel_pid, signed_ma,
-                                target_velocity, measured_velocity);
+                                measured_velocity, measured_velocity);
                     if (ctrl_mode == CTRL_DUTY) {
                         int32_t abs_duty = last_applied_duty >= 0 ? last_applied_duty : -last_applied_duty;
                         pid_preload(&cur_pid, abs_duty,
@@ -287,9 +292,8 @@ void motor_set_mode(ctrl_mode_t mode)
             case CTRL_POSITION:
                 if (ctrl_mode == CTRL_DUTY || ctrl_mode == CTRL_TORQUE) {
                     int32_t signed_ma = (int32_t)current_ma * drive_dir;
-                    target_velocity = measured_velocity;
                     pid_preload(&vel_pid, signed_ma,
-                                target_velocity, measured_velocity);
+                                measured_velocity, measured_velocity);
                     if (ctrl_mode == CTRL_DUTY) {
                         int32_t abs_duty = last_applied_duty >= 0 ? last_applied_duty : -last_applied_duty;
                         pid_preload(&cur_pid, abs_duty,
@@ -335,6 +339,10 @@ void motor_set_mode(ctrl_mode_t mode)
 
 ctrl_mode_t motor_get_mode(void) { return ctrl_mode; }
 
+/* Single-target setters: aligned 32-bit stores are atomic on Cortex-M23, so
+ * no irq_save is needed for the write itself.  Callers that must update
+ * target *and* mode atomically (e.g. SysTick reading them together) hold
+ * irq_save themselves — see prepare_set_velocity in protocol.c. */
 void motor_set_duty(int32_t duty)        { target_duty = duty; }
 void motor_set_velocity(int32_t rpm)     { target_velocity = rpm; }
 void motor_set_position(int32_t counts)  { target_position = counts; }

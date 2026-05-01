@@ -66,6 +66,8 @@
 #define SUBCMD_SET_CUR_PID      0x14u
 #define SUBCMD_SET_CURRENT      0x15u
 #define SUBCMD_QUERY_TIMING     0x16u
+#define SUBCMD_DETECT_CSN_POLARITY 0x17u
+#define SUBCMD_SET_CSN_POLARITY    0x18u
 #define SUBCMD_MASK             0x3Fu
 #define SUBCMD_REPLY_MASK       0xC0u
 #define SUBCMD_REPLY_FULL       0x00u
@@ -635,6 +637,13 @@ static void handle_addressed_cmd(uint8_t cmd_type, const uint8_t *payload, uint8
         int32_t current_pos;
         int32_t persist_status;
 
+        /* Flash erase disables IRQs for ~20 ms — never do it under active motion. */
+        if (motor_get_state() == MOTOR_RUN) {
+            send_addressed_reply(reply_mode, subcmd, ACK_RESULT_REJECT_NOT_READY,
+                                 0u, FULL_REPLY_STATUS);
+            break;
+        }
+
         irq_state = irq_save();
         current_pos = -encoder_get_position();
         motor_shift_position_reference(current_pos);
@@ -701,11 +710,18 @@ static void handle_addressed_cmd(uint8_t cmd_type, const uint8_t *payload, uint8
         send_addressed_reply(reply_mode, subcmd, ACK_RESULT_OK, 0u, FULL_REPLY_TIMING_STATUS);
         break;
     case SUBCMD_SAVE_SETTINGS:
-        ack_result = ack_result_from_persist_status(persist_save_runtime());
+        /* Flash erase disables IRQs for ~20 ms — never do it under active motion. */
+        if (motor_get_state() == MOTOR_RUN)
+            ack_result = ACK_RESULT_REJECT_NOT_READY;
+        else
+            ack_result = ack_result_from_persist_status(persist_save_runtime());
         send_addressed_reply(reply_mode, subcmd, ack_result, 0u, FULL_REPLY_STATUS);
         break;
     case SUBCMD_CLEAR_SETTINGS:
-        ack_result = ack_result_from_persist_status(persist_clear());
+        if (motor_get_state() == MOTOR_RUN)
+            ack_result = ACK_RESULT_REJECT_NOT_READY;
+        else
+            ack_result = ack_result_from_persist_status(persist_clear());
         send_addressed_reply(reply_mode, subcmd, ack_result, 0u, FULL_REPLY_STATUS);
         break;
     case SUBCMD_SET_CUR_PID:
@@ -732,6 +748,37 @@ static void handle_addressed_cmd(uint8_t cmd_type, const uint8_t *payload, uint8
             }
         }
         send_addressed_reply(reply_mode, subcmd, ack_result, 0u, FULL_REPLY_STATUS);
+        break;
+    case SUBCMD_DETECT_CSN_POLARITY:
+        /* Probes both polarities and CRCs the result.  Hammers CSn during
+         * the probe, so refuse while motion is happening — the wrong-
+         * polarity probe would otherwise corrupt mid-loop encoder reads. */
+        if (motor_get_state() == MOTOR_RUN) {
+            ack_result = ACK_RESULT_REJECT_NOT_READY;
+            ack_detail = 0u;
+        } else if (encoder_autodetect_csn_polarity()) {
+            ack_result = ACK_RESULT_OK;
+            ack_detail = encoder_get_csn_polarity();
+            (void)persist_save_runtime();
+        } else {
+            ack_result = ACK_RESULT_INVALID_ARGUMENT;
+            ack_detail = 0u;
+        }
+        send_addressed_reply(reply_mode, subcmd, ack_result, ack_detail, FULL_REPLY_STATUS);
+        break;
+    case SUBCMD_SET_CSN_POLARITY:
+        ack_result = ACK_RESULT_INVALID_ARGUMENT;
+        ack_detail = 0u;
+        if (len >= 3u && (payload[2] == 0u || payload[2] == 1u)) {
+            if (motor_get_state() == MOTOR_RUN) {
+                ack_result = ACK_RESULT_REJECT_NOT_READY;
+            } else {
+                encoder_set_csn_polarity(payload[2]);
+                ack_detail = encoder_get_csn_polarity();
+                ack_result = ack_result_from_persist_status(persist_save_runtime());
+            }
+        }
+        send_addressed_reply(reply_mode, subcmd, ack_result, ack_detail, FULL_REPLY_STATUS);
         break;
     default:
         break;

@@ -57,6 +57,8 @@ SUBCMD_CLEAR_SETTINGS = 0x13
 SUBCMD_SET_CUR_PID   = 0x14
 SUBCMD_SET_CURRENT   = 0x15
 SUBCMD_QUERY_TIMING  = 0x16
+SUBCMD_DETECT_CSN_POLARITY = 0x17
+SUBCMD_SET_CSN_POLARITY    = 0x18
 SUBCMD_MASK          = 0x3F
 SUBCMD_REPLY_FULL    = 0x00
 SUBCMD_REPLY_ACK     = 0x40
@@ -140,6 +142,8 @@ SUBCMD_NAMES  = {
     SUBCMD_SET_CUR_PID: "SET_CUR_PID",
     SUBCMD_SET_CURRENT: "SET_CURRENT",
     SUBCMD_QUERY_TIMING: "QUERY_TIMING",
+    SUBCMD_DETECT_CSN_POLARITY: "DETECT_CSN_POLARITY",
+    SUBCMD_SET_CSN_POLARITY: "SET_CSN_POLARITY",
 }
 ACK_RESULT_NAMES = {
     ACK_RESULT_OK: "OK",
@@ -614,6 +618,18 @@ class RingClientV2:
     def clear_settings(self, address: int, reply_mode: str = REPLY_MODE_ACK) -> AddressedReply:
         return self._addressed_command(address, SUBCMD_CLEAR_SETTINGS, reply_mode=reply_mode)
 
+    def detect_csn_polarity(self, address: int, reply_mode: str = REPLY_MODE_ACK) -> AddressedReply:
+        """Probe both SSI CSn polarities, keep the one whose MT6701 frame passes CRC, persist on success.
+        ACK detail field carries the chosen polarity (0 or 1).  Rejected with NOT_READY while motor is running."""
+        return self._addressed_command(address, SUBCMD_DETECT_CSN_POLARITY, reply_mode=reply_mode)
+
+    def set_csn_polarity(self, address: int, level: int, reply_mode: str = REPLY_MODE_ACK) -> AddressedReply:
+        """Manually override SSI CSn polarity (0 = FET-inverting variant, 1 = modchip variant) and persist.
+        Rejected with NOT_READY while motor is running, INVALID_ARGUMENT for any value other than 0 or 1."""
+        if level not in (0, 1):
+            raise RingError("level must be 0 or 1")
+        return self._addressed_command(address, SUBCMD_SET_CSN_POLARITY, bytes([level]), reply_mode)
+
     def set_pid(
         self,
         address: int,
@@ -1009,6 +1025,8 @@ __all__ = [
     "SUBCMD_QUERY_STATUS",
     "SUBCMD_QUERY_STRIKE",
     "SUBCMD_QUERY_TIMING",
+    "SUBCMD_DETECT_CSN_POLARITY",
+    "SUBCMD_SET_CSN_POLARITY",
     "SUBCMD_REPLY_ACK",
     "SUBCMD_REPLY_FULL",
     "SUBCMD_REPLY_NONE",

@@ -212,6 +212,15 @@ int main(void)
     motor_init();
     strike_init();
     persist_init();
+
+    /* Auto-detect SSI CSn polarity if it isn't already known.  Probes both
+     * polarities and validates via the MT6701 frame CRC; the right polarity
+     * passes uniquely.  On success, save so future boots skip the probe. */
+    if (!encoder_has_csn_polarity()) {
+        if (encoder_autodetect_csn_polarity())
+            (void)persist_save_runtime();
+    }
+
     indicator_init();
 
     adc_irq_enable();

@@ -17,6 +17,8 @@ Examples:
     python ring_tool.py -p COM7 broadcast 200 0 0
     python ring_tool.py -p COM7 monitor 0 --hz 10
     python ring_tool.py -p COM7 timing-status 0
+    python ring_tool.py -p COM7 detect-csn-polarity 0
+    python ring_tool.py -p COM7 set-csn-polarity 0 1
     python ring_tool.py -p COM7 measure-strike-timing 0 --start 500 --stop 3000 --step 250 --csv strike.csv
     python ring_tool.py -p COM7 measure-strike-timing 0 --sweep-param home-offset --start 1200 --stop 2200 --step 200 --strike-current 1500
 """
@@ -103,6 +105,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("clear-settings", help="Erase persisted settings from flash for next boot")
     sp.add_argument("address", type=int)
+
+    sp = sub.add_parser(
+        "detect-csn-polarity",
+        help="Probe both SSI CSn polarities, keep the one whose MT6701 frame passes CRC, save to flash. Reject if motor running.",
+    )
+    sp.add_argument("address", type=int)
+
+    sp = sub.add_parser(
+        "set-csn-polarity",
+        help="Manually set SSI CSn polarity (0=FET-inverting variant, 1=modchip variant) and save. Reject if motor running.",
+    )
+    sp.add_argument("address", type=int)
+    sp.add_argument("level", type=int, choices=[0, 1])
 
     sp = sub.add_parser("set-mode", help="Set control mode")
     sp.add_argument("address", type=int)
@@ -401,6 +416,20 @@ def main() -> int:
 
         elif args.command == "clear-settings":
             print(format_ack(retry_after_enumerate(lambda: client.clear_settings(args.address))))
+
+        elif args.command == "detect-csn-polarity":
+            ack = retry_after_enumerate(lambda: client.detect_csn_polarity(args.address))
+            print(format_ack(ack))
+            if ack.accepted:
+                print(f"chosen csn_assert_level={ack.detail}")
+
+        elif args.command == "set-csn-polarity":
+            ack = retry_after_enumerate(
+                lambda: client.set_csn_polarity(args.address, args.level)
+            )
+            print(format_ack(ack))
+            if ack.accepted:
+                print(f"applied csn_assert_level={ack.detail}")
 
         elif args.command == "set-mode":
             print(format_status(retry_after_enumerate(lambda: client.set_mode(args.address, args.mode))))

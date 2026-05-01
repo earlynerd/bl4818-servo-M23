@@ -32,8 +32,9 @@
 #define PERSIST_MAGIC        0x31545350UL  /* "PST1" */
 #define PERSIST_VERSION      3u
 
-#define PERSIST_FLAG_ZERO_VALID       0x0001u
-#define PERSIST_FLAG_STRIKE_CAL_VALID 0x0002u
+#define PERSIST_FLAG_ZERO_VALID         0x0001u
+#define PERSIST_FLAG_STRIKE_CAL_VALID   0x0002u
+#define PERSIST_FLAG_CSN_POLARITY_VALID 0x0004u
 
 typedef struct {
     uint32_t magic;
@@ -41,7 +42,12 @@ typedef struct {
     uint16_t flags;
     uint32_t sequence;
     uint16_t zero_angle;
-    uint16_t reserved0;
+    /* Splitting the previous reserved0 word in place keeps the layout
+     * (and CRC coverage) identical for v3 records written before the
+     * polarity feature existed — old records still validate, the flag
+     * bit is just absent so autodetect runs once and re-saves. */
+    uint8_t  encoder_csn_assert_level;
+    uint8_t  reserved0;
     int32_t strike_drum_position;
     int32_t strike_home_position;
     int32_t strike_home_offset;
@@ -108,6 +114,9 @@ static void persist_apply_record(const persist_record_t *record)
     if ((record->flags & PERSIST_FLAG_ZERO_VALID) != 0u)
         encoder_set_zero_reference(record->zero_angle);
 
+    if ((record->flags & PERSIST_FLAG_CSN_POLARITY_VALID) != 0u)
+        encoder_set_csn_polarity(record->encoder_csn_assert_level);
+
     if ((record->flags & PERSIST_FLAG_STRIKE_CAL_VALID) != 0u)
         strike_restore_calibration(record->strike_drum_position,
                                    record->strike_home_position);
@@ -124,6 +133,11 @@ static void persist_capture_runtime(persist_record_t *record, uint32_t sequence)
     if (encoder_has_zero_reference()) {
         record->flags |= PERSIST_FLAG_ZERO_VALID;
         record->zero_angle = encoder_get_zero_reference();
+    }
+
+    if (encoder_has_csn_polarity()) {
+        record->flags |= PERSIST_FLAG_CSN_POLARITY_VALID;
+        record->encoder_csn_assert_level = encoder_get_csn_polarity();
     }
 
     if (strike_is_homed()) {

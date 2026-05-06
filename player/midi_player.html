@@ -65,7 +65,9 @@
 
   .piano-roll { flex: 1; min-height: 220px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; display: flex; }
   .piano-labels { width: 56px; flex-shrink: 0; border-right: 1px solid var(--border); display: flex; flex-direction: column; }
-  .piano-label { flex: 1; display: flex; align-items: center; justify-content: center; font-size: 10px; font-family: 'JetBrains Mono', monospace; padding: 0 6px; gap: 4px; }
+  .piano-label { flex: 1; display: flex; align-items: center; justify-content: center; font-size: 9px; font-family: 'JetBrains Mono', monospace; padding: 0 6px; gap: 4px; overflow: hidden; min-height: 0; }
+  .piano-label.unmapped { color: var(--text-dim); }
+  .piano-label.octave { color: var(--text-muted); font-weight: 600; }
   .piano-label .addr { color: var(--text-dim); }
   .piano-grid { flex: 1; overflow-x: auto; position: relative; }
   .note-bar { position: absolute; border-radius: 2px; transition: opacity 0.1s; }
@@ -79,14 +81,15 @@
   .stats { display: flex; gap: 18px; font-size: 12px; font-family: 'JetBrains Mono', monospace; color: var(--text-muted); flex-wrap: wrap; }
 
   .map-table { width: 100%; border-collapse: collapse; font-family: 'JetBrains Mono', monospace; font-size: 12px; }
-  .map-table th { font-weight: normal; color: var(--text-dim); text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--border); font-size: 10px; text-transform: uppercase; letter-spacing: 1px; }
-  .map-table td { padding: 4px 6px; border-bottom: 1px solid rgba(48,42,36,0.4); }
+  .map-table th { font-weight: normal; color: var(--text-dim); text-align: left; padding: 4px 4px; border-bottom: 1px solid var(--border); font-size: 10px; text-transform: uppercase; letter-spacing: 1px; }
+  .map-table td { padding: 4px 4px; border-bottom: 1px solid rgba(48,42,36,0.4); }
   .map-table input[type=number] {
-    width: 60px; background: var(--surface); border: 1px solid var(--border); border-radius: 3px;
-    padding: 3px 6px; color: var(--text); font-family: 'JetBrains Mono', monospace; font-size: 12px;
+    width: 52px; background: var(--surface); border: 1px solid var(--border); border-radius: 3px;
+    padding: 3px 5px; color: var(--text); font-family: 'JetBrains Mono', monospace; font-size: 12px;
   }
-  .map-table .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
-  .map-table .test-btn { padding: 2px 8px; font-size: 11px; }
+  .map-table .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }
+  .map-table .test-btn { padding: 2px 6px; font-size: 11px; }
+  .map-table .icon-btn { padding: 2px 5px; font-size: 13px; line-height: 1; }
   .map-table .homed { color: var(--success); }
   .map-table .unhomed { color: var(--error); }
 
@@ -97,6 +100,57 @@
   .slider::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 14px; height: 14px; border-radius: 50%; background: var(--accent); cursor: pointer; }
 
   pre.log { background: var(--surface-alt); border: 1px solid var(--border); border-radius: 6px; padding: 8px; font-size: 11px; font-family: 'JetBrains Mono', monospace; color: var(--text-muted); height: 110px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; margin: 0; }
+
+  .modal-backdrop {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 100; padding: 16px;
+  }
+  .modal {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; width: 440px; max-width: 100%;
+    padding: 18px; display: flex; flex-direction: column; gap: 14px;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.7);
+  }
+  .modal-header {
+    display: flex; align-items: center; gap: 10px;
+    border-bottom: 1px solid var(--border); padding-bottom: 12px;
+  }
+  .modal-header h3 {
+    flex: 1; font-family: 'Crimson Pro', serif; font-weight: 400;
+    font-size: 18px; color: var(--accent-bright); letter-spacing: 0.5px;
+  }
+  .modal-header .meta {
+    font-size: 11px; font-family: 'JetBrains Mono', monospace; color: var(--text-muted);
+  }
+  .modal-close {
+    background: transparent; border: none; color: var(--text-muted);
+    font-size: 22px; line-height: 1; cursor: pointer; padding: 0 4px;
+  }
+  .modal-close:hover { color: var(--text); }
+  .param-row { display: flex; flex-direction: column; gap: 6px; }
+  .param-row .row-top { display: flex; align-items: baseline; gap: 12px; }
+  .param-row label {
+    flex: 1; font-size: 11px; font-family: 'JetBrains Mono', monospace;
+    color: var(--text-muted); text-transform: uppercase; letter-spacing: 1.2px;
+  }
+  .param-row .hint { font-size: 10px; color: var(--text-dim); font-family: 'Crimson Pro', serif; font-style: italic; }
+  .param-row .row-controls { display: flex; align-items: center; gap: 8px; }
+  .param-row input[type=range] {
+    flex: 1; -webkit-appearance: none; appearance: none;
+    height: 4px; border-radius: 2px; background: var(--border); cursor: pointer;
+  }
+  .param-row input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none; width: 14px; height: 14px;
+    border-radius: 50%; background: var(--accent); cursor: pointer;
+  }
+  .param-row input[type=number] {
+    width: 84px; background: var(--surface-alt); border: 1px solid var(--border);
+    border-radius: 3px; padding: 4px 6px; color: var(--text);
+    font-family: 'JetBrains Mono', monospace; font-size: 12px; text-align: right;
+  }
+  .modal-footer { display: flex; gap: 8px; justify-content: space-between; align-items: center; border-top: 1px solid var(--border); padding-top: 12px; }
+  .modal-footer .status { font-size: 11px; font-family: 'JetBrains Mono', monospace; color: var(--text-dim); }
 </style>
 </head>
 <body>
@@ -128,7 +182,7 @@
       <label class="label">Pitch → Address Mapping</label>
       <table class="map-table" id="mapTable">
         <thead>
-          <tr><th>Addr</th><th>Pitch</th><th>Note</th><th>State</th><th>Trim</th><th></th></tr>
+          <tr><th>Addr</th><th>Pitch</th><th>State</th><th>Trim</th><th></th></tr>
         </thead>
         <tbody id="mapTableBody"></tbody>
       </table>
@@ -183,6 +237,16 @@
     </div>
 
     <div class="panel">
+      <label class="label">Keyboard Play</label>
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px">
+        <input type="checkbox" id="kbdEnable">
+        <span>Enable — press keys to strike</span>
+      </label>
+      <div id="kbdMapping" style="margin-top:10px;display:flex;gap:4px;flex-wrap:wrap"></div>
+      <p style="font-size:11px;color:var(--text-dim);margin-top:6px">Lowest pitch on the left. Reflects the current pitch map. Ignored while editing fields.</p>
+    </div>
+
+    <div class="panel">
       <label class="label">Hardware</label>
       <div style="display:flex;gap:6px">
         <button class="pill" id="homeBtn" style="flex:1;color:var(--accent)">Home All</button>
@@ -225,6 +289,60 @@
   </div>
 </div>
 
+<div id="cfgModal" class="modal-backdrop" style="display:none">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="cfgTitle">
+    <div class="modal-header">
+      <span id="cfgSwatch" style="display:inline-block;width:14px;height:14px;border-radius:3px;background:var(--text-dim);flex-shrink:0"></span>
+      <div style="flex:1;min-width:0">
+        <h3 id="cfgTitle">Strike Config</h3>
+        <div class="meta" id="cfgMeta">addr — · pitch —</div>
+      </div>
+      <button class="modal-close" id="cfgCloseBtn" aria-label="close">×</button>
+    </div>
+
+    <div class="param-row" data-param="home_offset">
+      <div class="row-top">
+        <label>Home Offset</label>
+        <span class="hint">where the mallet rests pre-strike</span>
+      </div>
+      <div class="row-controls">
+        <input type="range" min="0" max="3000" step="25" data-param-slider="home_offset">
+        <input type="number" min="-32768" max="32767" step="1" data-param-input="home_offset">
+      </div>
+    </div>
+
+    <div class="param-row" data-param="coast_distance">
+      <div class="row-top">
+        <label>Coast Distance</label>
+        <span class="hint">how far to coast after current cuts off</span>
+      </div>
+      <div class="row-controls">
+        <input type="range" min="0" max="3000" step="25" data-param-slider="coast_distance">
+        <input type="number" min="-32768" max="32767" step="1" data-param-input="coast_distance">
+      </div>
+    </div>
+
+    <div class="param-row" data-param="homing_duty">
+      <div class="row-top">
+        <label>Homing Duty</label>
+        <span class="hint">PWM duty used while homing</span>
+      </div>
+      <div class="row-controls">
+        <input type="range" min="0" max="2000" step="25" data-param-slider="homing_duty">
+        <input type="number" min="-32768" max="32767" step="1" data-param-input="homing_duty">
+      </div>
+    </div>
+
+    <div class="modal-footer">
+      <span class="status" id="cfgStatus">changes apply live</span>
+      <div style="display:flex;gap:8px">
+        <button class="pill" id="cfgHomeBtn">Re-home</button>
+        <button class="pill" id="cfgTestBtn">Test strike</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
 // ─── Config ──────────────────────────────────────────────────
 const API_BASE = ""; // same-origin (the Python bridge serves this page)
@@ -232,6 +350,10 @@ const STORAGE_KEY = "robotdrum.mapping.v1";
 const STORAGE_KEY_TRIM = "robotdrum.trim.v1";
 const STORAGE_KEY_VEL = "robotdrum.velfloor.v1";
 const STORAGE_KEY_FB = "robotdrum.fallback.v1";
+const STORAGE_KEY_KBD = "robotdrum.kbd.v1";
+// Home row first (most ergonomic for 10-mallet drums), then top row for
+// extra slots. Keys are matched against e.key.toLowerCase().
+const KEYBOARD_KEYS = ["a","s","d","f","g","h","j","k","l",";","'","q","w","e","r","t","y","u","i","o","p"];
 const STRIKE_MA_MIN = 0;
 const STRIKE_MA_MAX = 3000;
 const DEFAULT_VEL_FLOOR = 0.5; // 50% — softest note still strikes meaningfully
@@ -253,15 +375,18 @@ function midiName(p) { return NOTE_NAMES[p % 12] + (Math.floor(p/12) - 1); }
 const S = {
   count: 0,
   homed: [],
+  slots: [],   // slots[i] = { homed, home_offset, coast_distance, homing_duty } from /api/status
   mapping: [], // mapping[slot] = midi pitch (or null to disable that slot)
   trim: [],    // trim[slot] = scalar multiplier on global current (1.0 = no change)
   fallback: {}, // fallback[pitch] = slot, for pitches not directly in mapping
   velFloor: DEFAULT_VEL_FLOOR, // fraction of target at MIDI vel=1 (1.0 = velocity ignored)
   composition: null, // { title, notes:[{pitch,timeMs,vel}], maxMs }
+  kbdEnabled: false,
   playing: false,
   timeouts: [],
   animFrame: null,
   startWall: 0,
+  cfgSlot: -1,   // slot currently shown in the strike-config modal, -1 = closed
 };
 
 // ─── Logging helpers ─────────────────────────────────────────
@@ -323,9 +448,11 @@ async function refreshStatus() {
     const j = await api("GET", "/api/status");
     S.count = j.count || 0;
     S.homed = j.homed || [];
+    S.slots = Array.isArray(j.slots) ? j.slots : [];
     setConn(true, `${S.count} device(s) on ring`);
     rebuildMappingIfNeeded();
     renderMapTable();
+    if (S.cfgSlot >= 0 && S.cfgSlot < S.count) refreshCfgModalValues();
     return j;
   } catch (e) {
     setConn(false, "bridge offline");
@@ -402,6 +529,12 @@ function loadVelFloor() {
 function saveVelFloor() {
   localStorage.setItem(STORAGE_KEY_VEL, String(S.velFloor));
 }
+function loadKbdEnabled() {
+  try { return localStorage.getItem(STORAGE_KEY_KBD) === "1"; } catch { return false; }
+}
+function saveKbdEnabled() {
+  localStorage.setItem(STORAGE_KEY_KBD, S.kbdEnabled ? "1" : "0");
+}
 function rebuildMappingIfNeeded() {
   const want = Math.max(S.count, S.mapping.length);
   while (S.mapping.length < want) {
@@ -439,18 +572,20 @@ function renderMapTable() {
     const pitch = S.mapping[i];
     const color = SLOT_COLORS[i] || "var(--text-muted)";
     const homed = !!S.homed[i];
-    const noteText = pitch == null ? "—" : midiName(pitch);
+    const noteTitle = pitch == null ? "" : ` title="${midiName(pitch)}"`;
     const trimPct = Math.round((S.trim[i] ?? 1.0) * 100);
     h += `<tr>
       <td><span class="swatch" style="background:${color}"></span>${i}</td>
-      <td><input type="number" min="0" max="127" step="1" data-slot="${i}" value="${pitch == null ? "" : pitch}" placeholder="—"></td>
-      <td style="color:var(--text-muted)">${noteText}</td>
+      <td><input type="number" min="0" max="127" step="1" data-slot="${i}" value="${pitch == null ? "" : pitch}" placeholder="—"${noteTitle}></td>
       <td class="${homed ? 'homed' : 'unhomed'}">${homed ? 'HOMED' : '—'}</td>
       <td style="white-space:nowrap">
-        <input type="range" min="25" max="200" step="5" value="${trimPct}" data-trim-slot="${i}" class="slider" style="width:74px;vertical-align:middle">
-        <span class="trim-label" data-trim-label="${i}" style="display:inline-block;min-width:36px;font-size:11px;color:var(--text-muted);text-align:right">${trimPct}%</span>
+        <input type="range" min="25" max="200" step="5" value="${trimPct}" data-trim-slot="${i}" class="slider" style="width:60px;vertical-align:middle">
+        <span class="trim-label" data-trim-label="${i}" style="display:inline-block;min-width:30px;font-size:11px;color:var(--text-muted);text-align:right">${trimPct}%</span>
       </td>
-      <td><button class="pill test-btn" data-test="${i}">strike</button></td>
+      <td style="white-space:nowrap;text-align:right">
+        <button class="pill test-btn" data-test="${i}">strike</button>
+        <button class="pill icon-btn" data-cfg="${i}" title="Edit strike params (home offset, coast, homing duty)" aria-label="strike config">⚙</button>
+      </td>
     </tr>`;
   }
   tbody.innerHTML = h;
@@ -482,6 +617,140 @@ function renderMapTable() {
       log(`test strike addr=${slot} ${ma} mA (trim ${Math.round((S.trim[slot] ?? 1)*100)}%)`);
     });
   });
+  tbody.querySelectorAll("button[data-cfg]").forEach(b => {
+    b.addEventListener("click", () => openCfgModal(+b.dataset.cfg));
+  });
+  renderKeyboardPanel();
+}
+
+// ─── Strike-config modal ─────────────────────────────────────
+// Per-mallet popup for tuning home_offset / coast_distance / homing_duty.
+// Changes are applied live to the device on each input change so the user
+// can hear the effect immediately via the Test-strike button or keyboard
+// play. The slot's currently-set values are read from the cached
+// /api/status payload (Bridge.status() now returns them per slot).
+const CFG_PARAMS = ["home_offset", "coast_distance", "homing_duty"];
+
+function openCfgModal(slot) {
+  if (!Number.isInteger(slot) || slot < 0 || slot >= S.count) return;
+  S.cfgSlot = slot;
+  S.cfgLastSent = {}; // forget the previous slot's send-cache so identical
+                     // values still get resent for the new slot
+  const modal = document.getElementById("cfgModal");
+  const swatch = document.getElementById("cfgSwatch");
+  const title = document.getElementById("cfgTitle");
+  const meta = document.getElementById("cfgMeta");
+  const pitch = S.mapping[slot];
+  swatch.style.background = SLOT_COLORS[slot] || "var(--text-muted)";
+  title.textContent = `Strike Config — addr ${slot}`;
+  meta.textContent = `pitch ${pitch == null ? "— (unmapped)" : `${midiName(pitch)} (${pitch})`}`;
+  document.getElementById("cfgStatus").textContent = "changes apply live";
+  document.getElementById("cfgStatus").style.color = "var(--text-dim)";
+  refreshCfgModalValues();
+  modal.style.display = "flex";
+}
+function closeCfgModal() {
+  S.cfgSlot = -1;
+  document.getElementById("cfgModal").style.display = "none";
+}
+function refreshCfgModalValues() {
+  const slot = S.cfgSlot;
+  if (slot < 0) return;
+  const data = S.slots[slot] || {};
+  for (const p of CFG_PARAMS) {
+    const v = data[p];
+    const slider = document.querySelector(`[data-param-slider="${p}"]`);
+    const input = document.querySelector(`[data-param-input="${p}"]`);
+    if (Number.isFinite(v)) {
+      slider.value = String(Math.max(+slider.min, Math.min(+slider.max, v)));
+      input.value = String(v);
+    } else {
+      // Unknown — leave the slider where it is, blank the number field so
+      // the user sees they're starting from "no reading".
+      input.value = "";
+    }
+  }
+}
+async function applyStrikeParam(slot, param, value) {
+  const status = document.getElementById("cfgStatus");
+  status.textContent = `applying ${param}=${value}…`;
+  status.style.color = "var(--text-muted)";
+  try {
+    const r = await api("POST", "/api/strike-param", { address: slot, param, value });
+    if (r && r.accepted === false) {
+      status.textContent = `${param}: ${r.result_name || "rejected"}`;
+      status.style.color = "var(--error)";
+      log(`strike-param addr=${slot} ${param}=${value} -> ${r.result_name}`);
+    } else {
+      status.textContent = `${param} = ${value} ✓`;
+      status.style.color = "var(--success)";
+      // Update local cache so the modal stays in sync.
+      if (!S.slots[slot]) S.slots[slot] = {};
+      S.slots[slot][param] = value;
+    }
+  } catch (e) {
+    status.textContent = `failed: ${e.message}`;
+    status.style.color = "var(--error)";
+    log(`strike-param addr=${slot} ${param}=${value} failed: ${e.message}`);
+  }
+}
+
+// ─── Keyboard play ───────────────────────────────────────────
+// Build a list of {slot,pitch} for slots that have a pitch assigned, sorted
+// by ascending pitch. This matches the piano-roll's vertical sort so the
+// leftmost key is always the lowest-sounding mallet.
+function pitchAscendingSlots() {
+  const limit = Math.max(S.count, S.mapping.length);
+  const out = [];
+  for (let i = 0; i < limit; i++) {
+    const p = S.mapping[i];
+    if (Number.isInteger(p)) out.push({ slot: i, pitch: p });
+  }
+  out.sort((a, b) => a.pitch - b.pitch || a.slot - b.slot);
+  return out;
+}
+function keyToSlot(key) {
+  const slots = pitchAscendingSlots();
+  const idx = KEYBOARD_KEYS.indexOf(key);
+  if (idx < 0 || idx >= slots.length) return -1;
+  return slots[idx].slot;
+}
+function renderKeyboardPanel() {
+  const el = document.getElementById("kbdMapping");
+  if (!el) return;
+  const slots = pitchAscendingSlots();
+  if (slots.length === 0) {
+    el.innerHTML = `<div style="color:var(--text-dim);font-size:12px;font-style:italic">No mapped pitches</div>`;
+    return;
+  }
+  let h = "";
+  for (let i = 0; i < slots.length && i < KEYBOARD_KEYS.length; i++) {
+    const { slot, pitch } = slots[i];
+    const k = KEYBOARD_KEYS[i];
+    const color = SLOT_COLORS[slot] || "var(--text-muted)";
+    const label = k === ";" ? ";" : k === "'" ? "'" : k.toUpperCase();
+    h += `<div data-kbd-slot="${slot}" style="display:flex;flex-direction:column;align-items:center;gap:2px;padding:5px 6px;background:var(--surface);border:1px solid var(--border);border-radius:4px;min-width:36px;transition:background 0.08s">
+      <span style="font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:600;color:${color}">${label}</span>
+      <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-muted)">${midiName(pitch)}</span>
+    </div>`;
+  }
+  if (slots.length > KEYBOARD_KEYS.length) {
+    h += `<div style="align-self:center;color:var(--text-dim);font-size:11px;margin-left:4px">+${slots.length - KEYBOARD_KEYS.length} more</div>`;
+  }
+  el.innerHTML = h;
+}
+function flashKbdSlot(slot) {
+  const el = document.querySelector(`[data-kbd-slot="${slot}"]`);
+  if (!el) return;
+  el.style.background = "var(--accent-dim)";
+  setTimeout(() => { el.style.background = "var(--surface)"; }, 110);
+}
+function isEditableTarget(t) {
+  if (!t) return false;
+  const tag = t.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+  if (t.isContentEditable) return true;
+  return false;
 }
 
 // ─── MIDI parsing ────────────────────────────────────────────
@@ -773,28 +1042,48 @@ function renderPianoRoll() {
   const grid = document.getElementById("pianoGrid");
   const labelsEl = document.getElementById("pianoLabels");
 
-  // Y axis: one row per ring address slot, ordered by mapped pitch ascending
-  // (lowest pitch at the bottom). Slots with no pitch sink to the bottom.
-  const slotCount = Math.max(S.count, 1);
-  const slotOrder = [];
-  for (let i = 0; i < slotCount; i++) slotOrder.push({ slot: i, pitch: S.mapping[i] });
-  slotOrder.sort((a, b) => {
-    const an = a.pitch == null, bn = b.pitch == null;
-    if (an && bn) return a.slot - b.slot;
-    if (an) return -1; // unassigned slots sink to the bottom of the ascending list
-    if (bn) return 1;
-    if (a.pitch !== b.pitch) return a.pitch - b.pitch;
-    return a.slot - b.slot;
-  });
-  // slotOrder is ascending; display rows go top->bottom = highest pitch first.
-  const slotToRow = new Array(slotCount);
-  for (let r = 0; r < slotOrder.length; r++) slotToRow[slotOrder[r].slot] = slotOrder.length - 1 - r;
+  const sched = c.scheduled || c.events;
 
+  // Y axis: chromatic, one row per semitone across the union of mapped
+  // pitches and pitches that appear in the song. Mapped pitches read like
+  // before (slot color + addr indicator); the unmapped semitones in between
+  // are dim with a black/white-key tint so the melodic spacing is visible.
+  const usedPitches = new Set();
+  for (let i = 0; i < S.mapping.length; i++) {
+    if (Number.isInteger(S.mapping[i])) usedPitches.add(S.mapping[i]);
+  }
+  for (const e of sched) usedPitches.add(e.pitch);
+  if (usedPitches.size === 0) {
+    for (let p = 60; p < 72; p++) usedPitches.add(p);
+  }
+  let minPitch = 127, maxPitch = 0;
+  for (const p of usedPitches) { if (p < minPitch) minPitch = p; if (p > maxPitch) maxPitch = p; }
+
+  // pitch -> slot. If two slots share a pitch, the lowest-index one wins.
+  const pitchToMappedSlot = new Map();
+  for (let i = 0; i < S.mapping.length; i++) {
+    const p = S.mapping[i];
+    if (Number.isInteger(p) && !pitchToMappedSlot.has(p)) pitchToMappedSlot.set(p, i);
+  }
+
+  const rowCount = maxPitch - minPitch + 1;
+  const pitchToRow = (pitch) => maxPitch - pitch; // top row = highest pitch
+  const BLACK_KEYS = new Set([1, 3, 6, 8, 10]); // C#, D#, F#, G#, A#
+  const rh = 100 / rowCount;
+
+  // Labels — top down (highest pitch first).
   let labels = "";
-  for (let r = slotOrder.length - 1; r >= 0; r--) {
-    const { slot, pitch } = slotOrder[r];
-    const col = SLOT_COLORS[slot] || "var(--text-muted)";
-    labels += `<div class="piano-label" style="color:${col}"><span>${pitch == null ? "—" : midiName(pitch)}</span><span class="addr">#${slot}</span></div>`;
+  for (let r = 0; r < rowCount; r++) {
+    const pitch = maxPitch - r;
+    const slot = pitchToMappedSlot.has(pitch) ? pitchToMappedSlot.get(pitch) : -1;
+    const isBlack = BLACK_KEYS.has(pitch % 12);
+    const isC = (pitch % 12) === 0;
+    const cls = ["piano-label"];
+    if (slot < 0) cls.push(isC ? "octave" : "unmapped");
+    const col = slot >= 0 ? (SLOT_COLORS[slot] || "var(--text-muted)") : "";
+    const bg = slot >= 0 ? "rgba(200,150,64,0.06)" : (isBlack ? "rgba(0,0,0,0.18)" : "transparent");
+    const addrText = slot >= 0 ? `#${slot}` : "";
+    labels += `<div class="${cls.join(" ")}" style="${col ? `color:${col};` : ""}background:${bg}"><span>${midiName(pitch)}</span><span class="addr">${addrText}</span></div>`;
   }
   labelsEl.innerHTML = labels;
 
@@ -805,45 +1094,54 @@ function renderPianoRoll() {
   // Time grid every second.
   for (let s = 0; s <= Math.ceil(totalSec); s++) {
     const x = s * 80 + 20;
-    h += `<div style="position:absolute;left:${x}px;top:0;bottom:0;width:1px;background:${s%4===0?'var(--border-light)':'rgba(48,42,36,0.25)'}"></div>`;
+    h += `<div style="position:absolute;left:${x}px;top:0;bottom:0;width:1px;background:${s%4===0?'var(--border-light)':'rgba(48,42,36,0.25)'};z-index:1"></div>`;
     if (s % 2 === 0) {
-      h += `<div style="position:absolute;left:${x+2}px;top:2px;font-size:9px;color:var(--text-dim);font-family:'JetBrains Mono',monospace">${s}s</div>`;
+      h += `<div style="position:absolute;left:${x+2}px;top:2px;font-size:9px;color:var(--text-dim);font-family:'JetBrains Mono',monospace;z-index:1">${s}s</div>`;
     }
   }
 
-  // Row backgrounds.
-  for (let i = 0; i < slotCount; i++) {
-    h += `<div style="position:absolute;left:0;right:0;top:${(i/slotCount)*100}%;height:${100/slotCount}%;background:${i%2?'rgba(48,42,36,0.08)':'transparent'};border-bottom:1px solid rgba(48,42,36,0.1)"></div>`;
+  // Row backgrounds: black-key tint + a faint warm wash on mapped-slot rows.
+  for (let r = 0; r < rowCount; r++) {
+    const pitch = maxPitch - r;
+    const isBlack = BLACK_KEYS.has(pitch % 12);
+    const slot = pitchToMappedSlot.has(pitch) ? pitchToMappedSlot.get(pitch) : -1;
+    let bg;
+    if (slot >= 0) bg = "rgba(200,150,64,0.07)";
+    else if (isBlack) bg = "rgba(0,0,0,0.22)";
+    else bg = "transparent";
+    h += `<div style="position:absolute;left:0;right:0;top:${r*rh}%;height:${rh}%;background:${bg};border-bottom:1px solid rgba(48,42,36,0.15)"></div>`;
   }
 
   // Cursor.
   h += `<div id="cursor" style="position:absolute;left:20px;top:0;bottom:0;width:2px;background:var(--accent-bright);opacity:0;z-index:10"></div>`;
 
-  // Notes — rows already sorted by pitch (slotToRow gives top-down index).
-  const rh = 100 / slotCount;
-  const sched = c.scheduled || c.events;
+  // Notes — placed at their actual pitch row. Velocity drives both bar
+  // height (anchored to the row's bottom) and opacity, so loud notes fill
+  // the row and soft notes shrink to a low stub.
   for (const e of sched) {
-    const slot = e.slot != null ? e.slot : pitchToSlot(e.pitch);
+    const r = pitchToRow(e.pitch);
+    if (r < 0 || r >= rowCount) continue;
     const x = (e.timeMs / 1000) * 80 + 20;
-    // Bar width tracks note duration (1s = 80px). Floor at 4px so very
-    // short notes stay visible. Notes with no recorded note-off get the
-    // floor as well.
     const widthPx = Math.max(4, (e.durMs / 1000) * 80);
-    if (slot < 0 || slot >= slotCount) {
-      // Park unmapped notes along the very top edge for visibility.
-      h += `<div class="note-bar unmapped" title="unmapped pitch ${e.pitch} (${midiName(e.pitch)}) @ ${(e.timeMs/1000).toFixed(2)}s · ${(e.durMs/1000).toFixed(2)}s" style="left:${x}px;width:${widthPx}px;top:0;height:6px"></div>`;
-      continue;
-    }
-    const ri = slotToRow[slot];
-    const opacity = 0.45 + (e.vel / 127) * 0.55;
-    const color = SLOT_COLORS[slot] || "var(--accent)";
-    const fb = pitchIsFallback(e.pitch);
+    const slot = e.slot != null ? e.slot : pitchToSlot(e.pitch);
+    const dropped = slot < 0;
+    const fb = !dropped && pitchIsFallback(e.pitch);
+    const color = dropped ? "var(--text-dim)" : (SLOT_COLORS[slot] || "var(--accent)");
+
+    const velFrac = Math.max(0.15, Math.min(1, (e.vel || 0) / 127));
+    const barHeightPct = (0.2 + velFrac * 0.8) * rh;
+    const barTopPct = (r + 1) * rh - barHeightPct;
+    const opacity = 0.4 + velFrac * 0.55;
+
     const classes = ["note-bar"];
+    if (dropped) classes.push("unmapped");
     if (fb) classes.push("fallback");
     if (e.suppressed) classes.push("suppressed");
-    const arrow = fb ? ` (rerouted from ${midiName(e.pitch)})` : "";
-    const tail = e.suppressed ? ` · merged into earlier strike` : "";
-    h += `<div class="${classes.join(" ")}" title="${midiName(e.pitch)} v${e.vel} @ ${(e.timeMs/1000).toFixed(2)}s · ${(e.durMs/1000).toFixed(2)}s -> addr ${slot}${arrow}${tail}" style="left:${x}px;width:${widthPx}px;top:calc(${ri*rh}% + 3px);height:calc(${rh}% - 6px);background:${color};opacity:${opacity}"></div>`;
+
+    const arrow = fb ? ` (rerouted -> addr ${slot})` : "";
+    const tail = e.suppressed ? ` · merged` : (dropped ? ` · dropped` : "");
+    const dest = slot >= 0 ? ` -> addr ${slot}` : "";
+    h += `<div class="${classes.join(" ")}" title="${midiName(e.pitch)} v${e.vel} @ ${(e.timeMs/1000).toFixed(2)}s · ${(e.durMs/1000).toFixed(2)}s${dest}${arrow}${tail}" style="left:${x}px;width:${widthPx}px;top:calc(${barTopPct}% + 1px);height:calc(${barHeightPct}% - 2px);background:${color};opacity:${opacity};z-index:5"></div>`;
   }
   h += `</div>`;
   grid.innerHTML = h;
@@ -923,6 +1221,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   S.trim = loadTrim();
   S.fallback = loadFallback();
   S.velFloor = loadVelFloor();
+  S.kbdEnabled = loadKbdEnabled();
 
   // File / drop zone
   const dz = document.getElementById("dropZone");
@@ -1017,6 +1316,86 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
   document.getElementById("cancelBtn").addEventListener("click", async () => {
     try { await api("POST", "/api/cancel"); log("cancel sent"); } catch (e) { log("cancel failed: " + e.message); }
+  });
+
+  // Strike-config modal wiring. Slider <-> number-input sync, live apply.
+  const cfgModal = document.getElementById("cfgModal");
+  document.getElementById("cfgCloseBtn").addEventListener("click", closeCfgModal);
+  cfgModal.addEventListener("click", (e) => {
+    if (e.target === cfgModal) closeCfgModal();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && S.cfgSlot >= 0) {
+      e.preventDefault();
+      closeCfgModal();
+    }
+  });
+  for (const p of CFG_PARAMS) {
+    const slider = document.querySelector(`[data-param-slider="${p}"]`);
+    const input = document.querySelector(`[data-param-input="${p}"]`);
+    const send = (raw) => {
+      if (S.cfgSlot < 0) return;
+      const v = parseInt(raw, 10);
+      if (!Number.isFinite(v)) return;
+      // Per-slot send-cache: identical values still resend after switching slot.
+      if (!S.cfgLastSent) S.cfgLastSent = {};
+      if (S.cfgLastSent[p] === v) return;
+      S.cfgLastSent[p] = v;
+      applyStrikeParam(S.cfgSlot, p, v);
+    };
+    slider.addEventListener("input", () => { input.value = slider.value; });
+    slider.addEventListener("change", () => send(slider.value));
+    input.addEventListener("change", () => {
+      const v = parseInt(input.value, 10);
+      if (Number.isFinite(v)) {
+        slider.value = String(Math.max(+slider.min, Math.min(+slider.max, v)));
+      }
+      send(input.value);
+    });
+  }
+  document.getElementById("cfgTestBtn").addEventListener("click", () => {
+    if (S.cfgSlot < 0) return;
+    const slot = S.cfgSlot;
+    const ma = effectiveCurrentForSlot(slot);
+    strikeAsync(slot, ma, `(cfg test slot ${slot})`);
+    log(`cfg test strike addr=${slot} ${ma} mA`);
+  });
+  document.getElementById("cfgHomeBtn").addEventListener("click", async () => {
+    if (S.cfgSlot < 0) return;
+    const slot = S.cfgSlot;
+    const status = document.getElementById("cfgStatus");
+    status.textContent = `homing addr ${slot}…`;
+    status.style.color = "var(--text-muted)";
+    try {
+      await api("POST", "/api/home", { addresses: [slot] });
+      status.textContent = `addr ${slot} homed ✓`;
+      status.style.color = "var(--success)";
+      await refreshStatus();
+    } catch (e) {
+      status.textContent = `home failed: ${e.message}`;
+      status.style.color = "var(--error)";
+    }
+  });
+
+  // Keyboard play
+  const kbd = document.getElementById("kbdEnable");
+  kbd.checked = S.kbdEnabled;
+  kbd.addEventListener("change", () => {
+    S.kbdEnabled = kbd.checked;
+    saveKbdEnabled();
+    log(`keyboard play ${S.kbdEnabled ? "enabled" : "disabled"}`);
+  });
+  document.addEventListener("keydown", (e) => {
+    if (!S.kbdEnabled) return;
+    if (e.repeat) return;
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    if (isEditableTarget(e.target)) return;
+    const slot = keyToSlot(e.key.toLowerCase());
+    if (slot < 0) return;
+    e.preventDefault();
+    const ma = effectiveCurrentForSlot(slot);
+    strikeAsync(slot, ma, "(kbd)");
+    flashKbdSlot(slot);
   });
 
   // Initial connection

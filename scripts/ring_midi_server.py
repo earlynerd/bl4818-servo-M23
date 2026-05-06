@@ -11,11 +11,12 @@ Endpoints
 ---------
 GET  /                  -> redirect to /player.html
 GET  /player.html       -> serves player/midi_player.html
-GET  /api/status        -> {"count": N, "homed": [bool * N]}
+GET  /api/status        -> {"count": N, "homed": [bool * N], "slots": [{...}]}
 POST /api/enumerate     -> re-enumerate; returns same shape as /api/status
 POST /api/home          -> {"addresses": [int]?}; homes them, returns ok/error
 POST /api/strike        -> {"address": int, "current_ma": int}; ACK reply
 POST /api/strikes       -> {"strikes": [{"address","current_ma"}, ...]}; batch
+POST /api/strike-param  -> {"address": int, "param": str, "value": int}; ACK
 POST /api/cancel        -> cancels all active strikes (panic stop)
 
 Usage
@@ -43,9 +44,18 @@ from ring_bus import (
     auto_detect_port,
     DEFAULT_BAUD,
     REPLY_MODE_ACK,
+    STRIKE_PARAM_HOME_OFFSET,
+    STRIKE_PARAM_COAST_DISTANCE,
+    STRIKE_PARAM_HOMING_DUTY,
 )
 from ring_drumbeat import home_all
 
+
+STRIKE_PARAM_BY_NAME = {
+    "home_offset": STRIKE_PARAM_HOME_OFFSET,
+    "coast_distance": STRIKE_PARAM_COAST_DISTANCE,
+    "homing_duty": STRIKE_PARAM_HOMING_DUTY,
+}
 
 ROOT = Path(__file__).resolve().parent.parent
 PLAYER_HTML = ROOT / "player" / "midi_player.html"
@@ -68,14 +78,27 @@ class Bridge:
     def status(self) -> dict:
         with self.lock:
             count = self.count
-            homed = []
+            homed: list[bool] = []
+            slots: list[dict] = []
             for addr in range(count):
                 try:
                     s = self.client.query_strike(addr)
                     homed.append(bool(s.homed))
+                    slots.append({
+                        "homed": bool(s.homed),
+                        "home_offset": s.home_offset,
+                        "coast_distance": s.coast_distance,
+                        "homing_duty": s.homing_duty,
+                    })
                 except Exception:
                     homed.append(False)
-        return {"count": count, "homed": homed}
+                    slots.append({
+                        "homed": False,
+                        "home_offset": None,
+                        "coast_distance": None,
+                        "homing_duty": None,
+                    })
+        return {"count": count, "homed": homed, "slots": slots}
 
     def strike(self, address: int, current_ma: int) -> dict:
         with self.lock:
@@ -91,6 +114,13 @@ class Bridge:
                 reply = self.client.strike(addr, cur, reply_mode=REPLY_MODE_ACK)
                 results.append(self._ack_to_dict(addr, reply))
         return results
+
+    def set_strike_param(self, address: int, param_id: int, value: int) -> dict:
+        with self.lock:
+            reply = self.client.set_strike_param(
+                address, param_id, value, reply_mode=REPLY_MODE_ACK
+            )
+        return self._ack_to_dict(address, reply)
 
     def home(self, addresses: list[int], timeout_ms: int = 8000) -> None:
         with self.lock:
@@ -229,6 +259,21 @@ class Handler(BaseHTTPRequestHandler):
                 data = self._read_json()
                 items = data.get("strikes") or []
                 self._json(200, {"results": self.bridge.strikes(items)})
+                return
+
+            if self.path == "/api/strike-param":
+                data = self._read_json()
+                addr = int(data["address"])
+                name = str(data["param"])
+                param_id = STRIKE_PARAM_BY_NAME.get(name)
+                if param_id is None:
+                    self._json(400, {"error": f"unknown strike param '{name}'"})
+                    return
+                value = int(data["value"])
+                if value < -32768 or value > 32767:
+                    self._json(400, {"error": "value out of int16 range"})
+                    return
+                self._json(200, self.bridge.set_strike_param(addr, param_id, value))
                 return
 
             if self.path == "/api/cancel":

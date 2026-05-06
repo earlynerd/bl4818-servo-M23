@@ -59,14 +59,17 @@ SUBCMD_SET_CURRENT   = 0x15
 SUBCMD_QUERY_TIMING  = 0x16
 SUBCMD_DETECT_CSN_POLARITY = 0x17
 SUBCMD_SET_CSN_POLARITY    = 0x18
-SUBCMD_MASK          = 0x3F
-SUBCMD_REPLY_FULL    = 0x00
-SUBCMD_REPLY_ACK     = 0x40
-SUBCMD_REPLY_NONE    = 0x80
+SUBCMD_QUERY_STRIKE_TIMING = 0x19
+SUBCMD_MASK            = 0x3F
+SUBCMD_REPLY_FULL      = 0x00
+SUBCMD_REPLY_ACK       = 0x40
+SUBCMD_REPLY_NONE      = 0x80
+SUBCMD_REPLY_ACK_TIMED = 0xC0
 
 REPLY_MODE_FULL = "full"
 REPLY_MODE_ACK = "ack"
 REPLY_MODE_NONE = "none"
+REPLY_MODE_ACK_TIMED = "ack-timed"
 
 ACK_RESULT_OK               = 0x00
 ACK_RESULT_OK_RETRIGGERED   = 0x01
@@ -83,14 +86,15 @@ STRIKE_PARAM_HOME_OFFSET    = 0x01
 STRIKE_PARAM_COAST_DISTANCE = 0x02
 STRIKE_PARAM_HOMING_DUTY    = 0x03
 
-STRIKE_TIMING_COAST_VALID     = 0x01
-STRIKE_TIMING_REBOUND_VALID   = 0x02
-STRIKE_TIMING_READY_VALID     = 0x04
-STRIKE_TIMING_ACTIVE          = 0x08
-STRIKE_TIMING_RETRIGGERED     = 0x10
-STRIKE_TIMING_REBOUND_TIMEOUT = 0x20
-STRIKE_TIMING_VELOCITY_VALID  = 0x40
-STRIKE_TIMING_RETRIGGER_READY_VALID = 0x80
+STRIKE_TIMING_COAST_VALID     = 0x0001
+STRIKE_TIMING_REBOUND_VALID   = 0x0002
+STRIKE_TIMING_READY_VALID     = 0x0004
+STRIKE_TIMING_ACTIVE          = 0x0008
+STRIKE_TIMING_RETRIGGERED     = 0x0010
+STRIKE_TIMING_REBOUND_TIMEOUT = 0x0020
+STRIKE_TIMING_VELOCITY_VALID  = 0x0040
+STRIKE_TIMING_RETRIGGER_READY_VALID = 0x0080
+STRIKE_TIMING_IMPACT_VALID    = 0x0100
 
 # ── Timing defaults ─────────────────────────────────────────────────────────
 
@@ -144,6 +148,7 @@ SUBCMD_NAMES  = {
     SUBCMD_QUERY_TIMING: "QUERY_TIMING",
     SUBCMD_DETECT_CSN_POLARITY: "DETECT_CSN_POLARITY",
     SUBCMD_SET_CSN_POLARITY: "SET_CSN_POLARITY",
+    SUBCMD_QUERY_STRIKE_TIMING: "QUERY_STRIKE_TIMING",
 }
 ACK_RESULT_NAMES = {
     ACK_RESULT_OK: "OK",
@@ -188,11 +193,59 @@ class MotorStatus:
 
 
 @dataclasses.dataclass
+class StrikeTiming:
+    """Compact snapshot of the most recently completed strike's timing.
+
+    Returned by QUERY_STRIKE_TIMING and piggybacked on REPLY_MODE_ACK_TIMED.
+    `sequence` correlates the snapshot with which strike command produced
+    it; if `sequence == 0` the device has not completed any strike yet."""
+
+    address: int
+    sequence: int
+    flags: int
+    trigger_to_coast_ms: Optional[int]
+    trigger_to_impact_ms: Optional[int]
+    trigger_to_rebound_ms: Optional[int]
+    estimated_strike_velocity_dps: Optional[int]
+
+    @property
+    def coast_valid(self) -> bool:
+        return bool(self.flags & STRIKE_TIMING_COAST_VALID)
+
+    @property
+    def impact_valid(self) -> bool:
+        return bool(self.flags & STRIKE_TIMING_IMPACT_VALID)
+
+    @property
+    def rebound_valid(self) -> bool:
+        return bool(self.flags & STRIKE_TIMING_REBOUND_VALID)
+
+    @property
+    def velocity_valid(self) -> bool:
+        return bool(self.flags & STRIKE_TIMING_VELOCITY_VALID)
+
+    @property
+    def rebound_timeout(self) -> bool:
+        return bool(self.flags & STRIKE_TIMING_REBOUND_TIMEOUT)
+
+    @property
+    def has_data(self) -> bool:
+        """True if any of the validity flags we care about are set. False
+        means the device hasn't snapshotted a completed strike yet."""
+        return bool(self.flags & (
+            STRIKE_TIMING_COAST_VALID
+            | STRIKE_TIMING_IMPACT_VALID
+            | STRIKE_TIMING_REBOUND_VALID
+        ))
+
+
+@dataclasses.dataclass
 class CommandAck:
     address: int
     subcmd: int
     result: int
     detail: int
+    metrics: Optional[StrikeTiming] = None
 
     @property
     def subcmd_name(self) -> str:
@@ -216,6 +269,7 @@ class StrikeStatus:
     sequence: int = 0
     last_current_ma: int = 0
     trigger_to_coast_ms: int = 0
+    trigger_to_impact_ms: Optional[int] = None
     trigger_to_rebound_ms: int = 0
     trigger_to_retrigger_ready_ms: int = 0
     trigger_to_ready_ms: int = 0
@@ -262,6 +316,10 @@ class StrikeStatus:
     def retrigger_ready_valid(self) -> bool:
         return bool(self.flags & STRIKE_TIMING_RETRIGGER_READY_VALID)
 
+    @property
+    def impact_valid(self) -> bool:
+        return bool(self.flags & STRIKE_TIMING_IMPACT_VALID)
+
 
 @dataclasses.dataclass
 class TimingStatus:
@@ -301,6 +359,32 @@ class TimingStatus:
 
 
 AddressedReply = MotorStatus | CommandAck | TimingStatus | None
+
+
+def _parse_strike_timing_payload(address: int, body: bytes) -> StrikeTiming:
+    """Parse the 12-byte timing tail shared by REPLY_MODE_ACK_TIMED and
+    QUERY_STRIKE_TIMING. Layout:
+        seq:u16 | flags:u16 | t_coast:u16 | t_impact:u16 | t_rebound:u16 | vel:u16
+    Each value's "valid" bit decides whether the corresponding field on
+    the returned StrikeTiming is reported or left as ``None``.
+    """
+    if len(body) != 12:
+        raise RingError(f"strike timing payload must be 12 bytes, got {len(body)}")
+    seq = struct.unpack(">H", body[0:2])[0]
+    flags = struct.unpack(">H", body[2:4])[0]
+    t_coast = struct.unpack(">H", body[4:6])[0]
+    t_impact = struct.unpack(">H", body[6:8])[0]
+    t_rebound = struct.unpack(">H", body[8:10])[0]
+    vel = struct.unpack(">H", body[10:12])[0]
+    return StrikeTiming(
+        address=address,
+        sequence=seq,
+        flags=flags,
+        trigger_to_coast_ms=t_coast if (flags & STRIKE_TIMING_COAST_VALID) else None,
+        trigger_to_impact_ms=t_impact if (flags & STRIKE_TIMING_IMPACT_VALID) else None,
+        trigger_to_rebound_ms=t_rebound if (flags & STRIKE_TIMING_REBOUND_VALID) else None,
+        estimated_strike_velocity_dps=vel if (flags & STRIKE_TIMING_VELOCITY_VALID) else None,
+    )
 
 
 # ── Exceptions ───────────────────────────────────────────────────────────────
@@ -472,8 +556,11 @@ class RingClientV2:
             return SUBCMD_REPLY_ACK
         if mode == REPLY_MODE_NONE:
             return SUBCMD_REPLY_NONE
+        if mode == REPLY_MODE_ACK_TIMED:
+            return SUBCMD_REPLY_ACK_TIMED
         raise RingError(
-            f"reply_mode must be one of: {REPLY_MODE_FULL}, {REPLY_MODE_ACK}, {REPLY_MODE_NONE}"
+            f"reply_mode must be one of: {REPLY_MODE_FULL}, {REPLY_MODE_ACK}, "
+            f"{REPLY_MODE_ACK_TIMED}, {REPLY_MODE_NONE}"
         )
 
     def _build_addressed_payload(
@@ -510,13 +597,24 @@ class RingClientV2:
             remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
             payload = self._recv_frame(timeout_ms=remaining_ms)
             cmd = payload[0] if payload else 0
-            if cmd == expected_cmd and len(payload) == 5 and (payload[1] & SUBCMD_MASK) == expected_subcmd:
-                return CommandAck(
-                    address=address,
-                    subcmd=payload[1] & SUBCMD_MASK,
-                    result=payload[2],
-                    detail=struct.unpack(">H", payload[3:5])[0],
-                )
+            payload_subcmd = payload[1] & SUBCMD_MASK if len(payload) >= 2 else 0
+            if cmd == expected_cmd and payload_subcmd == expected_subcmd:
+                if len(payload) == 5:
+                    return CommandAck(
+                        address=address,
+                        subcmd=payload_subcmd,
+                        result=payload[2],
+                        detail=struct.unpack(">H", payload[3:5])[0],
+                    )
+                if len(payload) == 17:
+                    # ACK_TIMED: piggyback metrics from prev_compact snapshot.
+                    return CommandAck(
+                        address=address,
+                        subcmd=payload_subcmd,
+                        result=payload[2],
+                        detail=struct.unpack(">H", payload[3:5])[0],
+                        metrics=_parse_strike_timing_payload(address, payload[5:17]),
+                    )
             self._trace("skip", bytes([cmd]))
 
     def _addressed_command(
@@ -537,7 +635,11 @@ class RingClientV2:
         encoded_reply_mode = self._encode_reply_mode(reply_mode)
         if encoded_reply_mode == SUBCMD_REPLY_NONE:
             return None
-        if encoded_reply_mode == SUBCMD_REPLY_ACK:
+        # Both ACK and ACK_TIMED come back as type 0x50+addr — they only
+        # differ in payload length (5 vs 17). _recv_ack_reply already
+        # handles both lengths and attaches the piggyback metrics from the
+        # 17-byte form.
+        if encoded_reply_mode == SUBCMD_REPLY_ACK or encoded_reply_mode == SUBCMD_REPLY_ACK_TIMED:
             return self._recv_ack_reply(address, subcmd)
         return self._recv_status_reply(address)
 
@@ -676,8 +778,25 @@ class RingClientV2:
             remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
             payload = self._recv_frame(timeout_ms=remaining_ms)
             cmd = payload[0] if payload else 0
-            if cmd == expected_cmd and len(payload) in (11, 22, 24, 30, 32):
+            if cmd == expected_cmd and len(payload) in (11, 22, 24, 30, 32, 35):
                 return self._parse_strike_status(payload)
+            self._trace("skip", bytes([cmd]))
+
+    def query_strike_timing(self, address: int) -> StrikeTiming:
+        """Compact 13-byte poll of the last completed strike's metrics. ~70%
+        less wire traffic than ``query_strike``; useful for harvesting timing
+        without paying for the full strike-status payload."""
+        self._check_address(address)
+        self._flush_rx()
+        self._send_frame(self._build_addressed_payload(address, SUBCMD_QUERY_STRIKE_TIMING))
+        deadline = time.monotonic() + self.timeout_ms / 1000.0
+        expected_cmd = CMD_STATUS_BASE | address
+        while True:
+            remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
+            payload = self._recv_frame(timeout_ms=remaining_ms)
+            cmd = payload[0] if payload else 0
+            if cmd == expected_cmd and len(payload) == 13:
+                return _parse_strike_timing_payload(address, payload[1:13])
             self._trace("skip", bytes([cmd]))
 
     def query_timing(self, address: int) -> TimingStatus:
@@ -697,6 +816,29 @@ class RingClientV2:
     def _parse_strike_status(self, payload: bytes) -> StrikeStatus:
         cmd = payload[0]
         address = cmd & 0x0F
+        if len(payload) == 35:
+            # Newer firmware: same first 32 bytes as before, plus
+            # flags-hi @ offset 32 and trigger_to_impact_ms @ 33..34.
+            return StrikeStatus(
+                address=address,
+                state=payload[1],
+                homed=payload[2],
+                flags=payload[3] | (payload[32] << 8),
+                sequence=struct.unpack(">H", payload[4:6])[0],
+                last_current_ma=struct.unpack(">h", payload[6:8])[0],
+                trigger_to_coast_ms=struct.unpack(">H", payload[8:10])[0],
+                trigger_to_rebound_ms=struct.unpack(">H", payload[10:12])[0],
+                trigger_to_retrigger_ready_ms=struct.unpack(">H", payload[12:14])[0],
+                trigger_to_ready_ms=struct.unpack(">H", payload[14:16])[0],
+                estimated_strike_velocity_dps=struct.unpack(">H", payload[16:18])[0],
+                drum_position=struct.unpack(">i", payload[18:22])[0],
+                home_position=struct.unpack(">i", payload[22:26])[0],
+                home_offset=struct.unpack(">h", payload[26:28])[0],
+                coast_distance=struct.unpack(">h", payload[28:30])[0],
+                homing_duty=struct.unpack(">h", payload[30:32])[0],
+                trigger_to_impact_ms=struct.unpack(">H", payload[33:35])[0],
+            )
+
         if len(payload) == 32:
             return StrikeStatus(
                 address=address,
@@ -1000,6 +1142,7 @@ __all__ = [
     "MotorStatus",
     "PREAMBLE",
     "REPLY_MODE_ACK",
+    "REPLY_MODE_ACK_TIMED",
     "REPLY_MODE_FULL",
     "REPLY_MODE_NONE",
     "RingCRCError",
@@ -1012,6 +1155,7 @@ __all__ = [
     "STRIKE_STATES",
     "STRIKE_TIMING_ACTIVE",
     "STRIKE_TIMING_COAST_VALID",
+    "STRIKE_TIMING_IMPACT_VALID",
     "STRIKE_TIMING_REBOUND_TIMEOUT",
     "STRIKE_TIMING_REBOUND_VALID",
     "STRIKE_TIMING_READY_VALID",
@@ -1024,10 +1168,12 @@ __all__ = [
     "SUBCMD_NAMES",
     "SUBCMD_QUERY_STATUS",
     "SUBCMD_QUERY_STRIKE",
+    "SUBCMD_QUERY_STRIKE_TIMING",
     "SUBCMD_QUERY_TIMING",
     "SUBCMD_DETECT_CSN_POLARITY",
     "SUBCMD_SET_CSN_POLARITY",
     "SUBCMD_REPLY_ACK",
+    "SUBCMD_REPLY_ACK_TIMED",
     "SUBCMD_REPLY_FULL",
     "SUBCMD_REPLY_NONE",
     "SUBCMD_SAVE_SETTINGS",
@@ -1048,6 +1194,7 @@ __all__ = [
     "SUBCMD_STRIKE_HOME",
     "SUBCMD_ZERO_POS",
     "StrikeStatus",
+    "StrikeTiming",
     "TimingStatus",
     "auto_detect_port",
     "crc16_ccitt",

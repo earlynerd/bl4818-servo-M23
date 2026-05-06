@@ -62,8 +62,8 @@ The first payload byte is the command type.
 | 0x03 | SET_ADDRESS | `[counter]` | 2 | master -> ring (S&F) |
 | 0x10 | BROADCAST_DUTY | `[duty_hi duty_lo] x N` | 1 + 2*N | master -> ring |
 | 0x20+addr | ADDRESSED_CMD | `[subcmd_flags] [data...]` | 2..8 | master -> ring |
-| 0x40+addr | STATUS_REPLY | query-dependent status payload | 11, 17, 32, or 49 | device -> master |
-| 0x50+addr | ACK_REPLY | `[subcmd] [result] [detail_hi] [detail_lo]` | 5 | device -> master |
+| 0x40+addr | STATUS_REPLY | query-dependent status payload | 13, 17, 32, 35, 49, or 57 | device -> master |
+| 0x50+addr | ACK_REPLY | `[subcmd] [result] [detail_hi] [detail_lo]` (bare) or +12 timing bytes (timed) | 5 or 17 | device -> master |
 
 ### Addressed Sub-Commands
 
@@ -92,6 +92,7 @@ sub-command ID; the top 2 bits select reply policy.
 | 0x12 | SAVE_SETTINGS | -- | 0 |
 | 0x13 | CLEAR_SETTINGS | -- | 0 |
 | 0x16 | QUERY_TIMING | -- | 0 |
+| 0x19 | QUERY_STRIKE_TIMING | -- | 0 |
 
 ### Addressed Reply Modes
 
@@ -107,15 +108,19 @@ bits 5:0 = sub-command ID
 | `00` | FULL | Current/default behavior. Device emits the normal full reply. |
 | `01` | ACK | Device emits a compact `ACK_REPLY`. |
 | `10` | NONE | Device suppresses the device-generated reply. |
-| `11` | Reserved | Must not be sent. Current firmware treats it as `FULL`. |
+| `11` | ACK_TIMED | Device emits an `ACK_REPLY` with the last completed strike's compact metrics piggybacked on the end. 17 payload bytes total. |
 
 Notes:
 
-- `QUERY_STATUS` and `QUERY_STRIKE` always return their full reply payloads.
+- `QUERY_STATUS`, `QUERY_STRIKE`, and `QUERY_STRIKE_TIMING` always return their
+  full reply payloads regardless of requested reply mode.
 - `QUERY_TIMING` also always returns its full reply payload.
 - `NONE` only suppresses the device-generated reply. In cut-through mode the
   command frame itself still propagates around the ring and returns to the
   master RX path.
+- `ACK_TIMED` is the recommended reply mode for `STRIKE`: it costs 12 extra
+  payload bytes (~480 µs at 250 kbaud) but eliminates the need for a separate
+  `QUERY_STRIKE` round trip to harvest the previous strike's timing.
 
 ### ACK Replies
 
@@ -127,6 +132,22 @@ Addressed commands sent with reply mode `ACK` reply with type `0x50 + addr` and
 ```
 
 `subcmd` is the low-6-bit sub-command ID without the reply-mode bits.
+
+Reply mode `ACK_TIMED` returns the same 5-byte ACK header with 12 additional
+bytes describing the most recently completed strike (read from the firmware's
+`prev_compact` snapshot — never the in-flight strike whose ACK these bytes
+ride on; correlate by sequence number):
+
+```text
+[type] [subcmd] [result] [detail_hi] [detail_lo]
+[seq_hi] [seq_lo] [flags_hi] [flags_lo]
+[t_coast_hi] [t_coast_lo] [t_impact_hi] [t_impact_lo]
+[t_rebound_hi] [t_rebound_lo] [vel_hi] [vel_lo]
+```
+
+Total payload is 17 bytes. If the device has not yet completed any strike
+since boot, `seq` is 0 and `flags` has no validity bits set; hosts should
+treat the timing fields as missing in that case.
 
 `result` codes currently used by firmware:
 
@@ -161,10 +182,13 @@ when the underlying erase/write/verify operation fails.
 separate sustained peak-current detector plus a higher instantaneous ceiling
 for `FAULT_OVERCURRENT`; the raw peak sample is not reported in this reply.
 
-`QUERY_STRIKE` replies with the same type `0x40 + addr` and 32 payload bytes:
+`QUERY_STRIKE` replies with the same type `0x40 + addr` and 35 payload bytes
+(legacy firmware emits 32 bytes — older hosts should accept either length).
+The first 32 bytes match the legacy layout exactly; the new fields are
+appended:
 
 ```
-[type] [strike_state] [homed] [timing_flags]
+[type] [strike_state] [homed] [timing_flags_lo]
 [seq_hi] [seq_lo] [current_hi] [current_lo]
 [t_coast_hi] [t_coast_lo] [t_rebound_hi] [t_rebound_lo]
 [t_retrigger_ready_hi] [t_retrigger_ready_lo]
@@ -174,22 +198,42 @@ for `FAULT_OVERCURRENT`; the raw peak sample is not reported in this reply.
 [home_offset_hi] [home_offset_lo]
 [coast_distance_hi] [coast_distance_lo]
 [homing_duty_hi] [homing_duty_lo]
+[timing_flags_hi]
+[t_impact_hi] [t_impact_lo]
 ```
 
-`timing_flags` bits:
+`timing_flags` is a 16-bit field carried as the byte at offset 3 (low byte)
+and the byte at offset 32 (high byte). Bits:
 
-- `0x01` trigger-to-coast time valid
-- `0x02` trigger-to-rebound time valid
-- `0x04` trigger-to-ready time valid
-- `0x08` strike currently active
-- `0x10` most recent strike was accepted as a retrigger while already active
-- `0x20` rebound timing was produced by coast timeout rather than detected reversal
-- `0x40` strike velocity estimate valid
-- `0x80` trigger-to-retrigger-ready time valid
+- `0x0001` trigger-to-coast time valid
+- `0x0002` trigger-to-rebound time valid
+- `0x0004` trigger-to-ready time valid
+- `0x0008` strike currently active
+- `0x0010` most recent strike was accepted as a retrigger while already active
+- `0x0020` rebound timing was produced by coast timeout rather than detected reversal
+- `0x0040` strike velocity estimate valid
+- `0x0080` trigger-to-retrigger-ready time valid
+- `0x0100` trigger-to-impact time valid
 
 Timing fields are reported in milliseconds for the most recently accepted
-strike. `t_rebound` is an approximate impact proxy derived from rebound
-detection or coast timeout, not a direct drum-contact sensor.
+strike. `t_impact` is the firmware's measurement of mallet-velocity zero-cross
+during coast — a direct lower bound on drum contact, suitable for scheduling
+strikes ahead of their musical time. `t_rebound` is the older "velocity
+reversed past threshold" proxy, slightly later than impact.
+
+`QUERY_STRIKE_TIMING` replies with type `0x40 + addr` and 13 payload bytes —
+a compact subset of the strike status focused on the timing fields the host
+needs to schedule ahead. Reads from the firmware's `prev_compact` snapshot,
+so the values describe the last completed strike, never an in-progress one:
+
+```
+[type] [seq_hi] [seq_lo] [flags_hi] [flags_lo]
+[t_coast_hi] [t_coast_lo] [t_impact_hi] [t_impact_lo]
+[t_rebound_hi] [t_rebound_lo] [vel_hi] [vel_lo]
+```
+
+Use this rather than `QUERY_STRIKE` when only the timing fields are needed —
+saves ~70% of the round-trip byte cost (16 wire bytes vs 38).
 
 The `STRIKE` payload is a signed 16-bit current command in mA. Firmware
 orients that current toward the learned drum direction for the outbound hit.

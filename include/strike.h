@@ -32,20 +32,25 @@ typedef enum {
     STRIKE_TRIGGER_REJECT_NOT_READY,
 } strike_trigger_result_t;
 
-#define STRIKE_TIMING_COAST_VALID      0x01u
-#define STRIKE_TIMING_REBOUND_VALID    0x02u
-#define STRIKE_TIMING_READY_VALID      0x04u
-#define STRIKE_TIMING_ACTIVE           0x08u
-#define STRIKE_TIMING_RETRIGGERED      0x10u
-#define STRIKE_TIMING_REBOUND_TIMEOUT  0x20u
-#define STRIKE_TIMING_VELOCITY_VALID   0x40u
-#define STRIKE_TIMING_RETRIGGER_READY_VALID 0x80u
+/* Validity / state flags packed into a uint16. The low byte (0x01..0x80)
+ * keeps the legacy bit assignments so the on-wire low-byte parsing is
+ * unchanged for hosts that haven't been updated yet. */
+#define STRIKE_TIMING_COAST_VALID      0x0001u
+#define STRIKE_TIMING_REBOUND_VALID    0x0002u
+#define STRIKE_TIMING_READY_VALID      0x0004u
+#define STRIKE_TIMING_ACTIVE           0x0008u
+#define STRIKE_TIMING_RETRIGGERED      0x0010u
+#define STRIKE_TIMING_REBOUND_TIMEOUT  0x0020u
+#define STRIKE_TIMING_VELOCITY_VALID   0x0040u
+#define STRIKE_TIMING_RETRIGGER_READY_VALID 0x0080u
+#define STRIKE_TIMING_IMPACT_VALID     0x0100u  /* trigger->mallet-stops time */
 
 typedef struct {
-    uint8_t  flags;
+    uint16_t flags;
     uint16_t sequence;
     int16_t  last_current_ma;
     uint16_t trigger_to_coast_ms;
+    uint16_t trigger_to_impact_ms;
     uint16_t trigger_to_rebound_ms;
     uint16_t trigger_to_retrigger_ready_ms;
     uint16_t trigger_to_ready_ms;
@@ -54,6 +59,21 @@ typedef struct {
     int16_t  coast_distance;
     int16_t  homing_duty;
 } strike_metrics_t;
+
+/* Compact "last completed strike" snapshot. Captured at rebound detection
+ * (when the major timing fields are all valid) and again whenever a new
+ * strike begins (so a retriggered cycle still publishes whatever data we
+ * had at the moment of retrigger). Used by piggyback-ACK and the compact
+ * STRIKE_TIMING query to keep ring traffic small. */
+typedef struct {
+    uint16_t flags;
+    uint16_t sequence;
+    int16_t  last_current_ma;
+    uint16_t trigger_to_coast_ms;
+    uint16_t trigger_to_impact_ms;
+    uint16_t trigger_to_rebound_ms;
+    uint16_t estimated_strike_velocity_dps;
+} strike_compact_t;
 
 void strike_init(void);
 void strike_tick(void);             /* call at STRIKE_LOOP_HZ */
@@ -80,5 +100,6 @@ int32_t  strike_get_home_position(void);
 uint8_t  strike_is_homed(void);
 uint16_t strike_get_sequence(void);
 void strike_get_metrics(strike_metrics_t *metrics);
+void strike_get_compact_metrics(strike_compact_t *compact);
 
 #endif /* STRIKE_H */

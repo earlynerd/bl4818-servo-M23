@@ -333,6 +333,19 @@
       </div>
     </div>
 
+    <div id="cfgTimingPanel" style="border-top:1px solid var(--border);padding-top:12px;display:flex;flex-direction:column;gap:6px">
+      <div style="display:flex;align-items:baseline;justify-content:space-between">
+        <label style="font-size:11px;font-family:'JetBrains Mono',monospace;color:var(--text-muted);text-transform:uppercase;letter-spacing:1.2px">Last Strike</label>
+        <span id="cfgTimingSeq" style="font-size:11px;font-family:'JetBrains Mono',monospace;color:var(--text-dim)">no data yet</span>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;font-family:'JetBrains Mono',monospace;font-size:12px">
+        <div><div style="font-size:10px;color:var(--text-dim);text-transform:uppercase">coast</div><div id="cfgTimingCoast" style="color:var(--accent)">—</div></div>
+        <div><div style="font-size:10px;color:var(--text-dim);text-transform:uppercase">impact</div><div id="cfgTimingImpact" style="color:var(--accent-bright)">—</div></div>
+        <div><div style="font-size:10px;color:var(--text-dim);text-transform:uppercase">rebound</div><div id="cfgTimingRebound" style="color:var(--accent)">—</div></div>
+        <div><div style="font-size:10px;color:var(--text-dim);text-transform:uppercase">peak vel</div><div id="cfgTimingVel" style="color:var(--accent)">—</div></div>
+      </div>
+    </div>
+
     <div class="modal-footer">
       <span class="status" id="cfgStatus">changes apply live</span>
       <div style="display:flex;gap:8px">
@@ -387,6 +400,7 @@ const S = {
   animFrame: null,
   startWall: 0,
   cfgSlot: -1,   // slot currently shown in the strike-config modal, -1 = closed
+  strikeTiming: {}, // strikeTiming[slot] = last metrics dict from the bridge
 };
 
 // ─── Logging helpers ─────────────────────────────────────────
@@ -429,7 +443,10 @@ async function api(method, path, body) {
 
 // Fire-and-forget strike — used by the playback scheduler. We don't
 // await; the bridge serializes ring access on its own lock so multiple
-// in-flight POSTs won't collide.
+// in-flight POSTs won't collide. The bridge requests REPLY_MODE_ACK_TIMED
+// from the device so each ACK carries the last-completed strike's
+// timing piggybacked on it; we cache that into S.strikeTiming[slot] for
+// the cfg modal to display without paying for a separate query.
 function strikeAsync(addr, currentMa, label) {
   fetch(API_BASE + "/api/strike", {
     method: "POST",
@@ -437,8 +454,13 @@ function strikeAsync(addr, currentMa, label) {
     body: JSON.stringify({ address: addr, current_ma: currentMa }),
     keepalive: true,
   }).then(r => r.ok ? r.json() : null).then(j => {
-    if (j && !j.accepted && j.result_name && j.result_name !== "OK") {
+    if (!j) return;
+    if (!j.accepted && j.result_name && j.result_name !== "OK") {
       log(`strike addr=${addr} -> ${j.result_name}`);
+    }
+    if (j.metrics) {
+      S.strikeTiming[addr] = j.metrics;
+      if (S.cfgSlot === addr) refreshCfgTiming();
     }
   }).catch(e => log(`strike addr=${addr} ${label||""} failed: ${e.message}`));
 }
@@ -449,10 +471,19 @@ async function refreshStatus() {
     S.count = j.count || 0;
     S.homed = j.homed || [];
     S.slots = Array.isArray(j.slots) ? j.slots : [];
+    // Seed timing cache from the bridge's per-slot last_timing (if any).
+    // The bridge updates this every strike; we mirror it locally so the
+    // cfg modal has data even on first open before any strike runs.
+    for (let i = 0; i < S.slots.length; i++) {
+      if (S.slots[i] && S.slots[i].last_timing) S.strikeTiming[i] = S.slots[i].last_timing;
+    }
     setConn(true, `${S.count} device(s) on ring`);
     rebuildMappingIfNeeded();
     renderMapTable();
-    if (S.cfgSlot >= 0 && S.cfgSlot < S.count) refreshCfgModalValues();
+    if (S.cfgSlot >= 0 && S.cfgSlot < S.count) {
+      refreshCfgModalValues();
+      refreshCfgTiming();
+    }
     return j;
   } catch (e) {
     setConn(false, "bridge offline");
@@ -647,6 +678,7 @@ function openCfgModal(slot) {
   document.getElementById("cfgStatus").textContent = "changes apply live";
   document.getElementById("cfgStatus").style.color = "var(--text-dim)";
   refreshCfgModalValues();
+  refreshCfgTiming();
   modal.style.display = "flex";
 }
 function closeCfgModal() {
@@ -670,6 +702,70 @@ function refreshCfgModalValues() {
       input.value = "";
     }
   }
+}
+
+// Schedule a few delayed /api/status refreshes so the UI catches up with
+// fire-and-forget commands (homing, in particular: the bridge returns as
+// soon as the strike-home command is accepted, but the device keeps moving
+// for another second or so). Stops as soon as `predicate` returns true,
+// or after the final attempt.
+async function pollStatusUntil(predicate, opts = {}) {
+  const intervals = opts.intervals ?? [400, 600, 900, 1400, 2000, 2500];
+  for (const ms of intervals) {
+    await new Promise(r => setTimeout(r, ms));
+    try { await refreshStatus(); } catch {}
+    if (predicate()) return true;
+  }
+  return false;
+}
+
+// After firing a one-off test strike, the device's compact-metrics snapshot
+// updates only AFTER rebound detection. The piggyback on the next ACK
+// would surface it, but in the cfg modal we typically aren't fanning more
+// strikes — so explicitly poll /api/strike-timing once the strike has had
+// time to complete (~150 ms is plenty for a normal mallet swing).
+async function harvestStrikeTiming(slot, opts = {}) {
+  const delays = opts.delays ?? [180, 350, 700];
+  for (const ms of delays) {
+    await new Promise(r => setTimeout(r, ms));
+    try {
+      const j = await api("GET", `/api/strike-timing?address=${slot}`);
+      if (!j) continue;
+      // The bridge returns a stub `{address, sequence:0, flags:0}` when no
+      // strike has completed yet. Skip those.
+      if (j.flags || j.trigger_to_impact_ms != null || j.trigger_to_coast_ms != null) {
+        S.strikeTiming[slot] = j;
+        if (S.cfgSlot === slot) refreshCfgTiming();
+        return;
+      }
+    } catch (e) { /* try next interval */ }
+  }
+}
+
+// Render the "Last Strike" telemetry panel inside the modal. Pulls from the
+// per-slot timing cache that strikeAsync's piggyback ACK populates.
+function refreshCfgTiming() {
+  const slot = S.cfgSlot;
+  if (slot < 0) return;
+  const t = S.strikeTiming[slot];
+  const seqEl = document.getElementById("cfgTimingSeq");
+  const fmt = (v) => Number.isFinite(v) ? `${v} ms` : "—";
+  const fmtVel = (v) => Number.isFinite(v) ? `${v} dps` : "—";
+  if (!t) {
+    seqEl.textContent = "no data yet";
+    document.getElementById("cfgTimingCoast").textContent = "—";
+    document.getElementById("cfgTimingImpact").textContent = "—";
+    document.getElementById("cfgTimingRebound").textContent = "—";
+    document.getElementById("cfgTimingVel").textContent = "—";
+    return;
+  }
+  seqEl.textContent = `seq #${t.sequence}`;
+  document.getElementById("cfgTimingCoast").textContent = fmt(t.trigger_to_coast_ms);
+  document.getElementById("cfgTimingImpact").textContent = fmt(t.trigger_to_impact_ms);
+  const reboundLabel = fmt(t.trigger_to_rebound_ms);
+  document.getElementById("cfgTimingRebound").textContent =
+    t.rebound_timeout ? `${reboundLabel}*` : reboundLabel;
+  document.getElementById("cfgTimingVel").textContent = fmtVel(t.estimated_strike_velocity_dps);
 }
 async function applyStrikeParam(slot, param, value) {
   const status = document.getElementById("cfgStatus");
@@ -1306,9 +1402,23 @@ document.addEventListener("DOMContentLoaded", async () => {
     log("home all…");
     try {
       await api("POST", "/api/home", {});
-      log("home complete");
-      await refreshStatus();
-      showSuccess("All actuators homed");
+      // The bridge returns once each strike-home command has been
+      // acknowledged; the actual homing motion takes another second or
+      // so per device. Show "homing…" then poll status until each slot
+      // flips homed, or fall through after the last attempt.
+      showSuccess("Homing all actuators…");
+      const ok = await pollStatusUntil(
+        () => S.count > 0 && S.homed.length === S.count && S.homed.every(h => h),
+      );
+      if (ok) {
+        showSuccess("All actuators homed");
+        log("home complete");
+      } else {
+        const stuck = S.homed.map((h, i) => h ? null : i).filter(i => i != null);
+        showSuccess(`Homed ${S.homed.filter(Boolean).length}/${S.count}` +
+                    (stuck.length ? ` — still pending: ${stuck.join(",")}` : ""));
+        log(`home incomplete; pending=${stuck.join(",")}`);
+      }
     } catch (e) {
       log("home failed: " + e.message);
       showError("Home failed: " + e.message);
@@ -1359,6 +1469,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     const ma = effectiveCurrentForSlot(slot);
     strikeAsync(slot, ma, `(cfg test slot ${slot})`);
     log(`cfg test strike addr=${slot} ${ma} mA`);
+    // The strike's own metrics aren't on its ACK_TIMED reply — that
+    // carries the *previous* strike's data. Pull this strike's metrics
+    // explicitly from the bridge once the device has had time to rebound.
+    harvestStrikeTiming(slot);
   });
   document.getElementById("cfgHomeBtn").addEventListener("click", async () => {
     if (S.cfgSlot < 0) return;
@@ -1368,9 +1482,16 @@ document.addEventListener("DOMContentLoaded", async () => {
     status.style.color = "var(--text-muted)";
     try {
       await api("POST", "/api/home", { addresses: [slot] });
-      status.textContent = `addr ${slot} homed ✓`;
-      status.style.color = "var(--success)";
-      await refreshStatus();
+      // /api/home is fire-and-forget on the bridge now (matches ring_tool).
+      // Poll status until the device reports homed=true or we give up.
+      const ok = await pollStatusUntil(() => !!S.homed[slot]);
+      if (ok) {
+        status.textContent = `addr ${slot} homed ✓`;
+        status.style.color = "var(--success)";
+      } else {
+        status.textContent = `addr ${slot} homing… (refresh to recheck)`;
+        status.style.color = "var(--text-muted)";
+      }
     } catch (e) {
       status.textContent = `home failed: ${e.message}`;
       status.style.color = "var(--error)";

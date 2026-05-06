@@ -157,6 +157,7 @@
 #define STRIKE_HOMING_STALL_THRESHOLD   4       /* counts: less than this = stalled */
 #define STRIKE_COAST_TIMEOUT_MS         500
 #define STRIKE_REBOUND_THRESHOLD        5       /* RPM away from drum to confirm rebound */
+#define STRIKE_IMPACT_VEL_THRESHOLD     0       /* RPM toward drum: at/below = impact (velocity zero-cross during coast) */
 #define STRIKE_SETTLE_TICKS HZ_TICKS_FROM_MS(STRIKE_LOOP_HZ, STRIKE_SETTLE_TIME_MS)
 #define STRIKE_HOMING_STALL_TICKS HZ_TICKS_FROM_MS(STRIKE_LOOP_HZ, STRIKE_HOMING_STALL_TIME_MS)
 #define STRIKE_COAST_TIMEOUT_TICKS HZ_TICKS_FROM_MS(STRIKE_LOOP_HZ, STRIKE_COAST_TIMEOUT_MS)

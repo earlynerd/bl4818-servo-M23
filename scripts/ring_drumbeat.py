@@ -35,6 +35,7 @@ from typing import Iterable
 from ring_bus import (
     CommandAck,
     RingClientV2,
+    RingTimeout,
     StrikeStatus,
     auto_detect_port,
     DEFAULT_BAUD,
@@ -207,11 +208,27 @@ PATTERNS: dict[str, Pattern] = {
 }
 
 
+def _retry_on_timeout(operation, *, attempts: int = 2):
+    """Run `operation` with one retry on RingTimeout. The bus is one-way and
+    cut-through, so a timeout almost always means a missed-frame transient
+    rather than a structural problem; ring_tool wraps every command this way
+    too, which is why it appears more reliable than a single-shot call."""
+    last_exc = None
+    for _ in range(attempts):
+        try:
+            return operation()
+        except RingTimeout as exc:
+            last_exc = exc
+    raise last_exc  # type: ignore[misc]
+
+
 def home_all(client: RingClientV2, addresses: list[int], timeout_ms: int, poll_ms: int) -> None:
     """Kick off homing on every address then wait for each to report homed+idle."""
     print(f"Homing {len(addresses)} device(s): {addresses}")
     for addr in addresses:
-        reply = client.strike_home(addr, reply_mode=REPLY_MODE_ACK)
+        reply = _retry_on_timeout(
+            lambda a=addr: client.strike_home(a, reply_mode=REPLY_MODE_ACK)
+        )
         if not isinstance(reply, CommandAck) or not reply.accepted:
             result = "no-ack" if reply is None else reply.result_name
             raise RuntimeError(f"strike_home addr {addr} rejected: {result}")
@@ -221,7 +238,7 @@ def home_all(client: RingClientV2, addresses: list[int], timeout_ms: int, poll_m
     pending = set(addresses)
     while pending:
         for addr in list(pending):
-            status = client.query_strike(addr)
+            status = _retry_on_timeout(lambda a=addr: client.query_strike(a))
             if status.homed and status.state == 0 and not status.active:
                 print(f"  addr {addr} homed (home_position={status.home_position})")
                 pending.discard(addr)

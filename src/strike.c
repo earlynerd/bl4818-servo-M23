@@ -58,13 +58,20 @@ static uint16_t       coast_timeout;
 static uint32_t       timebase_ticks;
 static uint32_t       active_start_tick;
 static uint16_t       strike_sequence;
-static uint8_t        timing_flags;
+static uint16_t       timing_flags;
 static int16_t        last_current_ma;
 static uint16_t       trigger_to_coast_ms;
+static uint16_t       trigger_to_impact_ms;
 static uint16_t       trigger_to_rebound_ms;
 static uint16_t       trigger_to_retrigger_ready_ms;
 static uint16_t       trigger_to_ready_ms;
 static uint16_t       estimated_strike_velocity_dps;
+
+/* "Last completed strike" snapshot — see strike.h. Updated at rebound
+ * detection and at each begin_strike so the most useful data is always
+ * one cheap read away even if the in-progress strike has overwritten the
+ * live counters. */
+static strike_compact_t prev_compact;
 
 /* ── Position helper ─────────────────────────────────────────────────── */
 
@@ -184,9 +191,44 @@ static void maybe_mark_retrigger_ready(int32_t pos, int32_t vel)
     timing_flags |= STRIKE_TIMING_RETRIGGER_READY_VALID;
 }
 
+/* Record drum impact: the first sample where toward-drum velocity falls to
+ * (or below) zero after the mallet has had a meaningful forward swing.
+ * The VELOCITY_VALID guard ensures we don't latch impact on a noisy first
+ * tick before the mallet has actually accelerated. Cost per coast tick is
+ * one already-computed-int compare and one branch. */
+static void maybe_record_impact(int32_t toward_drum_rpm)
+{
+    if ((timing_flags & STRIKE_TIMING_IMPACT_VALID) != 0u)
+        return;
+    if ((timing_flags & STRIKE_TIMING_VELOCITY_VALID) == 0u)
+        return;
+    if (toward_drum_rpm > STRIKE_IMPACT_VEL_THRESHOLD)
+        return;
+
+    trigger_to_impact_ms = elapsed_ms_since(active_start_tick);
+    timing_flags |= STRIKE_TIMING_IMPACT_VALID;
+}
+
+static void snapshot_prev_compact(void)
+{
+    prev_compact.flags = timing_flags;
+    prev_compact.sequence = strike_sequence;
+    prev_compact.last_current_ma = last_current_ma;
+    prev_compact.trigger_to_coast_ms = trigger_to_coast_ms;
+    prev_compact.trigger_to_impact_ms = trigger_to_impact_ms;
+    prev_compact.trigger_to_rebound_ms = trigger_to_rebound_ms;
+    prev_compact.estimated_strike_velocity_dps = estimated_strike_velocity_dps;
+}
+
 static void begin_strike(int32_t current_ma, uint8_t retriggered)
 {
     current_ma = orient_strike_current(current_ma);
+
+    /* Snapshot whatever metrics the previous strike accumulated before we
+     * overwrite them. Even partial data from a retrigger is more useful to
+     * the host than nothing; rebound-detection also takes a snapshot once
+     * a strike completes naturally. */
+    snapshot_prev_compact();
 
     strike_sequence++;
     timing_flags = STRIKE_TIMING_ACTIVE;
@@ -195,6 +237,7 @@ static void begin_strike(int32_t current_ma, uint8_t retriggered)
 
     last_current_ma = (int16_t)current_ma;
     trigger_to_coast_ms = 0;
+    trigger_to_impact_ms = 0;
     trigger_to_rebound_ms = 0;
     trigger_to_retrigger_ready_ms = 0;
     trigger_to_ready_ms = 0;
@@ -235,10 +278,19 @@ void strike_init(void)
     timing_flags = 0;
     last_current_ma = 0;
     trigger_to_coast_ms = 0;
+    trigger_to_impact_ms = 0;
     trigger_to_rebound_ms = 0;
     trigger_to_retrigger_ready_ms = 0;
     trigger_to_ready_ms = 0;
     estimated_strike_velocity_dps = 0;
+
+    prev_compact.flags = 0;
+    prev_compact.sequence = 0;
+    prev_compact.last_current_ma = 0;
+    prev_compact.trigger_to_coast_ms = 0;
+    prev_compact.trigger_to_impact_ms = 0;
+    prev_compact.trigger_to_rebound_ms = 0;
+    prev_compact.estimated_strike_velocity_dps = 0;
 }
 
 /* ── Configuration ───────────────────────────────────────────────────── */
@@ -412,7 +464,7 @@ void strike_cancel(void)
         motor_stop();
         state = STRIKE_IDLE;
     }
-    timing_flags &= (uint8_t)~STRIKE_TIMING_ACTIVE;
+    timing_flags &= (uint16_t)~STRIKE_TIMING_ACTIVE;
 
     irq_restore(irq_state);
 }
@@ -436,6 +488,7 @@ void strike_get_metrics(strike_metrics_t *metrics)
     metrics->sequence = strike_sequence;
     metrics->last_current_ma = last_current_ma;
     metrics->trigger_to_coast_ms = trigger_to_coast_ms;
+    metrics->trigger_to_impact_ms = trigger_to_impact_ms;
     metrics->trigger_to_rebound_ms = trigger_to_rebound_ms;
     metrics->trigger_to_retrigger_ready_ms = trigger_to_retrigger_ready_ms;
     metrics->trigger_to_ready_ms = trigger_to_ready_ms;
@@ -443,6 +496,18 @@ void strike_get_metrics(strike_metrics_t *metrics)
     metrics->home_offset = (int16_t)home_offset;
     metrics->coast_distance = (int16_t)coast_distance;
     metrics->homing_duty = (int16_t)homing_duty;
+    irq_restore(irq_state);
+}
+
+void strike_get_compact_metrics(strike_compact_t *compact)
+{
+    uint32_t irq_state;
+
+    if (compact == 0)
+        return;
+
+    irq_state = irq_save();
+    *compact = prev_compact;
     irq_restore(irq_state);
 }
 
@@ -460,7 +525,7 @@ void strike_tick(void)
     /* Abort on motor fault */
     if (motor_get_state() == MOTOR_FAULT) {
         motor_disarm_coast();
-        timing_flags &= (uint8_t)~STRIKE_TIMING_ACTIVE;
+        timing_flags &= (uint16_t)~STRIKE_TIMING_ACTIVE;
         state = STRIKE_IDLE;
         return;
     }
@@ -521,6 +586,10 @@ void strike_tick(void)
             }
         }
 
+        /* Rare but possible: impact happens before the coast-distance
+         * threshold (e.g. if coast is set wide). Catch it here too. */
+        maybe_record_impact(toward_drum_rpm);
+
         /* Coast is triggered by the faster encoder/velocity cadence
          * (motor_arm_coast). We just detect the transition here. */
         if (motor_is_coasting()) {
@@ -541,6 +610,8 @@ void strike_tick(void)
             }
         }
 
+        maybe_record_impact(toward_drum_rpm);
+
         coast_timeout++;
 
         /* Rebound: velocity reversed away from drum past threshold */
@@ -553,7 +624,14 @@ void strike_tick(void)
                 if (coast_timeout >= STRIKE_COAST_TIMEOUT_TICKS)
                     timing_flags |= STRIKE_TIMING_REBOUND_TIMEOUT;
                 else
-                    timing_flags &= (uint8_t)~STRIKE_TIMING_REBOUND_TIMEOUT;
+                    timing_flags &= (uint16_t)~STRIKE_TIMING_REBOUND_TIMEOUT;
+
+                /* Take a snapshot now: the major timing fields (coast,
+                 * impact, rebound, peak velocity) are all in. The host
+                 * gets fully-formed metrics from the next ACK_TIMED or a
+                 * compact STRIKE_TIMING query without us having to wait
+                 * for catch/settle. */
+                snapshot_prev_compact();
 
                 /* Re-enter control directly in position mode and let the
                  * cascaded position -> velocity -> current loops catch the
@@ -582,7 +660,7 @@ void strike_tick(void)
         {
             trigger_to_ready_ms = elapsed_ms_since(active_start_tick);
             timing_flags |= STRIKE_TIMING_READY_VALID;
-            timing_flags &= (uint8_t)~STRIKE_TIMING_ACTIVE;
+            timing_flags &= (uint16_t)~STRIKE_TIMING_ACTIVE;
             state = STRIKE_IDLE;
         }
         break;

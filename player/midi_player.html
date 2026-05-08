@@ -227,6 +227,16 @@
     </div>
 
     <div class="panel">
+      <label class="label">Latency Compensation</label>
+      <div style="display:flex;align-items:center;gap:12px">
+        <button class="pill" id="compEnableBtn" style="padding:4px 10px;font-size:11px">On</button>
+        <input type="range" id="compDefaultSlider" min="0" max="150" step="1" value="50" class="slider">
+        <span id="compDefaultDisplay" style="font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--accent);min-width:62px;text-align:right">50 ms</span>
+      </div>
+      <p style="font-size:11px;color:var(--text-dim);margin-top:6px">Fires each strike command this many ms early so the mallet impact lands on the beat. Per-slot value is learned from <code>trigger_to_impact_ms</code>; the slider sets the fallback for slots without a sample yet.</p>
+    </div>
+
+    <div class="panel">
       <label class="label">Tempo</label>
       <div style="display:flex;align-items:center;gap:12px">
         <input type="range" id="tempoSlider" min="0.25" max="2.5" step="0.05" value="1.00" class="slider">
@@ -344,6 +354,10 @@
         <div><div style="font-size:10px;color:var(--text-dim);text-transform:uppercase">rebound</div><div id="cfgTimingRebound" style="color:var(--accent)">—</div></div>
         <div><div style="font-size:10px;color:var(--text-dim);text-transform:uppercase">peak vel</div><div id="cfgTimingVel" style="color:var(--accent)">—</div></div>
       </div>
+      <div style="display:flex;align-items:baseline;justify-content:space-between;margin-top:4px">
+        <span style="font-size:10px;color:var(--text-dim);text-transform:uppercase;letter-spacing:1.2px">Compensation</span>
+        <span id="cfgCompApplied" style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--accent)">— ms</span>
+      </div>
     </div>
 
     <div class="modal-footer">
@@ -364,12 +378,25 @@ const STORAGE_KEY_TRIM = "robotdrum.trim.v1";
 const STORAGE_KEY_VEL = "robotdrum.velfloor.v1";
 const STORAGE_KEY_FB = "robotdrum.fallback.v1";
 const STORAGE_KEY_KBD = "robotdrum.kbd.v1";
+const STORAGE_KEY_COMP = "robotdrum.comp.v1";
 // Home row first (most ergonomic for 10-mallet drums), then top row for
 // extra slots. Keys are matched against e.key.toLowerCase().
 const KEYBOARD_KEYS = ["a","s","d","f","g","h","j","k","l",";","'","q","w","e","r","t","y","u","i","o","p"];
 const STRIKE_MA_MIN = 0;
 const STRIKE_MA_MAX = 3000;
 const DEFAULT_VEL_FLOOR = 0.5; // 50% — softest note still strikes meaningfully
+const DEFAULT_COMP_MS = 50;    // assumed mallet trigger→impact latency before any sample
+const COMP_MAX_MS = 150;
+const COMP_EMA_ALPHA = 0.3;    // weight on each fresh sample; rest carried from prior EMA
+// Bucket strike currents into 500 mA bins so the EMA can capture the
+// velocity-dependent part of trigger→impact latency (higher current accelerates
+// faster, so the mallet hits sooner). 0 mA → bucket 0, 2999 mA → bucket 5.
+const COMP_BUCKET_WIDTH_MA = 500;
+const COMP_BUCKET_COUNT = 6;
+function currentBucket(currentMa) {
+  if (!Number.isFinite(currentMa)) return -1;
+  return Math.max(0, Math.min(COMP_BUCKET_COUNT - 1, Math.floor(currentMa / COMP_BUCKET_WIDTH_MA)));
+}
 
 // Default pitch per address slot, matching the steel-tongue scale
 // the previous player used. Index = ring address.
@@ -401,6 +428,18 @@ const S = {
   startWall: 0,
   cfgSlot: -1,   // slot currently shown in the strike-config modal, -1 = closed
   strikeTiming: {}, // strikeTiming[slot] = last metrics dict from the bridge
+  // Latency compensation. compEma[slot] is { [bucketIdx]: emaMs } — a smoothed
+  // trigger_to_impact_ms per current bucket — used to fire each strike that
+  // many real wall-clock ms early so the mallet impact lands on the intended
+  // beat. Empty slots/buckets fall back to nearest-occupied-bucket, then
+  // compDefaultMs. lastStrikeCurrent tracks the per-slot current of the most
+  // recent strike we sent so we can attribute incoming ACK metrics (which
+  // describe the *previous* completed strike) to the right bucket.
+  compEnabled: true,
+  compDefaultMs: DEFAULT_COMP_MS,
+  compEma: {},
+  lastStrikeCurrent: {},
+  scale: 1,
 };
 
 // ─── Logging helpers ─────────────────────────────────────────
@@ -441,6 +480,47 @@ async function api(method, path, body) {
   return r.json();
 }
 
+// Fold a fresh trigger_to_impact_ms reading into the per-slot EMA used by
+// the playback scheduler. Bridge already gates on STRIKE_TIMING_IMPACT_VALID
+// (it nulls the field when invalid), so a finite number here is trustworthy.
+// Wall-clock ms to fire a strike command early so the mallet's actual impact
+// lands on the intended musical beat. Looks up the per-slot, per-current-bucket
+// EMA. If the targeted bucket has no sample yet, walks outward to the nearest
+// populated bucket (motor latency varies smoothly with drive current). Falls
+// through to S.compDefaultMs only if the slot has no data at all.
+function compensationMs(slot, currentMa) {
+  if (!S.compEnabled) return 0;
+  const buckets = S.compEma[slot];
+  const idx = currentBucket(currentMa);
+  if (buckets && idx >= 0) {
+    if (Number.isFinite(buckets[idx])) return buckets[idx];
+    for (let d = 1; d < COMP_BUCKET_COUNT; d++) {
+      if (Number.isFinite(buckets[idx - d])) return buckets[idx - d];
+      if (Number.isFinite(buckets[idx + d])) return buckets[idx + d];
+    }
+  }
+  return S.compDefaultMs;
+}
+
+// Fold a fresh trigger_to_impact_ms reading into the per-slot, per-bucket EMA.
+// `currentMa` is the strike current that *produced* this measurement, not the
+// current of the strike whose ACK delivered it (the firmware reports the
+// previously-completed strike on each ACK). The bridge has already gated on
+// STRIKE_TIMING_IMPACT_VALID, so a finite trigger_to_impact_ms here is real.
+function updateLatencyEma(slot, currentMa, metrics) {
+  if (!metrics) return;
+  const sample = metrics.trigger_to_impact_ms;
+  if (!Number.isFinite(sample)) return;
+  const idx = currentBucket(currentMa);
+  if (idx < 0) return;
+  let buckets = S.compEma[slot];
+  if (!buckets) buckets = S.compEma[slot] = {};
+  const prev = buckets[idx];
+  buckets[idx] = Number.isFinite(prev)
+    ? (1 - COMP_EMA_ALPHA) * prev + COMP_EMA_ALPHA * sample
+    : sample;
+}
+
 // Fire-and-forget strike — used by the playback scheduler. We don't
 // await; the bridge serializes ring access on its own lock so multiple
 // in-flight POSTs won't collide. The bridge requests REPLY_MODE_ACK_TIMED
@@ -448,6 +528,14 @@ async function api(method, path, body) {
 // timing piggybacked on it; we cache that into S.strikeTiming[slot] for
 // the cfg modal to display without paying for a separate query.
 function strikeAsync(addr, currentMa, label) {
+  // The ACK we're about to receive carries metrics for the *previous*
+  // completed strike on this slot, not for the strike we're sending now.
+  // Snapshot the prior current here so the ACK handler can attribute the
+  // measurement to the right bucket; then record this strike's current for
+  // the next ACK. Out-of-order ACKs aren't an issue because the bridge
+  // serializes the ring lock per request.
+  const priorCurrent = S.lastStrikeCurrent[addr];
+  S.lastStrikeCurrent[addr] = currentMa;
   fetch(API_BASE + "/api/strike", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -460,6 +548,9 @@ function strikeAsync(addr, currentMa, label) {
     }
     if (j.metrics) {
       S.strikeTiming[addr] = j.metrics;
+      if (Number.isFinite(priorCurrent)) {
+        updateLatencyEma(addr, priorCurrent, j.metrics);
+      }
       if (S.cfgSlot === addr) refreshCfgTiming();
     }
   }).catch(e => log(`strike addr=${addr} ${label||""} failed: ${e.message}`));
@@ -475,6 +566,10 @@ async function refreshStatus() {
     // The bridge updates this every strike; we mirror it locally so the
     // cfg modal has data even on first open before any strike runs.
     for (let i = 0; i < S.slots.length; i++) {
+      // Mirror the bridge's last_timing for cfg-modal display only. Don't
+      // fold it into the EMA: the bridge cache has no record of which
+      // current produced that snapshot, so we couldn't attribute it to a
+      // bucket. The first in-session strike on this slot will seed the EMA.
       if (S.slots[i] && S.slots[i].last_timing) S.strikeTiming[i] = S.slots[i].last_timing;
     }
     setConn(true, `${S.count} device(s) on ring`);
@@ -565,6 +660,26 @@ function loadKbdEnabled() {
 }
 function saveKbdEnabled() {
   localStorage.setItem(STORAGE_KEY_KBD, S.kbdEnabled ? "1" : "0");
+}
+function loadCompSettings() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_COMP);
+    if (raw) {
+      const obj = JSON.parse(raw);
+      if (obj && typeof obj === "object") {
+        if (typeof obj.enabled === "boolean") S.compEnabled = obj.enabled;
+        if (Number.isFinite(obj.defaultMs)) {
+          S.compDefaultMs = Math.max(0, Math.min(COMP_MAX_MS, obj.defaultMs));
+        }
+      }
+    }
+  } catch {}
+}
+function saveCompSettings() {
+  localStorage.setItem(STORAGE_KEY_COMP, JSON.stringify({
+    enabled: S.compEnabled,
+    defaultMs: S.compDefaultMs,
+  }));
 }
 function rebuildMappingIfNeeded() {
   const want = Math.max(S.count, S.mapping.length);
@@ -735,6 +850,9 @@ async function harvestStrikeTiming(slot, opts = {}) {
       // strike has completed yet. Skip those.
       if (j.flags || j.trigger_to_impact_ms != null || j.trigger_to_coast_ms != null) {
         S.strikeTiming[slot] = j;
+        // Don't fold into EMA here: the same measurement also rides the
+        // next strike's ACK (where we have priorCurrent attribution).
+        // Updating in both paths would double-count the sample.
         if (S.cfgSlot === slot) refreshCfgTiming();
         return;
       }
@@ -751,6 +869,21 @@ function refreshCfgTiming() {
   const seqEl = document.getElementById("cfgTimingSeq");
   const fmt = (v) => Number.isFinite(v) ? `${v} ms` : "—";
   const fmtVel = (v) => Number.isFinite(v) ? `${v} dps` : "—";
+  const compEl = document.getElementById("cfgCompApplied");
+  if (compEl) {
+    if (!S.compEnabled) {
+      compEl.textContent = "off";
+    } else {
+      const masterMa = getCurrentMa();
+      const applied = compensationMs(slot, masterMa);
+      const buckets = S.compEma[slot];
+      const populated = buckets ? Object.keys(buckets).filter(k => Number.isFinite(buckets[k])).length : 0;
+      const targetIdx = currentBucket(masterMa);
+      const haveTarget = !!(buckets && Number.isFinite(buckets[targetIdx]));
+      const source = populated === 0 ? "default" : (haveTarget ? "smoothed" : "nearest");
+      compEl.textContent = `${applied.toFixed(1)} ms @ ${masterMa} mA · ${source} (${populated}/${COMP_BUCKET_COUNT} buckets)`;
+    }
+  }
   if (!t) {
     seqEl.textContent = "no data yet";
     document.getElementById("cfgTimingCoast").textContent = "—";
@@ -1278,16 +1411,29 @@ function play() {
 
   S.startWall = performance.now();
   S.scale = scale;
+  let lateClamped = 0;
+  let compTotalMs = 0;
   for (const e of sched) {
     if (e.slot < 0) { dropped++; continue; }
     if (e.suppressed) { merged++; continue; }
     scheduled++;
     const slot = e.slot, vel = e.vel;
+    // Latency compensation is in real wall-clock ms, so subtract AFTER the
+    // tempo scale division. Project the strike current at schedule time to
+    // pick the right bucket; the actual strike still reads live current so
+    // the master slider, per-slot trim, and velocity floor remain tunable
+    // during play. If the user moves the master slider mid-play, queued
+    // events keep their original compensation but the new current is honored
+    // at strike time — small mismatch, acceptable.
+    const projectedCurrent = effectiveCurrentForSlot(slot, vel);
+    const comp = compensationMs(slot, projectedCurrent);
+    compTotalMs += comp;
+    const rawDelay = e.timeMs / scale - comp;
+    if (rawDelay < 0) lateClamped++;
+    const delay = Math.max(0, rawDelay);
     S.timeouts.push(setTimeout(() => {
-      // Read live so the global slider, per-slot trim, and velocity floor
-      // can all be adjusted mid-playback for ear-tuning.
       strikeAsync(slot, effectiveCurrentForSlot(slot, vel));
-    }, e.timeMs / scale));
+    }, delay));
   }
   S.timeouts.push(setTimeout(stopPlayback, wallTotal + 500));
 
@@ -1297,7 +1443,11 @@ function play() {
   document.getElementById("progressContainer").style.display = "block";
   const curEl = document.getElementById("cursor"); if (curEl) curEl.style.opacity = "0.8";
 
-  log(`play: ${scheduled} scheduled, ${merged} merged, ${dropped} unmapped (target=${cur} mA, vfloor=${Math.round(S.velFloor*100)}%, ${scale.toFixed(2)}x)`);
+  const compAvg = scheduled ? (compTotalMs / scheduled) : 0;
+  const compPart = S.compEnabled
+    ? `, comp=${compAvg.toFixed(1)} ms avg${lateClamped ? ` (${lateClamped} clamped)` : ""}`
+    : ", comp=off";
+  log(`play: ${scheduled} scheduled, ${merged} merged, ${dropped} unmapped (target=${cur} mA, vfloor=${Math.round(S.velFloor*100)}%, ${scale.toFixed(2)}x${compPart})`);
 
   (function animate() {
     const elapsed = performance.now() - S.startWall;
@@ -1318,6 +1468,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   S.fallback = loadFallback();
   S.velFloor = loadVelFloor();
   S.kbdEnabled = loadKbdEnabled();
+  loadCompSettings();
 
   // File / drop zone
   const dz = document.getElementById("dropZone");
@@ -1340,7 +1491,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Strike current
   const cs = document.getElementById("currentSlider");
   const cd = document.getElementById("currentDisplay");
-  cs.addEventListener("input", () => { cd.textContent = `${cs.value} mA`; });
+  cs.addEventListener("input", () => {
+    cd.textContent = `${cs.value} mA`;
+    if (S.cfgSlot >= 0) refreshCfgTiming();
+  });
 
   // Velocity floor
   const vfs = document.getElementById("velFloorSlider");
@@ -1355,6 +1509,31 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.getElementById("velFloorOffBtn").addEventListener("click", () => {
     vfs.value = "100";
     vfs.dispatchEvent(new Event("input"));
+  });
+
+  // Latency compensation
+  const compBtn = document.getElementById("compEnableBtn");
+  const compSlider = document.getElementById("compDefaultSlider");
+  const compDisp = document.getElementById("compDefaultDisplay");
+  function refreshCompUi() {
+    compBtn.textContent = S.compEnabled ? "On" : "Off";
+    compBtn.classList.toggle("active", S.compEnabled);
+    compSlider.disabled = !S.compEnabled;
+    compSlider.value = String(Math.max(0, Math.min(COMP_MAX_MS, S.compDefaultMs)));
+    compDisp.textContent = `${compSlider.value} ms`;
+    if (S.cfgSlot >= 0) refreshCfgTiming();
+  }
+  refreshCompUi();
+  compBtn.addEventListener("click", () => {
+    S.compEnabled = !S.compEnabled;
+    saveCompSettings();
+    refreshCompUi();
+  });
+  compSlider.addEventListener("input", () => {
+    S.compDefaultMs = +compSlider.value;
+    compDisp.textContent = `${compSlider.value} ms`;
+    saveCompSettings();
+    if (S.cfgSlot >= 0) refreshCfgTiming();
   });
 
   // Tempo scale

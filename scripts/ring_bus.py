@@ -101,6 +101,8 @@ STRIKE_TIMING_IMPACT_VALID    = 0x0100
 DEFAULT_BAUD       = 250000
 DEFAULT_TIMEOUT_MS = 200
 DEFAULT_SETTLE_MS  = 250
+RX_DEBUG_TAIL_LIMIT = 160
+RX_DEBUG_EVENT_LIMIT = 4
 
 
 # ── CRC-16/CCITT ────────────────────────────────────────────────────────────
@@ -160,6 +162,86 @@ ACK_RESULT_NAMES = {
     ACK_RESULT_INVALID_ARGUMENT: "INVALID_ARGUMENT",
     ACK_RESULT_PERSIST_FAILED: "PERSIST_FAILED",
 }
+
+
+def _format_hex(data: bytes, limit: int = RX_DEBUG_TAIL_LIMIT) -> str:
+    if not data:
+        return "<none>"
+    if len(data) <= limit:
+        return data.hex(" ").upper()
+    shown = data[-limit:].hex(" ").upper()
+    return f"...(+{len(data) - limit} bytes) {shown}"
+
+
+def _append_tail(buf: bytearray, data: bytes | bytearray | int) -> None:
+    if isinstance(data, int):
+        buf.append(data & 0xFF)
+    else:
+        buf.extend(data)
+    if len(buf) > RX_DEBUG_TAIL_LIMIT:
+        del buf[:len(buf) - RX_DEBUG_TAIL_LIMIT]
+
+
+def _remember_event(events: list[bytes], data: bytes) -> None:
+    events.append(data)
+    if len(events) > RX_DEBUG_EVENT_LIMIT:
+        del events[0]
+
+
+def _cmd_name(cmd: int) -> str:
+    if cmd == CMD_ENTER_SF:
+        return "ENTER_SF"
+    if cmd == CMD_ENTER_CT:
+        return "ENTER_CT"
+    if cmd == CMD_SET_ADDRESS:
+        return "SET_ADDRESS"
+    if cmd == CMD_BROADCAST_DUTY:
+        return "BROADCAST_DUTY"
+    if CMD_ADDR_BASE <= cmd < CMD_ADDR_END:
+        return f"ADDR_CMD(addr={cmd & 0x0F})"
+    if CMD_STATUS_BASE <= cmd < CMD_STATUS_END:
+        return f"STATUS_REPLY(addr={cmd & 0x0F})"
+    if CMD_ACK_BASE <= cmd < CMD_ACK_END:
+        return f"ACK_REPLY(addr={cmd & 0x0F})"
+    return f"UNKNOWN(0x{cmd:02X})"
+
+
+def _subcmd_name(subcmd: int) -> str:
+    return SUBCMD_NAMES.get(subcmd & SUBCMD_MASK, f"UNKNOWN(0x{subcmd & SUBCMD_MASK:02X})")
+
+
+def _describe_payload(payload: bytes) -> str:
+    if not payload:
+        return "len=0 payload=<empty>"
+
+    cmd = payload[0]
+    parts = [f"len={len(payload)}", f"cmd=0x{cmd:02X}({_cmd_name(cmd)})"]
+
+    if CMD_ADDR_BASE <= cmd < CMD_ADDR_END and len(payload) >= 2:
+        raw_subcmd = payload[1]
+        parts.append(f"subcmd=0x{raw_subcmd & SUBCMD_MASK:02X}({_subcmd_name(raw_subcmd)})")
+        parts.append(f"reply_bits=0x{raw_subcmd & 0xC0:02X}")
+    elif CMD_ACK_BASE <= cmd < CMD_ACK_END and len(payload) >= 2:
+        parts.append(f"subcmd=0x{payload[1] & SUBCMD_MASK:02X}({_subcmd_name(payload[1])})")
+        if len(payload) >= 5:
+            result = payload[2]
+            detail = struct.unpack(">H", payload[3:5])[0]
+            result_name = ACK_RESULT_NAMES.get(result, f"UNKNOWN(0x{result:02X})")
+            parts.append(f"result=0x{result:02X}({result_name})")
+            parts.append(f"detail={detail}")
+
+    parts.append(f"payload={_format_hex(payload)}")
+    return " ".join(parts)
+
+
+def _format_skipped(skipped: list[bytes]) -> str:
+    if not skipped:
+        return "skipped=no valid nonmatching frames"
+    return "skipped=" + " | ".join(_describe_payload(payload) for payload in skipped)
+
+
+def _format_timeout_context(context: str, skipped: list[bytes], exc: RingTimeout) -> str:
+    return f"{context}; {_format_skipped(skipped)}; last_frame_read=({exc})"
 
 
 @dataclasses.dataclass
@@ -344,6 +426,20 @@ class TimingStatus:
     uptime_ms: int
     uart_rx_overflow_count: int = 0
     adc_overrun_count: int = 0
+    proto_dbg_sequence: int = 0
+    proto_dbg_cmd_type: int = 0
+    proto_dbg_len: int = 0
+    proto_dbg_target: int = 0
+    proto_dbg_raw_subcmd: int = 0
+    proto_dbg_subcmd: int = 0
+    proto_dbg_reply_mode_initial: int = 0
+    proto_dbg_reply_mode_final: int = 0
+    proto_dbg_full_reply_kind: int = 0
+    proto_dbg_reply_branch: int = 0
+    proto_dbg_ack_result: int = 0
+    proto_dbg_ack_detail: int = 0
+    proto_dbg_frame_start_mode: int = 0
+    proto_dbg_fwd_mode: int = 0
 
     @property
     def control_last_pct(self) -> float:
@@ -419,6 +515,9 @@ class RingClientV2:
         self.trace = trace
         self.ser: Optional[serial.Serial] = None
         self.device_count: Optional[int] = None
+        self.last_strike_status_payload_len: Optional[int] = None
+        self._last_tx_frame: bytes = b""
+        self._last_tx_payload: bytes = b""
 
     def open(self) -> None:
         self.ser = serial.Serial(
@@ -458,6 +557,8 @@ class RingClientV2:
     def _send_frame(self, payload: bytes) -> None:
         assert self.ser is not None
         frame = self._build_frame(payload)
+        self._last_tx_frame = frame
+        self._last_tx_payload = payload
         self._trace("tx", frame)
         self.ser.write(frame)
         self.ser.flush()
@@ -471,13 +572,58 @@ class RingClientV2:
         phase = scan_0
         buf = bytearray()
         expected = 0
+        raw_tail = bytearray()
+        crc_failures: list[bytes] = []
+        invalid_lengths: list[bytes] = []
+
+        def timeout_debug() -> str:
+            pending_error = None
+            try:
+                waiting = self.ser.in_waiting
+                if waiting > 0:
+                    pending = self.ser.read(waiting)
+                    _append_tail(raw_tail, pending)
+            except Exception as exc:  # pyserial diagnostics must not mask timeout
+                pending_error = exc
+
+            phase_names = {
+                scan_0: "scan_0",
+                scan_1: "scan_1",
+                buffering: "buffering",
+            }
+            parts = [
+                f"phase={phase_names.get(phase, str(phase))}",
+                f"rx_tail={_format_hex(bytes(raw_tail))}",
+            ]
+            if phase == scan_1:
+                parts.append("partial_preamble=A5")
+            elif phase == buffering and buf:
+                partial = PREAMBLE + bytes(buf)
+                expected_desc = str(expected) if expected else "unknown"
+                parts.append(f"partial_frame={_format_hex(partial)}")
+                parts.append(f"partial_len={len(partial)}")
+                parts.append(f"expected_body_len={expected_desc}")
+            if invalid_lengths:
+                parts.append(
+                    "invalid_len_frames="
+                    + " | ".join(_format_hex(frame) for frame in invalid_lengths)
+                )
+            if crc_failures:
+                parts.append(
+                    "crc_fail_frames="
+                    + " | ".join(_format_hex(frame) for frame in crc_failures)
+                )
+            if pending_error is not None:
+                parts.append(f"pending_read_error={pending_error}")
+            return "; ".join(parts)
 
         def next_byte() -> int:
             while True:
                 if time.monotonic() >= deadline:
-                    raise RingTimeout("timeout waiting for frame")
+                    raise RingTimeout(f"timeout waiting for frame; {timeout_debug()}")
                 byte = self.ser.read(1)
                 if byte:
+                    _append_tail(raw_tail, byte[0])
                     return byte[0]
 
         while True:
@@ -503,8 +649,10 @@ class RingClientV2:
                 if len(buf) == 1:
                     length = buf[0]
                     if length == 0 or length > MAX_PAYLOAD:
+                        _remember_event(invalid_lengths, PREAMBLE + bytes(buf))
                         phase = scan_0
                         buf.clear()
+                        expected = 0
                         continue
                     expected = 1 + length + 2
 
@@ -518,7 +666,9 @@ class RingClientV2:
                         self._trace("rx", PREAMBLE + bytes(buf))
                         return payload
 
-                    self._trace("rx-crc-fail", PREAMBLE + bytes(buf))
+                    bad_frame = PREAMBLE + bytes(buf)
+                    _remember_event(crc_failures, bad_frame)
+                    self._trace("rx-crc-fail", bad_frame)
                     phase = scan_0
                     buf.clear()
                     expected = 0
@@ -526,6 +676,15 @@ class RingClientV2:
     def _trace(self, label: str, data: bytes) -> None:
         if self.trace:
             print(f"  [{label}] {data.hex(' ').upper()}")
+
+    def _print_unexpected_reply(self, context: str, payload: bytes) -> None:
+        print(
+            "  [unexpected-reply] "
+            f"{context}; "
+            f"last_tx_frame={_format_hex(self._last_tx_frame)}; "
+            f"last_tx_payload={_format_hex(self._last_tx_payload)}; "
+            f"rx_payload={_describe_payload(payload)}"
+        )
 
     def enumerate(self) -> int:
         self._flush_rx()
@@ -576,9 +735,22 @@ class RingClientV2:
     def _recv_status_reply(self, address: Optional[int] = None) -> MotorStatus:
         deadline = time.monotonic() + self.timeout_ms / 1000.0
         expected_cmd = None if address is None else (CMD_STATUS_BASE | address)
+        skipped: list[bytes] = []
         while True:
             remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
-            payload = self._recv_frame(timeout_ms=remaining_ms)
+            try:
+                payload = self._recv_frame(timeout_ms=remaining_ms)
+            except RingTimeout as exc:
+                expected = (
+                    "any status reply"
+                    if expected_cmd is None
+                    else f"cmd=0x{expected_cmd:02X}({_cmd_name(expected_cmd)})"
+                )
+                raise RingTimeout(_format_timeout_context(
+                    f"timeout waiting for status reply {expected}",
+                    skipped,
+                    exc,
+                )) from exc
             cmd = payload[0] if payload else 0
             if (
                 CMD_STATUS_BASE <= cmd < CMD_STATUS_END
@@ -586,16 +758,27 @@ class RingClientV2:
                 and (expected_cmd is None or cmd == expected_cmd)
             ):
                 return self._parse_status(payload)
-            self._trace("skip", bytes([cmd]))
+            _remember_event(skipped, payload)
+            self._trace("skip", payload)
 
     def _recv_ack_reply(self, address: int, subcmd: int) -> CommandAck:
         deadline = time.monotonic() + self.timeout_ms / 1000.0
         expected_cmd = CMD_ACK_BASE | address
         expected_subcmd = subcmd & SUBCMD_MASK
+        skipped: list[bytes] = []
 
         while True:
             remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
-            payload = self._recv_frame(timeout_ms=remaining_ms)
+            try:
+                payload = self._recv_frame(timeout_ms=remaining_ms)
+            except RingTimeout as exc:
+                raise RingTimeout(_format_timeout_context(
+                    f"timeout waiting for ACK reply addr={address} "
+                    f"expected_cmd=0x{expected_cmd:02X}({_cmd_name(expected_cmd)}) "
+                    f"expected_subcmd=0x{expected_subcmd:02X}({_subcmd_name(expected_subcmd)})",
+                    skipped,
+                    exc,
+                )) from exc
             cmd = payload[0] if payload else 0
             payload_subcmd = payload[1] & SUBCMD_MASK if len(payload) >= 2 else 0
             if cmd == expected_cmd and payload_subcmd == expected_subcmd:
@@ -615,7 +798,15 @@ class RingClientV2:
                         detail=struct.unpack(">H", payload[3:5])[0],
                         metrics=_parse_strike_timing_payload(address, payload[5:17]),
                     )
-            self._trace("skip", bytes([cmd]))
+            elif cmd == (CMD_STATUS_BASE | address):
+                self._print_unexpected_reply(
+                    f"expected ACK reply addr={address} "
+                    f"expected_cmd=0x{expected_cmd:02X}({_cmd_name(expected_cmd)}) "
+                    f"expected_subcmd=0x{expected_subcmd:02X}({_subcmd_name(expected_subcmd)})",
+                    payload,
+                )
+            _remember_event(skipped, payload)
+            self._trace("skip", payload)
 
     def _addressed_command(
         self,
@@ -774,13 +965,24 @@ class RingClientV2:
         self._send_frame(self._build_addressed_payload(address, SUBCMD_QUERY_STRIKE))
         deadline = time.monotonic() + self.timeout_ms / 1000.0
         expected_cmd = CMD_STATUS_BASE | address
+        skipped: list[bytes] = []
         while True:
             remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
-            payload = self._recv_frame(timeout_ms=remaining_ms)
+            try:
+                payload = self._recv_frame(timeout_ms=remaining_ms)
+            except RingTimeout as exc:
+                raise RingTimeout(_format_timeout_context(
+                    f"timeout waiting for strike status addr={address} "
+                    f"expected_cmd=0x{expected_cmd:02X}({_cmd_name(expected_cmd)})",
+                    skipped,
+                    exc,
+                )) from exc
             cmd = payload[0] if payload else 0
             if cmd == expected_cmd and len(payload) in (11, 22, 24, 30, 32, 35):
+                self.last_strike_status_payload_len = len(payload)
                 return self._parse_strike_status(payload)
-            self._trace("skip", bytes([cmd]))
+            _remember_event(skipped, payload)
+            self._trace("skip", payload)
 
     def query_strike_timing(self, address: int) -> StrikeTiming:
         """Compact 13-byte poll of the last completed strike's metrics. ~70%
@@ -791,13 +993,31 @@ class RingClientV2:
         self._send_frame(self._build_addressed_payload(address, SUBCMD_QUERY_STRIKE_TIMING))
         deadline = time.monotonic() + self.timeout_ms / 1000.0
         expected_cmd = CMD_STATUS_BASE | address
+        skipped: list[bytes] = []
         while True:
             remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
-            payload = self._recv_frame(timeout_ms=remaining_ms)
+            try:
+                payload = self._recv_frame(timeout_ms=remaining_ms)
+            except RingTimeout as exc:
+                raise RingTimeout(_format_timeout_context(
+                    f"timeout waiting for strike timing addr={address} "
+                    f"expected_cmd=0x{expected_cmd:02X}({_cmd_name(expected_cmd)}) "
+                    f"expected_len=13",
+                    skipped,
+                    exc,
+                )) from exc
             cmd = payload[0] if payload else 0
             if cmd == expected_cmd and len(payload) == 13:
                 return _parse_strike_timing_payload(address, payload[1:13])
-            self._trace("skip", bytes([cmd]))
+            if cmd == expected_cmd:
+                self._print_unexpected_reply(
+                    f"expected strike timing reply addr={address} "
+                    f"expected_cmd=0x{expected_cmd:02X}({_cmd_name(expected_cmd)}) "
+                    f"expected_len=13",
+                    payload,
+                )
+            _remember_event(skipped, payload)
+            self._trace("skip", payload)
 
     def query_timing(self, address: int) -> TimingStatus:
         self._check_address(address)
@@ -805,13 +1025,23 @@ class RingClientV2:
         self._send_frame(self._build_addressed_payload(address, SUBCMD_QUERY_TIMING))
         deadline = time.monotonic() + self.timeout_ms / 1000.0
         expected_cmd = CMD_STATUS_BASE | address
+        skipped: list[bytes] = []
         while True:
             remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
-            payload = self._recv_frame(timeout_ms=remaining_ms)
+            try:
+                payload = self._recv_frame(timeout_ms=remaining_ms)
+            except RingTimeout as exc:
+                raise RingTimeout(_format_timeout_context(
+                    f"timeout waiting for timing status addr={address} "
+                    f"expected_cmd=0x{expected_cmd:02X}({_cmd_name(expected_cmd)})",
+                    skipped,
+                    exc,
+                )) from exc
             cmd = payload[0] if payload else 0
-            if cmd == expected_cmd and len(payload) in (33, 49, 53, 57):
+            if cmd == expected_cmd and len(payload) in (33, 49, 53, 57, 64):
                 return self._parse_timing_status(payload)
-            self._trace("skip", bytes([cmd]))
+            _remember_event(skipped, payload)
+            self._trace("skip", payload)
 
     def _parse_strike_status(self, payload: bytes) -> StrikeStatus:
         cmd = payload[0]
@@ -944,7 +1174,7 @@ class RingClientV2:
                 uptime_ms=struct.unpack(">I", payload[29:33])[0],
             )
 
-        if len(payload) not in (49, 53, 57):
+        if len(payload) not in (49, 53, 57, 64):
             raise RingError(f"timing reply wrong size ({len(payload)} bytes): {payload.hex(' ')}")
 
         uart_rx_overflow_count = (
@@ -953,6 +1183,20 @@ class RingClientV2:
         adc_overrun_count = (
             struct.unpack(">I", payload[53:57])[0] if len(payload) >= 57 else 0
         )
+        proto_dbg = {}
+        if len(payload) >= 64:
+            raw_subcmd = payload[60]
+            proto_dbg = {
+                "proto_dbg_sequence": payload[57],
+                "proto_dbg_cmd_type": payload[58],
+                "proto_dbg_len": payload[59],
+                "proto_dbg_target": payload[58] & 0x0F,
+                "proto_dbg_raw_subcmd": raw_subcmd,
+                "proto_dbg_subcmd": raw_subcmd & SUBCMD_MASK,
+                "proto_dbg_reply_mode_initial": payload[61],
+                "proto_dbg_reply_mode_final": payload[62],
+                "proto_dbg_reply_branch": payload[63],
+            }
 
         return TimingStatus(
             address=address,
@@ -976,6 +1220,7 @@ class RingClientV2:
             uptime_ms=struct.unpack(">I", payload[45:49])[0],
             uart_rx_overflow_count=uart_rx_overflow_count,
             adc_overrun_count=adc_overrun_count,
+            **proto_dbg,
         )
 
     def broadcast_duty(self, duties: Iterable[int]) -> None:
@@ -1058,7 +1303,7 @@ def format_ack(ack: CommandAck) -> str:
 
 
 def format_timing_status(status: TimingStatus) -> str:
-    return (
+    text = (
         f"addr={status.address} control={status.control_last_us}/{status.control_budget_us}us "
         f"({status.control_last_pct:.1f}%) control_max={status.control_max_us}us "
         f"({status.control_max_pct:.1f}%) control_overruns={status.control_overrun_count} "
@@ -1072,6 +1317,27 @@ def format_timing_status(status: TimingStatus) -> str:
         f"uart_rx_overflow={status.uart_rx_overflow_count} "
         f"adc_overrun={status.adc_overrun_count}"
     )
+    if status.proto_dbg_sequence:
+        branch_names = {
+            0: "PENDING",
+            1: "NONE",
+            2: "ACK",
+            3: "ACK_TIMED",
+            4: "STATUS",
+            5: "STRIKE_STATUS",
+            6: "TIMING_STATUS",
+            7: "STRIKE_TIMING",
+        }
+        text += (
+            f" proto_dbg_seq={status.proto_dbg_sequence} "
+            f"cmd=0x{status.proto_dbg_cmd_type:02X} target={status.proto_dbg_target} "
+            f"len={status.proto_dbg_len} raw_subcmd=0x{status.proto_dbg_raw_subcmd:02X} "
+            f"subcmd=0x{status.proto_dbg_subcmd:02X} "
+            f"reply_initial=0x{status.proto_dbg_reply_mode_initial:02X} "
+            f"reply_final=0x{status.proto_dbg_reply_mode_final:02X} "
+            f"branch={branch_names.get(status.proto_dbg_reply_branch, status.proto_dbg_reply_branch)}"
+        )
+    return text
 
 
 def auto_detect_port() -> Optional[str]:

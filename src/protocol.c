@@ -110,6 +110,35 @@ static uint8_t frame_expected;
 static rx_phase_t rx_phase;
 static uint8_t rx_timeout;
 
+/* Last addressed command diagnostic.  QUERY_TIMING deliberately does not
+ * overwrite this snapshot, so the host can send a suspect command and then
+ * ask QUERY_TIMING to see what this device decoded and which reply path it
+ * chose. */
+#define PROTO_DBG_BRANCH_PENDING       0u
+#define PROTO_DBG_BRANCH_NONE          1u
+#define PROTO_DBG_BRANCH_ACK           2u
+#define PROTO_DBG_BRANCH_ACK_TIMED     3u
+#define PROTO_DBG_BRANCH_STATUS        4u
+#define PROTO_DBG_BRANCH_STRIKE_STATUS 5u
+#define PROTO_DBG_BRANCH_TIMING_STATUS 6u
+#define PROTO_DBG_BRANCH_STRIKE_TIMING 7u
+
+static uint16_t proto_dbg_sequence;
+static uint8_t proto_dbg_capture_reply;
+static uint8_t proto_dbg_cmd_type;
+static uint8_t proto_dbg_len;
+static uint8_t proto_dbg_target;
+static uint8_t proto_dbg_raw_subcmd;
+static uint8_t proto_dbg_subcmd;
+static uint8_t proto_dbg_reply_mode_initial;
+static uint8_t proto_dbg_reply_mode_final;
+static uint8_t proto_dbg_full_reply_kind;
+static uint8_t proto_dbg_reply_branch;
+static uint8_t proto_dbg_ack_result;
+static uint16_t proto_dbg_ack_detail;
+static uint8_t proto_dbg_frame_start_mode;
+static uint8_t proto_dbg_fwd_mode;
+
 /* ── Helpers ──────────────────────────────────────────────────────────── */
 
 static void send_raw(const uint8_t *data, uint8_t len)
@@ -182,6 +211,81 @@ static uint8_t prepare_set_position(int32_t counts)
     return 1u;
 }
 
+#define FULL_REPLY_STATUS            0u
+#define FULL_REPLY_STRIKE_STATUS     1u
+#define FULL_REPLY_TIMING_STATUS     2u
+#define FULL_REPLY_STRIKE_TIMING     3u  /* compact 13-byte strike-timing payload */
+
+static void proto_debug_note_addressed_cmd(
+    uint8_t cmd_type,
+    uint8_t len,
+    uint8_t raw_subcmd,
+    uint8_t subcmd,
+    uint8_t reply_mode_initial,
+    uint8_t reply_mode_final
+)
+{
+    if (subcmd == SUBCMD_QUERY_TIMING) {
+        proto_dbg_capture_reply = 0u;
+        return;
+    }
+
+    proto_dbg_sequence++;
+    proto_dbg_capture_reply = 1u;
+    proto_dbg_cmd_type = cmd_type;
+    proto_dbg_len = len;
+    proto_dbg_target = cmd_type & 0x0Fu;
+    proto_dbg_raw_subcmd = raw_subcmd;
+    proto_dbg_subcmd = subcmd;
+    proto_dbg_reply_mode_initial = reply_mode_initial;
+    proto_dbg_reply_mode_final = reply_mode_final;
+    proto_dbg_full_reply_kind = 0u;
+    proto_dbg_reply_branch = PROTO_DBG_BRANCH_PENDING;
+    proto_dbg_ack_result = 0u;
+    proto_dbg_ack_detail = 0u;
+    proto_dbg_frame_start_mode = (uint8_t)frame_start_mode;
+    proto_dbg_fwd_mode = (uint8_t)fwd_mode;
+}
+
+static uint8_t proto_debug_branch_for_reply(uint8_t reply_mode, uint8_t full_reply_kind)
+{
+    if (reply_mode == SUBCMD_REPLY_NONE)
+        return PROTO_DBG_BRANCH_NONE;
+    if (reply_mode == SUBCMD_REPLY_ACK)
+        return PROTO_DBG_BRANCH_ACK;
+    if (reply_mode == SUBCMD_REPLY_ACK_TIMED)
+        return PROTO_DBG_BRANCH_ACK_TIMED;
+
+    if (full_reply_kind == FULL_REPLY_STRIKE_STATUS)
+        return PROTO_DBG_BRANCH_STRIKE_STATUS;
+    if (full_reply_kind == FULL_REPLY_TIMING_STATUS)
+        return PROTO_DBG_BRANCH_TIMING_STATUS;
+    if (full_reply_kind == FULL_REPLY_STRIKE_TIMING)
+        return PROTO_DBG_BRANCH_STRIKE_TIMING;
+
+    return PROTO_DBG_BRANCH_STATUS;
+}
+
+static void proto_debug_note_reply(
+    uint8_t reply_mode,
+    uint8_t subcmd,
+    uint8_t ack_result,
+    uint16_t ack_detail,
+    uint8_t full_reply_kind
+)
+{
+    if (proto_dbg_capture_reply == 0u || subcmd != proto_dbg_subcmd)
+        return;
+
+    proto_dbg_reply_mode_final = reply_mode;
+    proto_dbg_full_reply_kind = full_reply_kind;
+    proto_dbg_reply_branch = proto_debug_branch_for_reply(reply_mode, full_reply_kind);
+    proto_dbg_ack_result = ack_result;
+    proto_dbg_ack_detail = ack_detail;
+    proto_dbg_fwd_mode = (uint8_t)fwd_mode;
+    proto_dbg_capture_reply = 0u;
+}
+
 static void send_status_reply(void)
 {
     uint32_t irq_state;
@@ -239,11 +343,6 @@ static void send_status_reply(void)
 #define STRIKE_PARAM_HOME_OFFSET     0x01u
 #define STRIKE_PARAM_COAST_DISTANCE  0x02u
 #define STRIKE_PARAM_HOMING_DUTY     0x03u
-
-#define FULL_REPLY_STATUS            0u
-#define FULL_REPLY_STRIKE_STATUS     1u
-#define FULL_REPLY_TIMING_STATUS     2u
-#define FULL_REPLY_STRIKE_TIMING     3u  /* compact 13-byte strike-timing payload */
 
 static void send_strike_status_reply(void)
 {
@@ -351,12 +450,12 @@ static void send_strike_timing_reply(void)
 static void send_timing_status_reply(void)
 {
     timing_snapshot_t snapshot;
-    uint8_t buf[60];
+    uint8_t buf[67];
     uint16_t crc;
 
     timing_get_snapshot(&snapshot);
 
-    buf[0]  = 57u;                                  /* LEN */
+    buf[0]  = 64u;                                  /* LEN */
     buf[1]  = CMD_STATUS_BASE | device_addr;
     buf[2]  = (uint8_t)(snapshot.control_budget_us >> 8);
     buf[3]  = (uint8_t)(snapshot.control_budget_us & 0xFFu);
@@ -414,12 +513,19 @@ static void send_timing_status_reply(void)
     buf[55] = (uint8_t)(snapshot.adc_overrun_count >> 16);
     buf[56] = (uint8_t)(snapshot.adc_overrun_count >> 8);
     buf[57] = (uint8_t)(snapshot.adc_overrun_count & 0xFFu);
+    buf[58] = (uint8_t)(proto_dbg_sequence & 0xFFu);
+    buf[59] = proto_dbg_cmd_type;
+    buf[60] = proto_dbg_len;
+    buf[61] = proto_dbg_raw_subcmd;
+    buf[62] = proto_dbg_reply_mode_initial;
+    buf[63] = proto_dbg_reply_mode_final;
+    buf[64] = proto_dbg_reply_branch;
 
-    crc = crc16_ccitt(buf, 58);
-    buf[58] = (uint8_t)(crc >> 8);
-    buf[59] = (uint8_t)(crc & 0xFFu);
+    crc = crc16_ccitt(buf, 65);
+    buf[65] = (uint8_t)(crc >> 8);
+    buf[66] = (uint8_t)(crc & 0xFFu);
 
-    send_frame(buf, 60);
+    send_frame(buf, 67);
 }
 
 static void send_ack_reply(uint8_t subcmd, uint8_t result, uint16_t detail)
@@ -527,6 +633,8 @@ static void send_addressed_reply(
     uint8_t full_reply_kind
 )
 {
+    proto_debug_note_reply(reply_mode, subcmd, ack_result, ack_detail, full_reply_kind);
+
     if (reply_mode == SUBCMD_REPLY_NONE)
         return;
 
@@ -608,6 +716,7 @@ static void handle_addressed_cmd(uint8_t cmd_type, const uint8_t *payload, uint8
     uint8_t target = cmd_type & 0x0Fu;
     uint8_t raw_subcmd;
     uint8_t subcmd;
+    uint8_t reply_mode_initial;
     uint8_t reply_mode;
     uint8_t ack_result;
     uint16_t ack_detail;
@@ -621,11 +730,21 @@ static void handle_addressed_cmd(uint8_t cmd_type, const uint8_t *payload, uint8
 
     raw_subcmd = (len >= 2u) ? payload[1] : 0u;
     subcmd = raw_subcmd & SUBCMD_MASK;
-    reply_mode = sanitize_reply_mode(raw_subcmd & SUBCMD_REPLY_MASK);
+    reply_mode_initial = raw_subcmd & SUBCMD_REPLY_MASK;
+    reply_mode = sanitize_reply_mode(reply_mode_initial);
 
     if (subcmd == SUBCMD_QUERY_STATUS || subcmd == SUBCMD_QUERY_STRIKE ||
         subcmd == SUBCMD_QUERY_TIMING || subcmd == SUBCMD_QUERY_STRIKE_TIMING)
         reply_mode = SUBCMD_REPLY_FULL;
+
+    proto_debug_note_addressed_cmd(
+        cmd_type,
+        len,
+        raw_subcmd,
+        subcmd,
+        reply_mode_initial,
+        reply_mode
+    );
 
     switch (subcmd) {
     case SUBCMD_SET_DUTY:
@@ -947,6 +1066,21 @@ void protocol_init(void)
 {
     device_addr = ADDR_UNASSIGNED;
     fwd_mode = FWD_CUT_THROUGH;
+    proto_dbg_sequence = 0u;
+    proto_dbg_capture_reply = 0u;
+    proto_dbg_cmd_type = 0u;
+    proto_dbg_len = 0u;
+    proto_dbg_target = 0u;
+    proto_dbg_raw_subcmd = 0u;
+    proto_dbg_subcmd = 0u;
+    proto_dbg_reply_mode_initial = 0u;
+    proto_dbg_reply_mode_final = 0u;
+    proto_dbg_full_reply_kind = 0u;
+    proto_dbg_reply_branch = 0u;
+    proto_dbg_ack_result = 0u;
+    proto_dbg_ack_detail = 0u;
+    proto_dbg_frame_start_mode = 0u;
+    proto_dbg_fwd_mode = 0u;
     uart_echo_enable();
     uart_rx_flush();
     reset_receiver();

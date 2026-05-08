@@ -69,12 +69,12 @@ PLAYER_HTML = ROOT / "player" / "midi_player.html"
 class Bridge:
     """Thread-safe wrapper around RingClientV2."""
 
-    def __init__(self, port: str, baud: int, timeout_ms: int = 1000):
+    def __init__(self, port: str, baud: int, timeout_ms: int = 1000, trace: bool = False):
         # The default in ring_bus is 200 ms, which is enough for a quiet
         # bus but tight when many devices are running motor work in
         # parallel (homing especially). Default the bridge a little
         # higher and let the caller override for very busy setups.
-        self.client = RingClientV2(port=port, baudrate=baud, timeout_ms=timeout_ms)
+        self.client = RingClientV2(port=port, baudrate=baud, timeout_ms=timeout_ms, trace=trace)
         self.client.open()
         self.lock = threading.Lock()
         self.count: int = 0
@@ -243,6 +243,7 @@ class Bridge:
         }
 
 
+
 class Handler(BaseHTTPRequestHandler):
     bridge: Bridge | None = None
 
@@ -309,6 +310,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 self._json(200, self.bridge.status())
             except Exception as exc:
+                traceback.print_exc()
                 self._json(500, {"error": str(exc)})
             return
 
@@ -329,6 +331,7 @@ class Handler(BaseHTTPRequestHandler):
                         ]
                     })
             except Exception as exc:
+                traceback.print_exc()
                 self._json(500, {"error": str(exc)})
             return
 
@@ -404,6 +407,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--timeout-ms", type=int, default=1000,
                     help="Per-frame RX timeout in ms (default: 1000). Bump higher if you see"
                          " transient 'timeout waiting for frame' errors during homing.")
+    ap.add_argument("--trace", action="store_true", help="Print raw ring TX/RX frames")
     args = ap.parse_args(argv)
 
     port = args.port or auto_detect_port()
@@ -412,7 +416,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     print(f"Opening {port} at {args.baud} baud (rx timeout {args.timeout_ms} ms)")
-    bridge = Bridge(port=port, baud=args.baud, timeout_ms=args.timeout_ms)
+    bridge = Bridge(port=port, baud=args.baud, timeout_ms=args.timeout_ms, trace=args.trace)
     try:
         count = bridge.enumerate()
         print(f"Enumerated {count} device(s) on the ring")

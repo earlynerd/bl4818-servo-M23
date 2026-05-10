@@ -210,7 +210,7 @@
     <div class="panel">
       <label class="label">Strike Current</label>
       <div style="display:flex;align-items:center;gap:12px">
-        <input type="range" id="currentSlider" min="500" max="3000" step="50" value="1500" class="slider">
+        <input type="range" id="currentSlider" min="50" max="3000" step="50" value="1500" class="slider">
         <span id="currentDisplay" style="font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--accent);min-width:62px;text-align:right">1500 mA</span>
       </div>
       <p style="font-size:11px;color:var(--text-dim);margin-top:6px">Master strike current. Per-mallet trim and per-note velocity multiply on top of this.</p>
@@ -258,10 +258,11 @@
 
     <div class="panel">
       <label class="label">Hardware</label>
-      <div style="display:flex;gap:6px">
-        <button class="pill" id="homeBtn" style="flex:1;color:var(--accent)">Home All</button>
-        <button class="pill" id="cancelBtn" style="flex:1;color:var(--error)">Cancel</button>
-        <button class="pill" id="enumBtn" style="flex:1">Enumerate</button>
+      <div style="display:flex;gap:6px;flex-wrap:wrap">
+        <button class="pill" id="homeBtn" style="flex:1 1 calc(50% - 3px);color:var(--accent)">Home All</button>
+        <button class="pill" id="cancelBtn" style="flex:1 1 calc(50% - 3px);color:var(--error)">Cancel</button>
+        <button class="pill" id="stopMotorsBtn" style="flex:1 1 calc(50% - 3px);color:var(--error)" title="Disable PWM on every drive (motor goes idle, no holding torque)">Disable motors</button>
+        <button class="pill" id="enumBtn" style="flex:1 1 calc(50% - 3px)">Enumerate</button>
       </div>
     </div>
 
@@ -362,7 +363,9 @@
 
     <div class="modal-footer">
       <span class="status" id="cfgStatus">changes apply live</span>
-      <div style="display:flex;gap:8px">
+      <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end">
+        <button class="pill" id="cfgStopBtn" style="color:var(--error)" title="Disable PWM on this drive only (motor idle). Use before Save to drive if param edits re-enabled the motor.">Disable</button>
+        <button class="pill" id="cfgSaveBtn" title="Persist these strike params to the drive's NVM so they survive a reboot">Save to drive</button>
         <button class="pill" id="cfgHomeBtn">Re-home</button>
         <button class="pill" id="cfgTestBtn">Test strike</button>
       </div>
@@ -1606,6 +1609,25 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.getElementById("cancelBtn").addEventListener("click", async () => {
     try { await api("POST", "/api/cancel"); log("cancel sent"); } catch (e) { log("cancel failed: " + e.message); }
   });
+  document.getElementById("stopMotorsBtn").addEventListener("click", async () => {
+    log("disable motors…");
+    try {
+      const j = await api("POST", "/api/stop", {});
+      const results = Array.isArray(j.results) ? j.results : [];
+      const failed = results.filter(r => !r.accepted);
+      if (!failed.length) {
+        log(`motors disabled (${results.length} drive${results.length === 1 ? "" : "s"})`);
+        showSuccess("Motors disabled");
+      } else {
+        const detail = failed.map(r => `addr ${r.address}${r.error ? ": " + r.error : ""}`).join(", ");
+        log(`disable partial; failed: ${detail}`);
+        showError(`Disable failed on ${failed.length}/${results.length}: ${detail}`);
+      }
+    } catch (e) {
+      log("disable failed: " + e.message);
+      showError("Disable failed: " + e.message);
+    }
+  });
 
   // Strike-config modal wiring. Slider <-> number-input sync, live apply.
   const cfgModal = document.getElementById("cfgModal");
@@ -1673,6 +1695,54 @@ document.addEventListener("DOMContentLoaded", async () => {
       }
     } catch (e) {
       status.textContent = `home failed: ${e.message}`;
+      status.style.color = "var(--error)";
+    }
+  });
+  document.getElementById("cfgStopBtn").addEventListener("click", async () => {
+    if (S.cfgSlot < 0) return;
+    const slot = S.cfgSlot;
+    const status = document.getElementById("cfgStatus");
+    status.textContent = `disabling addr ${slot}…`;
+    status.style.color = "var(--text-muted)";
+    try {
+      const j = await api("POST", "/api/stop", { addresses: [slot] });
+      const r = (j.results || [])[0];
+      if (r && r.accepted) {
+        status.textContent = `addr ${slot} disabled ✓ (re-home before next strike)`;
+        status.style.color = "var(--success)";
+        log(`stop addr=${slot} ok`);
+      } else {
+        const detail = r ? (r.error || r.result_name || "rejected") : "no reply";
+        status.textContent = `disable failed: ${detail}`;
+        status.style.color = "var(--error)";
+        log(`stop addr=${slot} failed: ${detail}`);
+      }
+    } catch (e) {
+      status.textContent = `disable failed: ${e.message}`;
+      status.style.color = "var(--error)";
+    }
+  });
+  document.getElementById("cfgSaveBtn").addEventListener("click", async () => {
+    if (S.cfgSlot < 0) return;
+    const slot = S.cfgSlot;
+    const status = document.getElementById("cfgStatus");
+    status.textContent = `saving addr ${slot} to drive…`;
+    status.style.color = "var(--text-muted)";
+    try {
+      const j = await api("POST", "/api/save-settings", { addresses: [slot] });
+      const r = (j.results || [])[0];
+      if (r && r.accepted) {
+        status.textContent = `addr ${slot} saved to drive ✓`;
+        status.style.color = "var(--success)";
+        log(`save-settings addr=${slot} ok`);
+      } else {
+        const detail = r ? (r.error || r.result_name || "rejected") : "no reply";
+        status.textContent = `save failed: ${detail}`;
+        status.style.color = "var(--error)";
+        log(`save-settings addr=${slot} failed: ${detail}`);
+      }
+    } catch (e) {
+      status.textContent = `save failed: ${e.message}`;
       status.style.color = "var(--error)";
     }
   });

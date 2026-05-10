@@ -1,0 +1,1687 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RobotDrum Looper</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Crimson+Pro:wght@300;400;600&family=JetBrains+Mono:wght@300;400&display=swap');
+  :root {
+    --bg: #121010; --surface: #1c1816; --surface-alt: #231f1b;
+    --border: #302a24; --border-light: #3d352d;
+    --accent: #c89640; --accent-dim: #8a6830; --accent-bright: #e8b850;
+    --text: #e4dbd0; --text-muted: #8a7e72; --text-dim: #5a5048;
+    --error: #c45050; --success: #6a9955; --blue: #5588cc; --rec: #d04040;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: 'Crimson Pro', Georgia, serif; min-height: 100vh; }
+  ::selection { background: #c8964060; }
+  textarea:focus, input:focus, select:focus { outline: none; }
+
+  .label { font-size: 11px; text-transform: uppercase; letter-spacing: 1.5px; color: var(--text-muted); display: block; margin-bottom: 8px; font-family: 'JetBrains Mono', monospace; }
+  .pill {
+    background: var(--surface-alt); border: 1px solid var(--border); border-radius: 4px;
+    padding: 5px 10px; color: var(--text-muted); font-size: 12px; cursor: pointer;
+    font-family: 'Crimson Pro', serif; transition: all 0.15s;
+  }
+  .pill:hover { border-color: var(--accent); color: var(--text); }
+  .pill.active { background: var(--accent-dim); border-color: var(--accent); color: var(--accent-bright); }
+  .pill.danger { color: var(--error); border-color: #4a2828; }
+  .pill.danger:hover { background: #2a1515; color: var(--error); }
+  .pill:disabled { opacity: 0.4; cursor: default; }
+  .panel { background: var(--surface-alt); border-radius: 6px; padding: 14px; border: 1px solid var(--border); }
+
+  .header { border-bottom: 1px solid var(--border); padding: 18px 28px; display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+  .header h1 { font-family: 'Crimson Pro', Georgia, serif; font-weight: 300; font-size: 26px; color: var(--accent); letter-spacing: 1px; }
+  .header p { margin-top: 2px; font-size: 12px; color: var(--text-muted); }
+  .header a { color: var(--text-muted); text-decoration: none; font-size: 12px; font-family: 'JetBrains Mono', monospace; }
+  .header a:hover { color: var(--accent); }
+  .conn-pill {
+    font-size: 12px; font-family: 'JetBrains Mono', monospace;
+    padding: 6px 10px; border-radius: 4px; border: 1px solid var(--border);
+    background: var(--surface-alt); color: var(--text-muted);
+  }
+  .conn-pill.ok { color: var(--success); border-color: #2c4225; }
+  .conn-pill.err { color: var(--error); border-color: #4a2828; }
+
+  .layout { display: flex; min-height: calc(100vh - 80px); }
+  .sidebar { width: 320px; flex-shrink: 0; padding: 20px; border-right: 1px solid var(--border); background: var(--surface); display: flex; flex-direction: column; gap: 16px; overflow-y: auto; }
+  .main { flex: 1; padding: 20px; display: flex; flex-direction: column; gap: 14px; overflow: hidden; }
+
+  .error-box { background: #2a1515; border: 1px solid var(--error); border-radius: 6px; padding: 10px; font-size: 13px; color: var(--error); }
+  .success-box { background: #1a2a15; border: 1px solid var(--success); border-radius: 6px; padding: 10px; font-size: 13px; color: var(--success); }
+
+  .slider { flex: 1; -webkit-appearance: none; appearance: none; height: 4px; border-radius: 2px; background: var(--border); cursor: pointer; }
+  .slider::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 14px; height: 14px; border-radius: 50%; background: var(--accent); cursor: pointer; }
+
+  pre.log { background: var(--surface-alt); border: 1px solid var(--border); border-radius: 6px; padding: 8px; font-size: 11px; font-family: 'JetBrains Mono', monospace; color: var(--text-muted); height: 110px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; margin: 0; }
+
+  /* ─── Transport bar ─── */
+  .transport {
+    display: flex; align-items: center; gap: 14px;
+    background: var(--surface-alt); border: 1px solid var(--border);
+    border-radius: 8px; padding: 12px 16px; flex-wrap: wrap;
+  }
+  .transport .group { display: flex; align-items: center; gap: 8px; }
+  .transport .group + .group { padding-left: 14px; border-left: 1px solid var(--border); }
+  .transport .num {
+    width: 64px; background: var(--surface); border: 1px solid var(--border);
+    border-radius: 4px; padding: 6px 8px; color: var(--text);
+    font-family: 'JetBrains Mono', monospace; font-size: 13px; text-align: right;
+  }
+  .transport select {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 4px; padding: 6px 8px; color: var(--text);
+    font-family: 'JetBrains Mono', monospace; font-size: 12px;
+  }
+  .transport .lbl {
+    font-size: 11px; font-family: 'JetBrains Mono', monospace;
+    color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px;
+  }
+
+  .play-btn {
+    background: linear-gradient(135deg, var(--accent), var(--accent-dim));
+    border: none; color: var(--bg);
+    border-radius: 6px; padding: 9px 22px; font-size: 15px; cursor: pointer;
+    font-family: 'Crimson Pro', serif; font-weight: 600; transition: all 0.15s;
+  }
+  .play-btn:disabled { opacity: 0.4; cursor: default; }
+  .play-btn.playing { background: var(--accent); }
+  .stop-btn {
+    background: var(--surface); border: 1px solid var(--border); color: var(--text);
+    border-radius: 6px; padding: 9px 18px; font-size: 14px; cursor: pointer;
+    font-family: 'Crimson Pro', serif; font-weight: 600;
+  }
+  .stop-btn:hover { border-color: var(--accent); }
+  .panic-btn {
+    background: #2a1515; border: 1px solid #4a2828; color: var(--error);
+    border-radius: 6px; padding: 9px 16px; font-size: 13px; cursor: pointer;
+    font-family: 'JetBrains Mono', monospace; letter-spacing: 1px;
+  }
+  .panic-btn:hover { background: #3a1a1a; }
+
+  /* ─── Clock readout ─── */
+  .clock {
+    display: flex; align-items: center; gap: 10px;
+    font-family: 'JetBrains Mono', monospace; font-size: 13px; color: var(--text-muted);
+  }
+  .clock .big { font-size: 18px; color: var(--accent-bright); min-width: 84px; }
+  .beat-dots { display: flex; gap: 4px; }
+  .beat-dots .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--border); transition: background 0.05s; }
+  .beat-dots .dot.on { background: var(--accent-bright); }
+
+  /* ─── Layer list ─── */
+  .layers {
+    flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 8px;
+    padding: 4px; min-height: 200px;
+  }
+  .layer {
+    background: var(--surface-alt); border: 1px solid var(--border); border-radius: 6px;
+    padding: 10px 12px; display: grid;
+    grid-template-columns: 18px 1fr auto auto auto auto;
+    grid-template-rows: auto auto;
+    gap: 6px 10px; align-items: center; position: relative;
+  }
+  .layer.recording { border-color: var(--rec); box-shadow: 0 0 0 1px var(--rec) inset; }
+  .layer.armed { border-color: var(--accent); }
+  .layer.muted { opacity: 0.55; }
+  .layer .swatch { width: 12px; height: 12px; border-radius: 3px; grid-row: 1; }
+  .layer .name {
+    font-family: 'Crimson Pro', serif; font-size: 16px; color: var(--text);
+    grid-row: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .layer .state {
+    font-family: 'JetBrains Mono', monospace; font-size: 10px;
+    color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px;
+    margin-left: 8px;
+  }
+  .layer .state.rec { color: var(--rec); }
+  .layer .state.armed { color: var(--accent-bright); }
+  .layer .ms-btn {
+    width: 26px; height: 22px; border-radius: 3px; border: 1px solid var(--border);
+    background: var(--surface); color: var(--text-muted); font-size: 11px; cursor: pointer;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .layer .ms-btn.on.mute { background: #2a1515; border-color: #4a2828; color: var(--error); }
+  .layer .ms-btn.on.solo { background: #2a2a15; border-color: #4a4a28; color: var(--accent-bright); }
+  .layer .vol-wrap { display: flex; align-items: center; gap: 6px; min-width: 130px; }
+  .layer .vol-pct { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--text-dim); width: 30px; text-align: right; }
+  .layer .vol { width: 90px; }
+  .layer .del-btn {
+    width: 26px; height: 22px; border-radius: 3px; border: 1px solid var(--border);
+    background: var(--surface); color: var(--text-dim); font-size: 14px; cursor: pointer;
+    line-height: 1;
+  }
+  .layer .del-btn:hover { color: var(--error); border-color: #4a2828; }
+
+  .layer .strip {
+    grid-column: 1 / -1; grid-row: 2;
+    height: 22px; background: var(--surface); border: 1px solid var(--border);
+    border-radius: 3px; position: relative; overflow: hidden; margin-top: 4px;
+  }
+  .layer .strip .bar-tick {
+    position: absolute; top: 0; bottom: 0; width: 1px; background: var(--border-light);
+  }
+  .layer .strip .note-dot {
+    position: absolute; top: 4px; bottom: 4px; width: 3px; border-radius: 1px;
+    background: var(--accent); opacity: 0.85;
+  }
+  .layer .strip .cursor {
+    position: absolute; top: 0; bottom: 0; width: 2px;
+    background: var(--accent-bright); box-shadow: 0 0 6px var(--accent-bright);
+    pointer-events: none; transition: none;
+  }
+  .layer .strip .rec-overlay {
+    position: absolute; top: 0; left: 0; bottom: 0;
+    background: rgba(208,64,64,0.18); pointer-events: none;
+  }
+
+  .empty-hint {
+    border: 1px dashed var(--border); border-radius: 6px; padding: 22px;
+    text-align: center; color: var(--text-muted); font-size: 13px;
+  }
+
+  /* ─── Computer keyboard (linear ascending) ─── */
+  .kbd-panel {
+    flex-shrink: 0; background: var(--surface-alt); border: 1px solid var(--border);
+    border-radius: 8px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px;
+  }
+  .kbd-panel .kbd-head {
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-muted);
+  }
+  .kbd-panel .kbd-head .lbl { text-transform: uppercase; letter-spacing: 1.2px; color: var(--text-dim); }
+  .kbd-panel .octave-pill {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 4px;
+    padding: 4px 8px; color: var(--accent-bright); min-width: 64px; text-align: center;
+  }
+  .kbd-keyboard {
+    display: flex; flex-direction: column; gap: 4px; align-items: flex-start;
+  }
+  .kbd-row {
+    display: flex; gap: 4px;
+  }
+  /* Mirror the natural QWERTY stagger: home row sits half a key to the right
+     of the top row so the zigzag reads cleanly left-to-right. */
+  .kbd-row-home { margin-left: 30px; }
+  .kbd-key {
+    flex: 0 0 56px; height: 50px;
+    border: 1px solid var(--border); border-radius: 4px;
+    background: #2a221a; color: var(--text-muted);
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    font-family: 'JetBrains Mono', monospace; font-size: 14px; font-weight: 600;
+    cursor: pointer; user-select: none;
+    transition: background 0.05s, color 0.05s, box-shadow 0.05s;
+    min-width: 0; overflow: hidden;
+  }
+  .kbd-key small {
+    font-size: 9px; color: var(--text-dim); margin-top: 3px; font-weight: 400;
+    letter-spacing: 0.5px;
+  }
+  .kbd-key.mapped {
+    background: linear-gradient(180deg, #5a4628 0%, #3a2c18 100%);
+    color: var(--text); border-color: #4a3820;
+  }
+  .kbd-key.mapped small { color: var(--accent-bright); }
+  .kbd-key.unbound { opacity: 0.35; cursor: default; }
+  .kbd-key.held {
+    background: var(--accent-bright) !important; color: var(--bg) !important;
+    box-shadow: 0 0 10px var(--accent-bright);
+  }
+  .kbd-key.held small { color: var(--bg) !important; }
+  .kbd-panel.disabled { opacity: 0.55; }
+  .kbd-panel.disabled .kbd-key { cursor: default; }
+
+  /* ─── Mapping summary ─── */
+  .map-summary {
+    font-family: 'JetBrains Mono', monospace; font-size: 11px;
+    color: var(--text-muted); display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 4px 12px;
+  }
+  .map-summary .row { display: flex; align-items: center; gap: 6px; }
+  .map-summary .swatch { width: 8px; height: 8px; border-radius: 2px; }
+  .map-summary .pitch { color: var(--text); }
+  .map-summary .unhomed { color: var(--error); }
+
+  .row { display: flex; align-items: center; gap: 8px; }
+  .grow { flex: 1; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div>
+    <h1>RobotDrum Looper</h1>
+    <p>Layer-and-loop builder · shares mapping &amp; calibration with the main player</p>
+  </div>
+  <div class="row" style="gap:14px">
+    <a href="/player.html">→ MIDI Player</a>
+    <div id="connPill" class="conn-pill">connecting…</div>
+  </div>
+</div>
+
+<div class="layout">
+  <div class="sidebar">
+
+    <div id="errorBox" class="error-box" style="display:none"></div>
+    <div id="successBox" class="success-box" style="display:none"></div>
+
+    <div class="panel">
+      <label class="label">MIDI Input</label>
+      <select id="midiInputSel" style="width:100%; background:var(--surface); border:1px solid var(--border); border-radius:4px; padding:6px 8px; color:var(--text); font-family:'JetBrains Mono',monospace; font-size:12px">
+        <option value="">(no input — use Web MIDI)</option>
+      </select>
+      <div style="margin-top:10px; display:flex; gap:6px; align-items:center">
+        <input type="checkbox" id="liveMonitor" checked>
+        <label for="liveMonitor" style="font-size:12px; color:var(--text-muted); cursor:pointer">Live monitor (echo MIDI to ring)</label>
+      </div>
+      <div style="margin-top:6px; font-size:11px; color:var(--text-dim); font-style:italic">
+        Browser must support Web MIDI (Chrome/Edge).
+      </div>
+    </div>
+
+    <div class="panel">
+      <label class="label">Master Strike Current</label>
+      <div class="row">
+        <input type="range" id="currentSlider" class="slider" min="0" max="3000" step="50" value="1500">
+        <span id="currentVal" style="font-family:'JetBrains Mono',monospace; font-size:12px; color:var(--text); min-width:60px; text-align:right">1500 mA</span>
+      </div>
+
+      <label class="label" style="margin-top:14px">Velocity Floor</label>
+      <div class="row">
+        <input type="range" id="velFloorSlider" class="slider" min="0" max="100" step="5" value="50">
+        <span id="velFloorVal" style="font-family:'JetBrains Mono',monospace; font-size:12px; color:var(--text); min-width:50px; text-align:right">50%</span>
+      </div>
+      <div style="margin-top:6px; font-size:10px; color:var(--text-dim); font-style:italic">
+        Shared with main player.
+      </div>
+    </div>
+
+    <div class="panel">
+      <label class="label">Mapping</label>
+      <div id="mapSummary" class="map-summary">loading…</div>
+      <div style="margin-top:10px; display:flex; gap:6px">
+        <button class="pill" id="homeAllBtn" style="flex:1; color:var(--accent)">Home all</button>
+        <button class="pill" id="refreshStatusBtn" style="flex:1">Refresh state</button>
+        <a href="/player.html" class="pill" style="flex:1; text-align:center; text-decoration:none; color:var(--text-muted)">Edit map</a>
+      </div>
+    </div>
+
+    <div class="panel" style="flex:1">
+      <label class="label">Log</label>
+      <pre class="log" id="logBox"></pre>
+    </div>
+
+  </div><!-- /sidebar -->
+
+  <div class="main">
+
+    <div class="transport">
+      <div class="group">
+        <button id="playBtn" class="play-btn">▶ Play</button>
+        <button id="stopBtn" class="stop-btn" style="display:none">■ Stop</button>
+      </div>
+      <div class="group">
+        <span class="lbl">BPM</span>
+        <input id="bpmInput" type="number" class="num" min="40" max="240" step="1" value="120">
+      </div>
+      <div class="group">
+        <span class="lbl">Beats/bar</span>
+        <input id="beatsInput" type="number" class="num" min="2" max="12" step="1" value="4" style="width:48px">
+      </div>
+      <div class="group">
+        <span class="lbl">Bars/loop</span>
+        <select id="barsSel">
+          <option>1</option><option>2</option><option selected>4</option><option>8</option><option>16</option>
+        </select>
+      </div>
+      <div class="group">
+        <button id="armBtn" class="pill" style="padding:8px 14px; font-size:13px">⏺ Arm New Track</button>
+        <button id="stopRecBtn" class="pill danger" style="padding:8px 14px; font-size:13px; display:none">⏹ Stop Rec</button>
+      </div>
+      <div class="group" style="margin-left:auto">
+        <button id="panicBtn" class="panic-btn">PANIC</button>
+        <button id="clearAllBtn" class="pill danger">Clear all</button>
+      </div>
+    </div>
+
+    <div class="clock">
+      <span class="big" id="clockTime">0:00.00</span>
+      <span id="clockBar">bar — / —</span>
+      <div class="beat-dots" id="beatDots"></div>
+      <span id="clockTracks" style="font-family:'JetBrains Mono',monospace; font-size:11px; color:var(--text-dim)">0 tracks</span>
+      <span id="clockMode" style="margin-left:auto; font-style:italic; color:var(--text-dim)">stopped</span>
+    </div>
+
+    <div id="layerList" class="layers">
+      <div class="empty-hint" id="emptyHint">
+        No layers yet. Set BPM and bars/loop, then click <strong>⏺ Arm New Track</strong>.
+        After a one-bar count-in the recording starts. Play your MIDI controller (or enable
+        the computer keyboard below); the loop length is set by Bars/loop, and after the first
+        pass the captured notes start playing back so you can layer over them. Click
+        <strong>⏹ Stop Rec</strong> when you're happy with the take.
+      </div>
+      <div id="layerListInner"></div>
+    </div>
+
+    <div id="kbdPanel" class="kbd-panel disabled">
+      <div class="kbd-head">
+        <div class="row" style="gap:6px">
+          <input type="checkbox" id="kbdEnable">
+          <label for="kbdEnable" style="font-size:13px; color:var(--text); font-family:'Crimson Pro',serif; cursor:pointer">
+            Computer keyboard input
+          </label>
+        </div>
+        <div class="row" style="gap:6px; margin-left:auto">
+          <span class="lbl">Vel</span>
+          <input type="range" id="kbdVelSlider" class="slider" style="width:90px" min="20" max="127" step="1" value="100">
+          <span id="kbdVelVal" style="font-family:'JetBrains Mono',monospace; font-size:11px; color:var(--text); min-width:28px; text-align:right">100</span>
+        </div>
+      </div>
+      <div id="kbdKeyboard" class="kbd-keyboard"></div>
+    </div>
+
+  </div><!-- /main -->
+</div>
+
+<script>
+// ─── Shared config (same keys as midi_player.html so calibration carries over) ───
+const API_BASE = "";
+const STORAGE_KEY_MAP = "robotdrum.mapping.v1";
+const STORAGE_KEY_TRIM = "robotdrum.trim.v1";
+const STORAGE_KEY_VEL = "robotdrum.velfloor.v1";
+const STORAGE_KEY_FB = "robotdrum.fallback.v1";
+const STORAGE_KEY_COMP = "robotdrum.comp.v1";
+const STORAGE_KEY_CURRENT = "robotdrum.looper.current.v1"; // master mA, looper-local
+const STORAGE_KEY_PROJECT = "robotdrum.looper.project.v1";
+
+const STRIKE_MA_MIN = 0;
+const STRIKE_MA_MAX = 3000;
+const DEFAULT_VEL_FLOOR = 0.5;
+const DEFAULT_COMP_MS = 50;
+const COMP_MAX_MS = 150;
+const COMP_EMA_ALPHA = 0.3;
+const COMP_BUCKET_WIDTH_MA = 500;
+const COMP_BUCKET_COUNT = 6;
+
+const DEFAULT_MAPPING = [52, 55, 57, 60, 62, 64, 65, 67, 69, 72];
+const SLOT_COLORS = [
+  "#8B5E3C", "#9B6B42", "#A87D50", "#B8915E", "#C4A46E",
+  "#D4B87E", "#DCBE70", "#E8CC78", "#E8C050", "#F0D060",
+  "#A85070", "#7050A8", "#4080B0", "#40A080", "#A0A040", "#806060",
+];
+const NOTE_NAMES = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
+function midiName(p) { return NOTE_NAMES[p % 12] + (Math.floor(p/12) - 1); }
+
+const SCHEDULER_TICK_MS = 25;
+const SCHEDULER_LOOKAHEAD_MS = 100;
+
+// Computer-keyboard layout: zigzag across the QWERTY top row and home row so
+// pitches ascend left-to-right when reading both rows together. Even pitch
+// indices land on the top row (q,w,e,...), odd indices on the home row
+// (a,s,d,...) which is rendered with a half-key right offset to mirror the
+// natural QWERTY stagger.
+const STORAGE_KEY_LOOPER_KBD = "robotdrum.looper.kbd.v1";
+const KBD_DEFAULT_VELOCITY = 100;
+const KBD_TOP_ROW = ["q","w","e","r","t","y","u","i","o","p"];
+const KBD_HOME_ROW = ["a","s","d","f","g","h","j","k","l",";"];
+// Pitch-assignment order: q a w s e d r f t g y h u j i k o l p ;
+const KBD_KEY_ORDER = [];
+for (let i = 0; i < KBD_TOP_ROW.length; i++) {
+  KBD_KEY_ORDER.push(KBD_TOP_ROW[i]);
+  KBD_KEY_ORDER.push(KBD_HOME_ROW[i]);
+}
+const KBD_CODE_TO_KEY = {
+  KeyA:"a", KeyS:"s", KeyD:"d", KeyF:"f", KeyG:"g",
+  KeyH:"h", KeyJ:"j", KeyK:"k", KeyL:"l", Semicolon:";",
+  KeyQ:"q", KeyW:"w", KeyE:"e", KeyR:"r", KeyT:"t",
+  KeyY:"y", KeyU:"u", KeyI:"i", KeyO:"o", KeyP:"p",
+};
+
+// ─── State ───
+const LP = {
+  // ring state mirrored from the bridge
+  count: 0,
+  homed: [],
+  slots: [],
+  // shared calibration (loaded from main player's storage)
+  mapping: [],
+  trim: [],
+  fallback: {},
+  velFloor: DEFAULT_VEL_FLOOR,
+  compEnabled: true,
+  compDefaultMs: DEFAULT_COMP_MS,
+  compEma: {},               // compEma[slot] = { [bucketIdx]: ms }
+  lastStrikeCurrent: {},     // for ACK-metric attribution
+  // looper-specific project
+  loops: [],                 // see makeLoop()
+  nextLoopId: 1,
+  bpm: 120,
+  beatsPerBar: 4,
+  barsPerLoop: 4,
+  // master clock
+  masterRunning: false,
+  masterStartWall: 0,        // performance.now() at song t=0
+  // recording
+  recordTarget: null,        // loop id currently recording, or null
+  countInUntilWall: 0,       // wall time when count-in ends (== record/play start)
+  // scheduler bookkeeping
+  schedTimer: null,
+  uiTimer: null,
+  scheduledKeys: new Set(),  // "loopId:cycleIndex:noteIndex"
+  pendingTimeouts: new Set(),
+  // Computer keyboard
+  kbdEnabled: false,
+  kbdOffset: 0,           // index into sorted-mapped-pitches; useful when user has > 18 mapped
+  kbdVelocity: KBD_DEFAULT_VELOCITY,
+  kbdHeldKeys: new Set(),
+};
+
+// ─── Logging / banners ───
+function log(msg) {
+  const el = document.getElementById("logBox");
+  const t = new Date().toLocaleTimeString();
+  el.textContent += `[${t}] ${msg}\n`;
+  el.scrollTop = el.scrollHeight;
+}
+function showError(msg) {
+  const el = document.getElementById("errorBox");
+  el.textContent = msg; el.style.display = "block";
+  document.getElementById("successBox").style.display = "none";
+}
+function hideMessages() {
+  document.getElementById("errorBox").style.display = "none";
+  document.getElementById("successBox").style.display = "none";
+}
+function setConn(ok, label) {
+  const p = document.getElementById("connPill");
+  p.className = "conn-pill " + (ok ? "ok" : "err");
+  p.textContent = label;
+}
+
+// ─── HTTP API ───
+async function api(method, path, body) {
+  const opts = { method, headers: {} };
+  if (body !== undefined) {
+    opts.headers["Content-Type"] = "application/json";
+    opts.body = JSON.stringify(body);
+  }
+  const r = await fetch(API_BASE + path, opts);
+  if (!r.ok) {
+    let detail = `${r.status}`;
+    try { const j = await r.json(); detail = j.error || detail; } catch {}
+    throw new Error(`${method} ${path}: ${detail}`);
+  }
+  return r.json();
+}
+
+// ─── Calibration: load from shared storage ───
+function loadMapping() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_MAP);
+    if (raw) {
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) return arr.map(v => (Number.isInteger(v) ? v : null));
+    }
+  } catch {}
+  return DEFAULT_MAPPING.slice();
+}
+function loadTrim() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_TRIM);
+    if (raw) {
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) return arr.map(v => Number.isFinite(v) ? Math.max(0, v) : 1.0);
+    }
+  } catch {}
+  return [];
+}
+function loadFallback() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_FB);
+    if (raw) {
+      const obj = JSON.parse(raw);
+      if (obj && typeof obj === "object") {
+        const out = {};
+        for (const k of Object.keys(obj)) {
+          const p = parseInt(k, 10);
+          const s = obj[k];
+          if (Number.isInteger(p) && p >= 0 && p <= 127 && Number.isInteger(s) && s >= 0) out[p] = s;
+        }
+        return out;
+      }
+    }
+  } catch {}
+  return {};
+}
+function loadVelFloor() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_VEL);
+    if (raw != null) {
+      const v = parseFloat(raw);
+      if (Number.isFinite(v)) return Math.max(0, Math.min(1, v));
+    }
+  } catch {}
+  return DEFAULT_VEL_FLOOR;
+}
+function saveVelFloor() {
+  localStorage.setItem(STORAGE_KEY_VEL, String(LP.velFloor));
+}
+function loadCompSettings() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_COMP);
+    if (raw) {
+      const obj = JSON.parse(raw);
+      if (obj && typeof obj === "object") {
+        if (typeof obj.enabled === "boolean") LP.compEnabled = obj.enabled;
+        if (Number.isFinite(obj.defaultMs)) {
+          LP.compDefaultMs = Math.max(0, Math.min(COMP_MAX_MS, obj.defaultMs));
+        }
+      }
+    }
+  } catch {}
+}
+function loadMasterMa() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_CURRENT);
+    if (raw != null) {
+      const v = parseInt(raw, 10);
+      if (Number.isFinite(v)) return Math.max(STRIKE_MA_MIN, Math.min(STRIKE_MA_MAX, v));
+    }
+  } catch {}
+  return 1500;
+}
+function saveMasterMa(ma) {
+  localStorage.setItem(STORAGE_KEY_CURRENT, String(ma));
+}
+
+// ─── Pitch routing & current scaling (mirrors midi_player.html) ───
+function slotForPitch(pitch) {
+  for (let i = 0; i < LP.mapping.length; i++) {
+    if (LP.mapping[i] === pitch) return i;
+  }
+  const fb = LP.fallback[pitch];
+  return Number.isInteger(fb) ? fb : -1;
+}
+function getCurrentMa() {
+  return parseInt(document.getElementById("currentSlider").value, 10);
+}
+function velocityScale(velocity) {
+  const v = Math.max(0, Math.min(127, velocity ?? 127));
+  const f = Math.max(0, Math.min(1, LP.velFloor));
+  return f + (1 - f) * (v / 127);
+}
+function effectiveCurrentForSlot(slot, velocity = 127) {
+  const base = getCurrentMa();
+  const t = LP.trim[slot];
+  const trim = Number.isFinite(t) ? t : 1.0;
+  const scaled = base * trim * velocityScale(velocity);
+  return Math.max(STRIKE_MA_MIN, Math.min(STRIKE_MA_MAX, Math.round(scaled)));
+}
+
+// ─── Latency compensation ───
+function currentBucket(currentMa) {
+  if (!Number.isFinite(currentMa)) return -1;
+  return Math.max(0, Math.min(COMP_BUCKET_COUNT - 1, Math.floor(currentMa / COMP_BUCKET_WIDTH_MA)));
+}
+function compensationMs(slot, currentMa) {
+  if (!LP.compEnabled) return 0;
+  const buckets = LP.compEma[slot];
+  const idx = currentBucket(currentMa);
+  if (buckets && idx >= 0) {
+    if (Number.isFinite(buckets[idx])) return buckets[idx];
+    for (let d = 1; d < COMP_BUCKET_COUNT; d++) {
+      if (Number.isFinite(buckets[idx - d])) return buckets[idx - d];
+      if (Number.isFinite(buckets[idx + d])) return buckets[idx + d];
+    }
+  }
+  return LP.compDefaultMs;
+}
+function updateLatencyEma(slot, currentMa, metrics) {
+  if (!metrics) return;
+  const sample = metrics.trigger_to_impact_ms;
+  if (!Number.isFinite(sample)) return;
+  const idx = currentBucket(currentMa);
+  if (idx < 0) return;
+  let buckets = LP.compEma[slot];
+  if (!buckets) buckets = LP.compEma[slot] = {};
+  const prev = buckets[idx];
+  buckets[idx] = Number.isFinite(prev)
+    ? (1 - COMP_EMA_ALPHA) * prev + COMP_EMA_ALPHA * sample
+    : sample;
+}
+
+// ─── Strike (fire-and-forget, harvests metrics into the EMA) ───
+function strikeAsync(addr, currentMa) {
+  const priorCurrent = LP.lastStrikeCurrent[addr];
+  LP.lastStrikeCurrent[addr] = currentMa;
+  fetch(API_BASE + "/api/strike", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ address: addr, current_ma: currentMa }),
+    keepalive: true,
+  }).then(r => r.ok ? r.json() : null).then(j => {
+    if (!j) return;
+    if (!j.accepted && j.result_name && j.result_name !== "OK") {
+      log(`strike addr=${addr} -> ${j.result_name}`);
+    }
+    if (j.metrics && Number.isFinite(priorCurrent)) {
+      updateLatencyEma(addr, priorCurrent, j.metrics);
+    }
+  }).catch(e => log(`strike addr=${addr} failed: ${e.message}`));
+}
+
+// ─── Status (count + homed mapping summary) ───
+async function refreshStatus() {
+  try {
+    const j = await api("GET", "/api/status");
+    LP.count = j.count || 0;
+    LP.homed = j.homed || [];
+    LP.slots = Array.isArray(j.slots) ? j.slots : [];
+    while (LP.mapping.length < LP.count) {
+      LP.mapping.push(DEFAULT_MAPPING[LP.mapping.length] ?? null);
+    }
+    while (LP.trim.length < LP.count) LP.trim.push(1.0);
+    setConn(true, `${LP.count} device(s) on ring`);
+    renderMappingSummary();
+    renderKbdPiano();
+  } catch (e) {
+    setConn(false, "no bridge");
+    showError(`status: ${e.message}`);
+  }
+}
+function renderMappingSummary() {
+  const el = document.getElementById("mapSummary");
+  if (LP.count === 0) {
+    el.innerHTML = `<div style="grid-column:1/-1; color:var(--text-dim); font-style:italic">no devices enumerated</div>`;
+    return;
+  }
+  let h = "";
+  for (let i = 0; i < LP.count; i++) {
+    const p = LP.mapping[i];
+    const homed = LP.homed[i];
+    const color = SLOT_COLORS[i % SLOT_COLORS.length];
+    const pitchTxt = (p == null) ? "<i style=color:var(--text-dim)>—</i>" : `<span class="pitch">${midiName(p)}</span>`;
+    const homedCls = homed ? "" : "unhomed";
+    h += `<div class="row ${homedCls}"><span class="swatch" style="background:${color}"></span>addr ${i}: ${pitchTxt}${homed?"":" ⚠"}</div>`;
+  }
+  el.innerHTML = h;
+}
+
+// ─── Web MIDI input ───
+async function initMidiInput() {
+  if (!navigator.requestMIDIAccess) {
+    log("Web MIDI not supported — live input disabled");
+    document.getElementById("midiInputSel").disabled = true;
+    return;
+  }
+  try {
+    const access = await navigator.requestMIDIAccess({ sysex: false });
+    LP.midiAccess = access;
+    populateMidiInputs();
+    access.onstatechange = populateMidiInputs;
+  } catch (e) {
+    log(`MIDI access denied: ${e.message}`);
+  }
+}
+function populateMidiInputs() {
+  const sel = document.getElementById("midiInputSel");
+  const inputs = LP.midiAccess ? Array.from(LP.midiAccess.inputs.values()) : [];
+  const prevId = sel.value;
+  sel.innerHTML = `<option value="">(none)</option>` +
+    inputs.map(inp => `<option value="${inp.id}">${escapeHtml(inp.name || inp.id)}</option>`).join("");
+  // Restore previous selection if still present, else auto-pick first
+  if (prevId && inputs.some(i => i.id === prevId)) {
+    sel.value = prevId;
+  } else if (inputs.length > 0 && !LP.midiInput) {
+    sel.value = inputs[0].id;
+  }
+  bindMidiInput(sel.value);
+}
+function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+function bindMidiInput(id) {
+  if (LP.midiInput) {
+    LP.midiInput.onmidimessage = null;
+    LP.midiInput = null;
+  }
+  if (!id || !LP.midiAccess) return;
+  const inp = LP.midiAccess.inputs.get(id);
+  if (!inp) return;
+  inp.onmidimessage = onMidiMessage;
+  LP.midiInput = inp;
+  log(`MIDI input: ${inp.name}`);
+}
+function onMidiMessage(ev) {
+  const [status, d1, d2] = ev.data;
+  const cmd = status & 0xF0;
+  if (cmd === 0x90 && d2 > 0) {       // noteOn
+    handleNoteOn(d1, d2);
+  } else if (cmd === 0x80 || (cmd === 0x90 && d2 === 0)) {
+    // noteOff — currently ignored (ring strikes are momentary)
+  }
+}
+function handleNoteOn(pitch, velocity) {
+  // Live monitor: always echo through the ring
+  const liveOn = document.getElementById("liveMonitor").checked;
+  if (liveOn) {
+    const slot = slotForPitch(pitch);
+    if (slot >= 0) {
+      strikeAsync(slot, effectiveCurrentForSlot(slot, velocity));
+    }
+  }
+  // Capture into the active recording, if any. Multi-cycle recording: the
+  // user can keep recording past one full pass; later notes wrap around with
+  // timeMs = elapsed mod lengthMs (overdub on the same loop position).
+  if (LP.recordTarget != null) {
+    const loop = LP.loops.find(l => l.id === LP.recordTarget);
+    if (loop && loop.state === "recording") {
+      const elapsed = performance.now() - loop.recordStartWall;
+      if (elapsed >= 0) {
+        const t = ((elapsed % loop.lengthMs) + loop.lengthMs) % loop.lengthMs;
+        loop.notes.push({ pitch, vel: velocity, timeMs: t });
+      }
+    }
+  }
+}
+
+// ─── Computer keyboard input ───
+function loadKbdSettings() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_LOOPER_KBD);
+    if (!raw) return;
+    const obj = JSON.parse(raw);
+    if (obj && typeof obj === "object") {
+      if (typeof obj.enabled === "boolean") LP.kbdEnabled = obj.enabled;
+      if (Number.isFinite(obj.offset)) LP.kbdOffset = clampInt(obj.offset, 0, 64, 0);
+      if (Number.isFinite(obj.velocity)) LP.kbdVelocity = clampInt(obj.velocity, 1, 127, KBD_DEFAULT_VELOCITY);
+    }
+  } catch {}
+}
+function saveKbdSettings() {
+  localStorage.setItem(STORAGE_KEY_LOOPER_KBD, JSON.stringify({
+    enabled: LP.kbdEnabled, offset: LP.kbdOffset, velocity: LP.kbdVelocity,
+  }));
+}
+
+function collectMappedPitches() {
+  // Only the active actuator slots — no fallback entries (those are MIDI-input
+  // routing aliases, not standalone playable notes), and no padded slots past
+  // LP.count. Otherwise the on-screen keyboard ends up advertising pitches the
+  // instrument can't actually voice.
+  const set = new Set();
+  const limit = Math.min(LP.count, LP.mapping.length);
+  for (let i = 0; i < limit; i++) {
+    const p = LP.mapping[i];
+    if (Number.isInteger(p)) set.add(p);
+  }
+  return [...set].sort((a, b) => a - b);
+}
+
+function pitchForKbdKey(key) {
+  const idx = KBD_KEY_ORDER.indexOf(key);
+  if (idx < 0) return -1;
+  const pitches = collectMappedPitches();
+  if (idx >= pitches.length) return -1;
+  return pitches[idx];
+}
+
+function renderKbdPiano() {
+  const kb = document.getElementById("kbdKeyboard");
+  if (!kb) return;
+  const pitches = collectMappedPitches();
+  const cap = Math.min(pitches.length, KBD_KEY_ORDER.length);
+  // Zigzag: even pitch indices go to the top row, odd to the home row, so
+  // that reading both rows together left-to-right yields ascending pitch.
+  let topHtml = "", homeHtml = "";
+  for (let i = 0; i < cap; i++) {
+    const k = KBD_KEY_ORDER[i];
+    const pitch = pitches[i];
+    const cell = `<div class="kbd-key mapped" data-key="${k}" data-pitch="${pitch}">`
+      +  `<span>${escapeHtml(k.toUpperCase())}</span><small>${escapeHtml(midiName(pitch))}</small>`
+      +  `</div>`;
+    if (i % 2 === 0) topHtml += cell; else homeHtml += cell;
+  }
+  let h = "";
+  if (topHtml) h += `<div class="kbd-row kbd-row-top">${topHtml}</div>`;
+  if (homeHtml) h += `<div class="kbd-row kbd-row-home">${homeHtml}</div>`;
+  kb.innerHTML = h;
+  // Re-bind click-to-play.
+  kb.querySelectorAll(".kbd-key").forEach(el => {
+    el.addEventListener("mousedown", () => {
+      if (!LP.kbdEnabled) return;
+      const k = el.dataset.key;
+      const pitch = pitchForKbdKey(k);
+      if (pitch < 0) return;
+      LP.kbdHeldKeys.add(k);
+      el.classList.add("held");
+      handleNoteOn(pitch, LP.kbdVelocity);
+    });
+    const release = () => {
+      const k = el.dataset.key;
+      if (LP.kbdHeldKeys.has(k)) { LP.kbdHeldKeys.delete(k); el.classList.remove("held"); }
+    };
+    el.addEventListener("mouseup", release);
+    el.addEventListener("mouseleave", release);
+  });
+}
+
+function highlightKbdKey(key, on) {
+  const el = document.querySelector(`.kbd-key[data-key="${cssEscape(key)}"]`);
+  if (el) el.classList.toggle("held", !!on);
+}
+function cssEscape(s) {
+  // Just enough escaping for our keys (letters, digits, ',' '.' '/' ';' '[' ']').
+  return s.replace(/([\\\.\[\]\(\)\{\}\:\;\,\/\!\?\@\#\$\%\^\&\*\=\+\<\>\'\"])/g, "\\$1");
+}
+
+function setKbdEnabled(on) {
+  LP.kbdEnabled = !!on;
+  document.getElementById("kbdPanel").classList.toggle("disabled", !LP.kbdEnabled);
+  document.getElementById("kbdEnable").checked = LP.kbdEnabled;
+  saveKbdSettings();
+}
+
+function onPageKeydown(e) {
+  if (!LP.kbdEnabled) return;
+  if (e.target.matches("input, select, textarea")) return;
+  if (e.repeat) return;
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  const code = e.code;
+  const k = KBD_CODE_TO_KEY[code];
+  if (!k) return;
+  const pitch = pitchForKbdKey(k);
+  if (pitch < 0) return;
+  e.preventDefault();
+  if (LP.kbdHeldKeys.has(k)) return;
+  LP.kbdHeldKeys.add(k);
+  highlightKbdKey(k, true);
+  handleNoteOn(pitch, LP.kbdVelocity);
+}
+function onPageKeyup(e) {
+  if (!LP.kbdEnabled) return;
+  const k = KBD_CODE_TO_KEY[e.code];
+  if (!k) return;
+  if (LP.kbdHeldKeys.has(k)) {
+    LP.kbdHeldKeys.delete(k);
+    highlightKbdKey(k, false);
+  }
+}
+
+// ─── Loop model ───
+function makeLoop(lengthMs) {
+  return {
+    id: LP.nextLoopId++,
+    name: `Track ${LP.nextLoopId - 1}`,
+    color: SLOT_COLORS[(LP.loops.length) % SLOT_COLORS.length],
+    state: "armed",        // armed | recording | playing
+    notes: [],
+    lengthMs,
+    barsPerLoop: LP.barsPerLoop,
+    bpm: LP.bpm,
+    beatsPerBar: LP.beatsPerBar,
+    volume: 1.0,
+    muted: false,
+    soloed: false,
+    recordStartWall: 0,
+    startOffsetMs: 0,   // record-start in master-clock time; loop's cycle 0 begins here
+  };
+}
+
+// ─── Master clock + scheduler ───
+function barMs() { return (60000 / LP.bpm) * LP.beatsPerBar; }
+function loopLengthMs() { return barMs() * LP.barsPerLoop; }
+
+function startMasterAt(songZeroWall) {
+  // When the master clock starts from a stopped state, normalise all
+  // already-recorded loops to offset 0 so they all begin cycle 0 in phase
+  // from t=0. Per-loop offsets are only meaningful while a single master
+  // session is running (so loops recorded mid-session land in the right
+  // place); across stop/play they're irrelevant musical history.
+  for (const l of LP.loops) {
+    if (l.state === "playing") l.startOffsetMs = 0;
+  }
+  LP.masterStartWall = songZeroWall;
+  LP.masterRunning = true;
+  if (!LP.schedTimer) LP.schedTimer = setInterval(schedulerTick, SCHEDULER_TICK_MS);
+}
+
+function stopMaster() {
+  LP.masterRunning = false;
+  if (LP.schedTimer) { clearInterval(LP.schedTimer); LP.schedTimer = null; }
+  // Cancel any pending strike timeouts so a stop is immediate.
+  LP.pendingTimeouts.forEach(id => clearTimeout(id));
+  LP.pendingTimeouts.clear();
+  LP.scheduledKeys.clear();
+  // The in-flight recording target: keep it as 'playing' with whatever
+  // notes were captured so far, or drop it if it was still empty.
+  if (LP.recordTarget != null) {
+    const loop = LP.loops.find(l => l.id === LP.recordTarget);
+    if (loop) {
+      if (loop.notes.length > 0) loop.state = "playing";
+      else LP.loops = LP.loops.filter(l => l.id !== LP.recordTarget);
+    }
+    LP.recordTarget = null;
+  }
+  // Queued loops were waiting on a recording flow that's no longer happening.
+  LP.loops = LP.loops.filter(l => l.state !== "queued");
+}
+
+function isAudible(loop) {
+  if (loop.muted) return false;
+  if (LP.loops.some(l => l.soloed)) return loop.soloed;
+  return true;
+}
+
+function schedulerTick() {
+  if (!LP.masterRunning) return;
+  const now = performance.now();
+  const songMs = now - LP.masterStartWall;
+
+  // Handle the count-in -> recording transition for the armed loop.
+  if (LP.recordTarget != null) {
+    const loop = LP.loops.find(l => l.id === LP.recordTarget);
+    if (loop && loop.state === "armed" && now >= LP.countInUntilWall) {
+      loop.state = "recording";
+      loop.recordStartWall = LP.countInUntilWall;
+      log(`recording started: ${loop.name} (${loop.lengthMs.toFixed(0)} ms)`);
+      console.log("[looper] armed→recording", { id: loop.id, name: loop.name, recordStartWall: loop.recordStartWall, lengthMs: loop.lengthMs });
+    }
+    // Recording no longer auto-ends after one cycle. The user keeps
+    // overdubbing for as many cycles as they like and clicks Stop Rec to
+    // finalise. See finalizeRecording() for the transition.
+  }
+
+  // Schedule notes for each playing loop (and recording loops too, so the
+  // user hears overdub passes while they're still recording) within the
+  // lookahead window.
+  for (const loop of LP.loops) {
+    if (loop.state !== "playing" && loop.state !== "recording") continue;
+    if (!isAudible(loop)) continue;
+    if (loop.notes.length === 0) continue;
+
+    // Each loop's cycle 0 begins at startOffsetMs in master-clock time.
+    // Notes' timeMs are stored relative to recording start (== cycle 0 origin).
+    const elapsed = songMs - loop.startOffsetMs;
+    const cycleIndex = Math.floor(elapsed / loop.lengthMs);
+    // For a recording loop, never schedule the in-progress cycle (those
+    // notes are being captured live and already going through live monitor;
+    // re-firing them would double-trigger). Start from cycleIndex+1.
+    // For a playing loop, look at the current cycle and the next.
+    const startCci = (loop.state === "recording") ? (cycleIndex + 1) : Math.max(0, cycleIndex);
+    for (let cci = startCci; cci <= cycleIndex + 1; cci++) {
+      for (let ni = 0; ni < loop.notes.length; ni++) {
+        const note = loop.notes[ni];
+        const fireSongMs = loop.startOffsetMs + cci * loop.lengthMs + note.timeMs;
+        const delayFromNow = fireSongMs - songMs;
+        if (delayFromNow < -5 || delayFromNow > SCHEDULER_LOOKAHEAD_MS) continue;
+        const key = `${loop.id}:${cci}:${ni}`;
+        if (LP.scheduledKeys.has(key)) continue;
+        LP.scheduledKeys.add(key);
+        scheduleNoteFire(loop, note, Math.max(0, delayFromNow));
+      }
+    }
+  }
+
+  // Prune scheduledKeys for cycles that are now in the past.
+  if (LP.scheduledKeys.size > 256) {
+    const stale = [];
+    for (const k of LP.scheduledKeys) {
+      const [lid, ci] = k.split(":");
+      const loop = LP.loops.find(l => String(l.id) === lid);
+      if (!loop) { stale.push(k); continue; }
+      const elapsed = songMs - loop.startOffsetMs;
+      const cur = Math.floor(elapsed / loop.lengthMs);
+      if (parseInt(ci, 10) < cur - 1) stale.push(k);
+    }
+    stale.forEach(k => LP.scheduledKeys.delete(k));
+  }
+}
+
+function scheduleNoteFire(loop, note, delayFromNow) {
+  // Project the strike current at schedule time so we pick the right
+  // compensation bucket. The actual strike re-reads live current at fire
+  // time so master/trim/volume changes apply.
+  const slot = slotForPitch(note.pitch);
+  if (slot < 0) return;
+  const scaledVel = Math.max(1, Math.min(127, Math.round(note.vel)));
+  const projectedCurrent = effectiveCurrentForSlot(slot, scaledVel);
+  const comp = compensationMs(slot, projectedCurrent);
+  const adjusted = Math.max(0, delayFromNow - comp);
+  let tid;
+  tid = setTimeout(() => {
+    LP.pendingTimeouts.delete(tid);
+    // Re-check at fire time so deletes/mutes/solo respect the latest state.
+    // Recording loops also play (overdub-style) for cycles past cycle 0.
+    const live = LP.loops.find(l => l.id === loop.id);
+    if (!live) return;
+    if (live.state !== "playing" && live.state !== "recording") return;
+    if (!isAudible(live)) return;
+    const baseMa = effectiveCurrentForSlot(slot, scaledVel);
+    const finalMa = Math.max(0, Math.round(baseMa * live.volume));
+    if (finalMa < 1) return;
+    strikeAsync(slot, finalMa);
+  }, adjusted);
+  LP.pendingTimeouts.add(tid);
+}
+
+// ─── Recording / arming ───
+// armLoop and onArmClick split the work so the scheduler can also arm a
+// queued loop without going through the click path.
+function onArmClick() {
+  hideMessages();
+  if (LP.count === 0) {
+    showError("no ring devices enumerated yet");
+    return;
+  }
+  // Snapshot tempo settings into the loop. If the user changes BPM/bars
+  // later, this loop still records at its original length.
+  LP.bpm = clampInt(parseInt(document.getElementById("bpmInput").value, 10), 40, 240, 120);
+  LP.beatsPerBar = clampInt(parseInt(document.getElementById("beatsInput").value, 10), 2, 12, 4);
+  LP.barsPerLoop = parseInt(document.getElementById("barsSel").value, 10) || 4;
+  const length = loopLengthMs();
+  const loop = makeLoop(length);
+
+  const busy = LP.recordTarget != null || LP.loops.some(l => l.state === "queued");
+  console.log("[looper] arm click", { busy, recordTarget: LP.recordTarget, newLoop: { id: loop.id, name: loop.name }, totalLoops: LP.loops.length });
+  if (busy) {
+    // A recording is in progress (or another track is already queued ahead
+    // of us). Park this one in the queue; the scheduler will arm it as soon
+    // as the current recording finishes.
+    loop.state = "queued";
+    LP.loops.push(loop);
+    log(`queued ${loop.name} — will arm after current recording finishes`);
+    console.log("[looper] queued", { id: loop.id, totalLoops: LP.loops.length, ids: LP.loops.map(l => l.id) });
+    saveProject();
+    renderLayers();
+    scrollLayerIntoView(loop.id);
+    return;
+  }
+  armLoop(loop, /*alreadyInList=*/false);
+  scrollLayerIntoView(loop.id);
+}
+
+function scrollLayerIntoView(id) {
+  // Make sure a freshly-armed layer is visible inside the (possibly
+  // scrollable) layer list, even if the list has been pushed below the fold
+  // by the keyboard panel.
+  setTimeout(() => {
+    const el = document.querySelector(`.layer[data-id="${id}"]`);
+    if (el) el.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }, 50);
+}
+
+function armLoop(loop, alreadyInList) {
+  if (!alreadyInList) LP.loops.push(loop);
+  loop.state = "armed";
+  LP.recordTarget = loop.id;
+
+  const now = performance.now();
+  const oneBar = barMs();
+  if (!LP.masterRunning) {
+    // First loop: one-bar count-in, then song t=0 starts AT the moment
+    // recording begins.
+    const recordStart = now + oneBar;
+    LP.countInUntilWall = recordStart;
+    startMasterAt(recordStart);
+    loop.startOffsetMs = 0;
+    log(`armed ${loop.name}; count-in ${oneBar.toFixed(0)} ms, then ${loop.lengthMs.toFixed(0)} ms recording`);
+  } else {
+    // Defer to next bar on the existing master clock.
+    const songNow = now - LP.masterStartWall;
+    const nextBarSongMs = Math.ceil((songNow + 1) / oneBar) * oneBar;
+    const recordStart = LP.masterStartWall + nextBarSongMs;
+    LP.countInUntilWall = recordStart;
+    loop.startOffsetMs = nextBarSongMs;
+    log(`armed ${loop.name}; recording at next bar (in ${(recordStart - now).toFixed(0)} ms)`);
+  }
+  saveProject();
+  renderLayers();
+  syncTransportVisuals();
+}
+
+function clampInt(v, lo, hi, def) {
+  if (!Number.isFinite(v)) return def;
+  return Math.max(lo, Math.min(hi, Math.round(v)));
+}
+
+// ─── Loop CRUD ───
+function deleteLoop(id) {
+  const idx = LP.loops.findIndex(l => l.id === id);
+  if (idx < 0) return;
+  const loop = LP.loops[idx];
+  if (LP.recordTarget === id) LP.recordTarget = null;
+  LP.loops.splice(idx, 1);
+  log(`deleted ${loop.name}`);
+  if (LP.loops.length === 0) {
+    stopMaster();
+  }
+  saveProject();
+  renderLayers();
+}
+function toggleMute(id) {
+  const loop = LP.loops.find(l => l.id === id);
+  if (!loop) return;
+  loop.muted = !loop.muted;
+  saveProject();
+  renderLayers();
+}
+function toggleSolo(id) {
+  const loop = LP.loops.find(l => l.id === id);
+  if (!loop) return;
+  loop.soloed = !loop.soloed;
+  saveProject();
+  renderLayers();
+}
+function setVolume(id, vol) {
+  const loop = LP.loops.find(l => l.id === id);
+  if (!loop) return;
+  loop.volume = Math.max(0, Math.min(1, vol));
+  saveProject();
+  // Inline-update the percent label without rebuilding the row.
+  const pctEl = document.querySelector(`.layer[data-id="${id}"] .vol-pct`);
+  if (pctEl) pctEl.textContent = Math.round(loop.volume * 100) + "%";
+}
+
+function clearAll() {
+  if (!confirm("Delete all layers?")) return;
+  stopMaster();
+  LP.loops = [];
+  LP.nextLoopId = 1;
+  saveProject();
+  renderLayers();
+  updateClockReadout();
+  log("cleared all layers");
+}
+
+// ─── Project persistence ───
+function saveProject() {
+  const data = {
+    bpm: LP.bpm,
+    beatsPerBar: LP.beatsPerBar,
+    barsPerLoop: LP.barsPerLoop,
+    loops: LP.loops.map(l => ({
+      id: l.id, name: l.name, color: l.color,
+      state: "playing",
+      notes: l.notes,
+      lengthMs: l.lengthMs,
+      barsPerLoop: l.barsPerLoop, bpm: l.bpm, beatsPerBar: l.beatsPerBar,
+      volume: l.volume, muted: l.muted, soloed: l.soloed,
+    })).filter(l => l.notes.length > 0),
+    nextLoopId: LP.nextLoopId,
+  };
+  try { localStorage.setItem(STORAGE_KEY_PROJECT, JSON.stringify(data)); } catch {}
+}
+function loadProject() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_PROJECT);
+    if (!raw) return;
+    const obj = JSON.parse(raw);
+    if (!obj || typeof obj !== "object") return;
+    if (Number.isFinite(obj.bpm)) LP.bpm = obj.bpm;
+    if (Number.isFinite(obj.beatsPerBar)) LP.beatsPerBar = obj.beatsPerBar;
+    if (Number.isFinite(obj.barsPerLoop)) LP.barsPerLoop = obj.barsPerLoop;
+    if (Array.isArray(obj.loops)) {
+      LP.loops = obj.loops.map(l => ({
+        id: Number.isInteger(l.id) ? l.id : LP.nextLoopId++,
+        name: String(l.name || `Track ${l.id || "?"}`),
+        color: l.color || SLOT_COLORS[0],
+        state: "playing",
+        notes: Array.isArray(l.notes) ? l.notes.filter(n =>
+          Number.isFinite(n.pitch) && Number.isFinite(n.vel) && Number.isFinite(n.timeMs)
+        ) : [],
+        lengthMs: Number.isFinite(l.lengthMs) ? l.lengthMs : loopLengthMs(),
+        barsPerLoop: l.barsPerLoop || LP.barsPerLoop,
+        bpm: l.bpm || LP.bpm,
+        beatsPerBar: l.beatsPerBar || LP.beatsPerBar,
+        volume: Number.isFinite(l.volume) ? Math.max(0, Math.min(1, l.volume)) : 1.0,
+        muted: !!l.muted, soloed: !!l.soloed,
+        // After reload, master clock will restart at t=0; aligning every loop
+        // to offset 0 keeps them simply phase-locked to that fresh start.
+        startOffsetMs: 0,
+        recordStartWall: 0,
+      }));
+      LP.nextLoopId = Math.max(LP.nextLoopId, ...LP.loops.map(l => l.id + 1), 1);
+    }
+  } catch (e) {
+    log(`project load failed: ${e.message}`);
+  }
+}
+
+// ─── Rendering ───
+function renderLayers() {
+  // The empty hint and the layer rows live in separate sibling containers so
+  // setting innerHTML on the rows container never destroys the hint element.
+  const inner = document.getElementById("layerListInner");
+  const hint = document.getElementById("emptyHint");
+  console.log("[looper] renderLayers", { count: LP.loops.length, loops: LP.loops.map(l => ({ id: l.id, name: l.name, state: l.state, notes: l.notes.length })) });
+  if (!inner) return;
+  if (LP.loops.length === 0) {
+    inner.innerHTML = "";
+    if (hint) hint.style.display = "block";
+    return;
+  }
+  if (hint) hint.style.display = "none";
+
+  let h = "";
+  for (const l of LP.loops) {
+    const stateCls =
+      l.state === "recording" ? "recording" :
+      l.state === "armed" || l.state === "queued" ? "armed" : "";
+    const stateLbl =
+      l.state === "recording" ? `<span class="state rec">● REC</span>` :
+      l.state === "armed" ? `<span class="state armed">⏳ COUNT-IN</span>` :
+      l.state === "queued" ? `<span class="state armed">⏸ QUEUED</span>` :
+      l.muted ? `<span class="state">MUTED</span>` :
+      l.soloed ? `<span class="state armed">SOLO</span>` : "";
+    const muteCls = "ms-btn" + (l.muted ? " on mute" : "");
+    const soloCls = "ms-btn" + (l.soloed ? " on solo" : "");
+    const volPct = Math.round(l.volume * 100);
+    // bar tick lines + note dots
+    const ticks = [];
+    for (let b = 1; b < l.barsPerLoop; b++) {
+      const x = (b / l.barsPerLoop) * 100;
+      ticks.push(`<div class="bar-tick" style="left:${x}%"></div>`);
+    }
+    const dots = l.notes.map(n => {
+      const x = (n.timeMs / l.lengthMs) * 100;
+      const op = 0.4 + 0.5 * (n.vel / 127);
+      return `<div class="note-dot" style="left:${x}%; opacity:${op.toFixed(2)}; background:${l.color}"></div>`;
+    }).join("");
+    const muted = l.muted ? " muted" : "";
+    h += `
+      <div class="layer ${stateCls}${muted}" data-id="${l.id}">
+        <span class="swatch" style="background:${l.color}"></span>
+        <span class="name">${escapeHtml(l.name)} <span style="color:var(--text-dim); font-size:11px">· ${l.barsPerLoop} bar${l.barsPerLoop>1?"s":""} @ ${l.bpm} BPM</span> ${stateLbl}</span>
+        <button class="${muteCls}" data-act="mute" data-id="${l.id}" title="Mute">M</button>
+        <button class="${soloCls}" data-act="solo" data-id="${l.id}" title="Solo">S</button>
+        <div class="vol-wrap">
+          <span class="lbl" style="font-size:10px">VOL</span>
+          <input type="range" class="vol slider" min="0" max="100" value="${volPct}" data-act="vol" data-id="${l.id}">
+          <span class="vol-pct">${volPct}%</span>
+        </div>
+        <button class="del-btn" data-act="del" data-id="${l.id}" title="Delete">🗑</button>
+        <div class="strip" data-strip-id="${l.id}">
+          ${ticks.join("")}
+          ${dots}
+          <div class="rec-overlay" style="display:none"></div>
+          <div class="cursor" style="left:0%"></div>
+        </div>
+      </div>`;
+  }
+  inner.innerHTML = h;
+
+  inner.querySelectorAll("button[data-act]").forEach(b => {
+    const act = b.dataset.act;
+    const id = parseInt(b.dataset.id, 10);
+    if (act === "mute") b.addEventListener("click", () => toggleMute(id));
+    else if (act === "solo") b.addEventListener("click", () => toggleSolo(id));
+    else if (act === "del") b.addEventListener("click", () => deleteLoop(id));
+  });
+  inner.querySelectorAll('input[data-act="vol"]').forEach(s => {
+    const id = parseInt(s.dataset.id, 10);
+    s.addEventListener("input", () => setVolume(id, parseInt(s.value, 10) / 100));
+  });
+
+  // Sync the recording-dot bookkeeping to whatever's now in the DOM, so the
+  // incremental refreshRecordingDots() doesn't double-insert dots that were
+  // baked into the rebuilt strip.
+  const recLoop = LP.loops.find(l => l.state === "recording");
+  lastRecordedNoteCount = recLoop ? recLoop.notes.length : 0;
+}
+
+function updateClockReadout() {
+  const timeEl = document.getElementById("clockTime");
+  const barEl = document.getElementById("clockBar");
+  const dotsEl = document.getElementById("beatDots");
+  const modeEl = document.getElementById("clockMode");
+  const tracksEl = document.getElementById("clockTracks");
+  if (tracksEl) {
+    const total = LP.loops.length;
+    const playing = LP.loops.filter(l => l.state === "playing").length;
+    const queued = LP.loops.filter(l => l.state === "queued").length;
+    const recording = LP.loops.filter(l => l.state === "recording").length;
+    let s = `${total} track${total !== 1 ? "s" : ""}`;
+    const parts = [];
+    if (playing) parts.push(`${playing} playing`);
+    if (recording) parts.push(`${recording} rec`);
+    if (queued) parts.push(`${queued} queued`);
+    if (parts.length) s += ` · ${parts.join(", ")}`;
+    tracksEl.textContent = s;
+  }
+
+  // Beat dots reflect current meter
+  if (dotsEl.childElementCount !== LP.beatsPerBar) {
+    dotsEl.innerHTML = "";
+    for (let i = 0; i < LP.beatsPerBar; i++) {
+      const d = document.createElement("div");
+      d.className = "dot";
+      dotsEl.appendChild(d);
+    }
+  }
+
+  if (!LP.masterRunning) {
+    timeEl.textContent = "0:00.00";
+    barEl.textContent = "bar — / —";
+    modeEl.textContent = LP.loops.length ? "stopped (press Play to resume)" : "stopped";
+    Array.from(dotsEl.children).forEach(d => d.classList.remove("on"));
+    return;
+  }
+
+  const now = performance.now();
+  const songMs = now - LP.masterStartWall;
+  // mm:ss.cs
+  const totalMs = Math.max(0, songMs);
+  const m = Math.floor(totalMs / 60000);
+  const s = Math.floor((totalMs % 60000) / 1000);
+  const cs = Math.floor((totalMs % 1000) / 10);
+  timeEl.textContent = `${m}:${String(s).padStart(2,"0")}.${String(cs).padStart(2,"0")}`;
+
+  const bm = barMs();
+  if (songMs < 0) {
+    // count-in: count down
+    const cinLeft = -songMs;
+    const beatsRemaining = Math.ceil(cinLeft / (bm / LP.beatsPerBar));
+    barEl.textContent = `count-in: ${beatsRemaining}`;
+    modeEl.textContent = LP.recordTarget != null ? "count-in (about to record)" : "count-in";
+  } else {
+    const barIdx = Math.floor(songMs / bm);
+    barEl.textContent = `bar ${barIdx + 1}`;
+    const recording = LP.loops.some(l => l.state === "recording");
+    modeEl.textContent = recording ? "recording" : "playing";
+  }
+
+  // Beat dot highlighting (by phase within bar)
+  const beatLen = bm / LP.beatsPerBar;
+  const phaseInBar = ((songMs % bm) + bm) % bm;
+  const beat = Math.floor(phaseInBar / beatLen);
+  Array.from(dotsEl.children).forEach((d, i) => d.classList.toggle("on", i === beat && songMs >= 0));
+}
+
+function updateLayerCursors() {
+  if (!LP.masterRunning) {
+    document.querySelectorAll(".layer .cursor").forEach(c => c.style.left = "0%");
+    document.querySelectorAll(".layer .rec-overlay").forEach(o => o.style.display = "none");
+    return;
+  }
+  const now = performance.now();
+  const songMs = now - LP.masterStartWall;
+  for (const loop of LP.loops) {
+    const strip = document.querySelector(`.layer[data-id="${loop.id}"] .strip`);
+    if (!strip) continue;
+    const cursor = strip.querySelector(".cursor");
+    const overlay = strip.querySelector(".rec-overlay");
+    if (loop.state === "recording") {
+      const t = now - loop.recordStartWall;
+      // Multi-cycle recording: cursor wraps within lengthMs every pass. The
+      // red overlay covers the whole strip to telegraph "still recording".
+      const phase = ((t % loop.lengthMs) + loop.lengthMs) % loop.lengthMs;
+      const pct = (phase / loop.lengthMs) * 100;
+      if (overlay) { overlay.style.display = "block"; overlay.style.width = "100%"; }
+      if (cursor) cursor.style.left = pct + "%";
+    } else if (loop.state === "playing" && songMs >= 0) {
+      if (overlay) overlay.style.display = "none";
+      const phase = ((songMs % loop.lengthMs) + loop.lengthMs) % loop.lengthMs;
+      const pct = (phase / loop.lengthMs) * 100;
+      if (cursor) cursor.style.left = pct + "%";
+    } else {
+      if (overlay) overlay.style.display = "none";
+      if (cursor) cursor.style.left = "0%";
+    }
+  }
+}
+
+// Continuously redraw note dots for a loop in flight (during recording),
+// since notes get appended live from MIDI input.
+let lastRecordedNoteCount = 0;
+function refreshRecordingDots() {
+  if (LP.recordTarget == null) { lastRecordedNoteCount = 0; return; }
+  const loop = LP.loops.find(l => l.id === LP.recordTarget);
+  if (!loop || loop.state !== "recording") return;
+  if (loop.notes.length === lastRecordedNoteCount) return;
+  // Append new dots only.
+  const strip = document.querySelector(`.layer[data-id="${loop.id}"] .strip`);
+  if (!strip) return;
+  for (let i = lastRecordedNoteCount; i < loop.notes.length; i++) {
+    const n = loop.notes[i];
+    const el = document.createElement("div");
+    el.className = "note-dot";
+    el.style.left = ((n.timeMs / loop.lengthMs) * 100) + "%";
+    el.style.opacity = String(0.4 + 0.5 * (n.vel / 127));
+    el.style.background = loop.color;
+    // Insert before the cursor element so the cursor stays on top.
+    const cursor = strip.querySelector(".cursor");
+    strip.insertBefore(el, cursor);
+  }
+  lastRecordedNoteCount = loop.notes.length;
+}
+
+let lastLayerCount = 0;
+let lastRecordingState = null;
+function uiTick() {
+  updateClockReadout();
+  updateLayerCursors();
+  refreshRecordingDots();
+  syncTransportVisuals();
+  // If a recording transitioned to playing, re-render the row (state badge changes).
+  const recId = LP.loops.find(l => l.state === "recording")?.id ?? null;
+  if (recId !== lastRecordingState || LP.loops.length !== lastLayerCount) {
+    renderLayers();
+    lastLayerCount = LP.loops.length;
+    lastRecordingState = recId;
+  }
+}
+
+// ─── Init / wiring ───
+async function init() {
+  LP.mapping = loadMapping();
+  LP.trim = loadTrim();
+  LP.fallback = loadFallback();
+  LP.velFloor = loadVelFloor();
+  loadCompSettings();
+  loadProject();
+  LP.bpm = LP.bpm || 120;
+  LP.beatsPerBar = LP.beatsPerBar || 4;
+  LP.barsPerLoop = LP.barsPerLoop || 4;
+
+  // UI from loaded state
+  document.getElementById("bpmInput").value = String(LP.bpm);
+  document.getElementById("beatsInput").value = String(LP.beatsPerBar);
+  const barsSel = document.getElementById("barsSel");
+  for (const opt of barsSel.options) opt.selected = (parseInt(opt.value, 10) === LP.barsPerLoop);
+
+  const masterMa = loadMasterMa();
+  const cs = document.getElementById("currentSlider");
+  cs.value = String(masterMa);
+  document.getElementById("currentVal").textContent = `${masterMa} mA`;
+  cs.addEventListener("input", () => {
+    const v = parseInt(cs.value, 10);
+    document.getElementById("currentVal").textContent = `${v} mA`;
+    saveMasterMa(v);
+  });
+
+  const vfs = document.getElementById("velFloorSlider");
+  vfs.value = String(Math.round(LP.velFloor * 100));
+  document.getElementById("velFloorVal").textContent = `${vfs.value}%`;
+  vfs.addEventListener("input", () => {
+    LP.velFloor = (+vfs.value) / 100;
+    document.getElementById("velFloorVal").textContent = `${vfs.value}%`;
+    saveVelFloor();
+  });
+
+  document.getElementById("playBtn").addEventListener("click", onPlayClick);
+  document.getElementById("stopBtn").addEventListener("click", onStopClick);
+  document.getElementById("armBtn").addEventListener("click", onArmClick);
+  document.getElementById("stopRecBtn").addEventListener("click", onStopRecClick);
+  document.getElementById("panicBtn").addEventListener("click", onPanic);
+  document.getElementById("clearAllBtn").addEventListener("click", clearAll);
+  document.getElementById("refreshStatusBtn").addEventListener("click", refreshStatus);
+  document.getElementById("homeAllBtn").addEventListener("click", onHomeAll);
+
+  document.getElementById("midiInputSel").addEventListener("change", e => bindMidiInput(e.target.value));
+
+  document.getElementById("bpmInput").addEventListener("change", e => {
+    LP.bpm = clampInt(parseInt(e.target.value, 10), 40, 240, 120);
+    e.target.value = String(LP.bpm);
+    saveProject();
+  });
+  document.getElementById("beatsInput").addEventListener("change", e => {
+    LP.beatsPerBar = clampInt(parseInt(e.target.value, 10), 2, 12, 4);
+    e.target.value = String(LP.beatsPerBar);
+    saveProject();
+  });
+  barsSel.addEventListener("change", e => {
+    LP.barsPerLoop = parseInt(e.target.value, 10) || 4;
+    saveProject();
+  });
+
+  // Computer keyboard wiring
+  loadKbdSettings();
+  document.getElementById("kbdEnable").checked = LP.kbdEnabled;
+  document.getElementById("kbdPanel").classList.toggle("disabled", !LP.kbdEnabled);
+  const kvs = document.getElementById("kbdVelSlider");
+  kvs.value = String(LP.kbdVelocity);
+  document.getElementById("kbdVelVal").textContent = String(LP.kbdVelocity);
+  kvs.addEventListener("input", () => {
+    LP.kbdVelocity = clampInt(parseInt(kvs.value, 10), 1, 127, KBD_DEFAULT_VELOCITY);
+    document.getElementById("kbdVelVal").textContent = String(LP.kbdVelocity);
+    saveKbdSettings();
+  });
+  document.getElementById("kbdEnable").addEventListener("change", e => setKbdEnabled(e.target.checked));
+  window.addEventListener("keydown", onPageKeydown);
+  window.addEventListener("keyup", onPageKeyup);
+  window.addEventListener("blur", () => {
+    // Drop any held-state if the window loses focus mid-press, otherwise the
+    // visual stays "held" forever.
+    LP.kbdHeldKeys.forEach(k => highlightKbdKey(k, false));
+    LP.kbdHeldKeys.clear();
+  });
+
+  await refreshStatus();
+  await initMidiInput();
+  renderLayers();
+  renderKbdPiano();
+  updateClockReadout();
+  // 30 Hz UI tick is plenty for the cursor sweep.
+  LP.uiTimer = setInterval(uiTick, 33);
+}
+
+function syncTransportVisuals() {
+  const playBtn = document.getElementById("playBtn");
+  const stopBtn = document.getElementById("stopBtn");
+  const stopRecBtn = document.getElementById("stopRecBtn");
+  if (LP.masterRunning) {
+    playBtn.classList.add("playing");
+    playBtn.textContent = "▶ Playing";
+    stopBtn.style.display = "inline-block";
+  } else {
+    playBtn.classList.remove("playing");
+    playBtn.textContent = "▶ Play";
+    stopBtn.style.display = "none";
+  }
+  // Stop Rec is meaningful only while a recording (or count-in) is in
+  // progress. Re-render whenever transport state changes.
+  if (stopRecBtn) {
+    const recOrArming = LP.recordTarget != null;
+    stopRecBtn.style.display = recOrArming ? "inline-block" : "none";
+  }
+}
+
+// Finalise the in-flight recording: if it's actively recording, transition
+// to playing with whatever's been captured. If it's still in count-in,
+// drop the empty loop entirely. Then auto-arm the next queued loop, if any.
+function finalizeRecording() {
+  if (LP.recordTarget == null) return;
+  const loop = LP.loops.find(l => l.id === LP.recordTarget);
+  if (!loop) { LP.recordTarget = null; return; }
+  if (loop.state === "armed") {
+    // Still in count-in. Cancel and remove the empty placeholder.
+    LP.loops = LP.loops.filter(l => l.id !== loop.id);
+    LP.recordTarget = null;
+    log(`cancelled count-in for ${loop.name}`);
+  } else if (loop.state === "recording") {
+    loop.state = "playing";
+    LP.recordTarget = null;
+    log(`stopped recording: ${loop.name}, ${loop.notes.length} note(s)`);
+  } else {
+    LP.recordTarget = null;
+  }
+  saveProject();
+  const next = LP.loops.find(l => l.state === "queued");
+  if (next) {
+    armLoop(next, /*alreadyInList=*/true);
+    scrollLayerIntoView(next.id);
+  } else {
+    renderLayers();
+    syncTransportVisuals();
+  }
+}
+
+function onStopRecClick() { finalizeRecording(); }
+function onPlayClick() {
+  if (LP.loops.length === 0) {
+    showError("no layers yet — arm a track first");
+    return;
+  }
+  if (LP.masterRunning) return;
+  startMasterAt(performance.now());
+  syncTransportVisuals();
+  log("master clock started");
+}
+function onStopClick() {
+  stopMaster();
+  syncTransportVisuals();
+  renderLayers();
+  log("stopped");
+}
+async function onPanic() {
+  try {
+    await api("POST", "/api/cancel");
+    log("panic: ring cancel sent");
+  } catch (e) {
+    log(`panic failed: ${e.message}`);
+  }
+  stopMaster();
+  syncTransportVisuals();
+  renderLayers();
+}
+
+async function onHomeAll() {
+  const btn = document.getElementById("homeAllBtn");
+  const prevText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Homing…";
+  log("home all…");
+  try {
+    await api("POST", "/api/home", {});
+    // /api/home returns once each strike-home command has been ack'd; the
+    // physical motion takes another beat per device. Poll status until every
+    // slot reports homed=true, or give up after a few seconds.
+    const deadline = performance.now() + 8000;
+    let allHomed = false;
+    while (performance.now() < deadline) {
+      await refreshStatus();
+      if (LP.count > 0 && LP.homed.length === LP.count && LP.homed.every(Boolean)) {
+        allHomed = true; break;
+      }
+      await new Promise(r => setTimeout(r, 250));
+    }
+    if (allHomed) {
+      log("home complete");
+    } else {
+      const stuck = LP.homed.map((h, i) => h ? null : i).filter(i => i != null);
+      log(`home incomplete; pending=${stuck.join(",")}`);
+    }
+  } catch (e) {
+    log(`home failed: ${e.message}`);
+    showError(`Home failed: ${e.message}`);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = prevText;
+  }
+}
+
+window.addEventListener("DOMContentLoaded", init);
+</script>
+</body>
+</html>

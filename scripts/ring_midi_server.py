@@ -11,6 +11,7 @@ Endpoints
 ---------
 GET  /                  -> redirect to /player.html
 GET  /player.html       -> serves player/midi_player.html
+GET  /looper.html       -> serves player/looper.html (layer/loop builder)
 GET  /api/status              -> {"count": N, "homed": [bool * N], "slots": [{...}]}
 GET  /api/strike-timing       -> cached compact timing per slot
 GET  /api/strike-timing?addr=N -> fresh compact poll for one slot
@@ -20,6 +21,8 @@ POST /api/strike              -> {"address": int, "current_ma": int}; ACK + last
 POST /api/strikes             -> {"strikes": [{"address","current_ma"}, ...]}; batch
 POST /api/strike-param        -> {"address": int, "param": str, "value": int}; ACK
 POST /api/cancel              -> cancels all active strikes (panic stop)
+POST /api/stop                -> {"addresses": [int]?}; motor_stop on each (disables PWM)
+POST /api/save-settings       -> {"addresses": [int]?}; persists strike params to NVM
 
 Usage
 -----
@@ -64,6 +67,7 @@ STRIKE_PARAM_BY_NAME = {
 
 ROOT = Path(__file__).resolve().parent.parent
 PLAYER_HTML = ROOT / "player" / "midi_player.html"
+LOOPER_HTML = ROOT / "player" / "looper.html"
 
 
 class Bridge:
@@ -194,6 +198,36 @@ class Bridge:
                 except Exception:
                     pass
 
+    def stop(self, addresses: list[int]) -> list[dict]:
+        """Send SUBCMD_STOP to each address — disables PWM and drops target
+        velocity/current/duty to zero, motor goes to MOTOR_IDLE. Returns a
+        per-slot ack list so the UI can surface partial failures."""
+        results: list[dict] = []
+        with self.lock:
+            for addr in addresses:
+                a = int(addr)
+                try:
+                    reply = self.client.stop(a, reply_mode=REPLY_MODE_ACK)
+                    results.append(self._ack_to_dict(a, reply))
+                except Exception as exc:
+                    results.append({"address": a, "accepted": False, "error": str(exc)})
+        return results
+
+    def save_settings(self, addresses: list[int]) -> list[dict]:
+        """Persist the current strike-param block on each address to the
+        device's NVM. Slot must not be running a strike — firmware rejects
+        with NOT_READY otherwise."""
+        results: list[dict] = []
+        with self.lock:
+            for addr in addresses:
+                a = int(addr)
+                try:
+                    reply = self.client.save_settings(a, reply_mode=REPLY_MODE_ACK)
+                    results.append(self._ack_to_dict(a, reply))
+                except Exception as exc:
+                    results.append({"address": a, "accepted": False, "error": str(exc)})
+        return results
+
     def close(self) -> None:
         try:
             self.client.close()
@@ -292,11 +326,12 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
-        if self.path == "/player.html":
+        if self.path in ("/player.html", "/looper.html"):
+            html_path = PLAYER_HTML if self.path == "/player.html" else LOOPER_HTML
             try:
-                data = PLAYER_HTML.read_bytes()
+                data = html_path.read_bytes()
             except FileNotFoundError:
-                self._json(500, {"error": f"Missing {PLAYER_HTML}"})
+                self._json(500, {"error": f"Missing {html_path}"})
                 return
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -388,6 +423,26 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, {"ok": True})
                 return
 
+            if self.path == "/api/stop":
+                data = self._read_json()
+                count = self.bridge.count
+                addrs = data.get("addresses")
+                if not addrs:
+                    addrs = list(range(count))
+                results = self.bridge.stop([int(a) for a in addrs])
+                self._json(200, {"results": results})
+                return
+
+            if self.path == "/api/save-settings":
+                data = self._read_json()
+                count = self.bridge.count
+                addrs = data.get("addresses")
+                if not addrs:
+                    addrs = list(range(count))
+                results = self.bridge.save_settings([int(a) for a in addrs])
+                self._json(200, {"results": results})
+                return
+
             self.send_error(404, "Not Found")
         except KeyError as exc:
             self._json(400, {"error": f"missing field {exc}"})
@@ -429,6 +484,7 @@ def main(argv: list[str] | None = None) -> int:
     server = ThreadingHTTPServer((args.host, args.http_port), Handler)
     url = f"http://{args.host}:{args.http_port}/"
     print(f"Serving {PLAYER_HTML.name} at {url}")
+    print(f"Looper UI available at {url}looper.html")
     print("Open that URL in Chrome to play.  Ctrl-C to stop.")
     try:
         server.serve_forever()

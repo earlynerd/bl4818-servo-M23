@@ -15,6 +15,7 @@ GET  /looper.html       -> serves player/looper.html (layer/loop builder)
 GET  /api/status              -> {"count": N, "homed": [bool * N], "slots": [{...}]}
 GET  /api/strike-timing       -> cached compact timing per slot
 GET  /api/strike-timing?addr=N -> fresh compact poll for one slot
+GET  /api/mapping             -> {"mapping": [int|null, ...] | null}; persisted slot->pitch map
 POST /api/enumerate           -> re-enumerate; returns same shape as /api/status
 POST /api/home                -> {"addresses": [int]?}; homes them, returns ok/error
 POST /api/strike              -> {"address": int, "current_ma": int}; ACK + last-strike timing
@@ -23,6 +24,7 @@ POST /api/strike-param        -> {"address": int, "param": str, "value": int}; A
 POST /api/cancel              -> cancels all active strikes (panic stop)
 POST /api/stop                -> {"addresses": [int]?}; motor_stop on each (disables PWM)
 POST /api/save-settings       -> {"addresses": [int]?}; persists strike params to NVM
+POST /api/mapping             -> {"mapping": [int|null, ...]}; persists slot->pitch map to disk
 
 Usage
 -----
@@ -68,6 +70,11 @@ STRIKE_PARAM_BY_NAME = {
 ROOT = Path(__file__).resolve().parent.parent
 PLAYER_HTML = ROOT / "player" / "midi_player.html"
 LOOPER_HTML = ROOT / "player" / "looper.html"
+# Persisted slot->pitch mapping. Lives at the project root so it's shared
+# across every browser that connects to the bridge. The previous behavior
+# was per-browser localStorage, which reset the mapping every time someone
+# opened the page from a fresh machine.
+MAPPING_FILE = ROOT / "mapping.json"
 
 
 class Bridge:
@@ -228,6 +235,49 @@ class Bridge:
                     results.append({"address": a, "accepted": False, "error": str(exc)})
         return results
 
+    def load_mapping(self) -> list | None:
+        """Return the persisted slot->pitch mapping, or None if no file exists
+        yet. Entries are int (MIDI pitch 0-127) or null (slot disabled)."""
+        try:
+            raw = MAPPING_FILE.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        try:
+            obj = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        if isinstance(obj, dict):
+            obj = obj.get("mapping")
+        if not isinstance(obj, list):
+            return None
+        cleaned: list = []
+        for v in obj:
+            if v is None:
+                cleaned.append(None)
+            elif isinstance(v, int) and 0 <= v <= 127:
+                cleaned.append(v)
+            else:
+                cleaned.append(None)
+        return cleaned
+
+    def save_mapping(self, mapping: list) -> list:
+        """Write the slot->pitch mapping to disk. Returns the normalized list
+        that was written."""
+        cleaned: list = []
+        for v in mapping:
+            if v is None:
+                cleaned.append(None)
+            elif isinstance(v, int) and 0 <= v <= 127:
+                cleaned.append(v)
+            else:
+                # Reject anything that isn't a valid pitch or null — keeps
+                # the file readable and matches the browser's own validation.
+                raise ValueError(f"mapping entry {v!r} is not null or int 0-127")
+        tmp = MAPPING_FILE.with_suffix(MAPPING_FILE.suffix + ".tmp")
+        tmp.write_text(json.dumps({"mapping": cleaned}, indent=2), encoding="utf-8")
+        tmp.replace(MAPPING_FILE)
+        return cleaned
+
     def close(self) -> None:
         try:
             self.client.close()
@@ -349,6 +399,14 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(500, {"error": str(exc)})
             return
 
+        if self.path == "/api/mapping":
+            try:
+                self._json(200, {"mapping": self.bridge.load_mapping()})
+            except Exception as exc:
+                traceback.print_exc()
+                self._json(500, {"error": str(exc)})
+            return
+
         if self.path.startswith("/api/strike-timing"):
             try:
                 # /api/strike-timing?address=N triggers a fresh poll;
@@ -431,6 +489,20 @@ class Handler(BaseHTTPRequestHandler):
                     addrs = list(range(count))
                 results = self.bridge.stop([int(a) for a in addrs])
                 self._json(200, {"results": results})
+                return
+
+            if self.path == "/api/mapping":
+                data = self._read_json()
+                mapping = data.get("mapping")
+                if not isinstance(mapping, list):
+                    self._json(400, {"error": "expected {'mapping': [...]}"})
+                    return
+                try:
+                    cleaned = self.bridge.save_mapping(mapping)
+                except ValueError as exc:
+                    self._json(400, {"error": str(exc)})
+                    return
+                self._json(200, {"ok": True, "mapping": cleaned})
                 return
 
             if self.path == "/api/save-settings":

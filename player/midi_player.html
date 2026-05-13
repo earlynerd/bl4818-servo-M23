@@ -210,8 +210,8 @@
     <div class="panel">
       <label class="label">Strike Current</label>
       <div style="display:flex;align-items:center;gap:12px">
-        <input type="range" id="currentSlider" min="50" max="3000" step="50" value="1500" class="slider">
-        <span id="currentDisplay" style="font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--accent);min-width:62px;text-align:right">1500 mA</span>
+        <input type="range" id="currentSlider" min="50" max="3000" step="50" value="800" class="slider">
+        <span id="currentDisplay" style="font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--accent);min-width:62px;text-align:right">800 mA</span>
       </div>
       <p style="font-size:11px;color:var(--text-dim);margin-top:6px">Master strike current. Per-mallet trim and per-note velocity multiply on top of this.</p>
     </div>
@@ -598,6 +598,9 @@ function setConn(ok, text) {
 }
 
 // ─── Mapping & trim persistence ──────────────────────────────
+// Mapping is the only setting the bridge persists for us (in mapping.json),
+// so it survives across browsers. localStorage stays as a same-machine cache
+// for fast first paint and as a fallback if the bridge isn't reachable yet.
 function loadMapping() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -608,8 +611,25 @@ function loadMapping() {
   } catch {}
   return DEFAULT_MAPPING.slice();
 }
+async function fetchServerMapping() {
+  try {
+    const j = await api("GET", "/api/mapping");
+    if (j && Array.isArray(j.mapping)) {
+      return j.mapping.map(v => (Number.isInteger(v) ? v : null));
+    }
+  } catch (e) {
+    log("mapping fetch failed: " + e.message);
+  }
+  return null;
+}
 function saveMapping() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(S.mapping));
+  // Fire-and-forget: the local cache is already up-to-date, and a bridge
+  // hiccup shouldn't block the UI. Errors are logged so the user can spot
+  // a persistent disconnect.
+  api("POST", "/api/mapping", { mapping: S.mapping }).catch(e => {
+    log("mapping save failed: " + e.message);
+  });
 }
 function loadTrim() {
   try {
@@ -1767,6 +1787,16 @@ document.addEventListener("DOMContentLoaded", async () => {
     strikeAsync(slot, ma, "(kbd)");
     flashKbdSlot(slot);
   });
+
+  // Prefer the server-side mapping (mapping.json) so it's shared across
+  // browsers. If the bridge isn't reachable or has no saved mapping yet,
+  // we keep whatever loadMapping() returned from localStorage/defaults and
+  // the next saveMapping() will seed the server.
+  const serverMapping = await fetchServerMapping();
+  if (serverMapping) {
+    S.mapping = serverMapping;
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(S.mapping)); } catch {}
+  }
 
   // Initial connection
   await refreshStatus();

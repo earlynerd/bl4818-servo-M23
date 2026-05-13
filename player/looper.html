@@ -527,6 +527,18 @@ function loadMapping() {
   } catch {}
   return DEFAULT_MAPPING.slice();
 }
+// Server-persisted mapping (mapping.json) so a new browser picks up the
+// mapping someone configured in the main player. The looper never writes
+// the mapping itself — the main player owns that — so this is read-only.
+async function fetchServerMapping() {
+  try {
+    const j = await api("GET", "/api/mapping");
+    if (j && Array.isArray(j.mapping)) {
+      return j.mapping.map(v => (Number.isInteger(v) ? v : null));
+    }
+  } catch {}
+  return null;
+}
 function loadTrim() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY_TRIM);
@@ -1475,6 +1487,11 @@ function uiTick() {
 // ─── Init / wiring ───
 async function init() {
   LP.mapping = loadMapping();
+  const serverMapping = await fetchServerMapping();
+  if (serverMapping) {
+    LP.mapping = serverMapping;
+    try { localStorage.setItem(STORAGE_KEY_MAP, JSON.stringify(LP.mapping)); } catch {}
+  }
   LP.trim = loadTrim();
   LP.fallback = loadFallback();
   LP.velFloor = loadVelFloor();

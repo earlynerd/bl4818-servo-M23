@@ -16,6 +16,8 @@ GET  /api/status              -> {"count": N, "homed": [bool * N], "slots": [{..
 GET  /api/strike-timing       -> cached compact timing per slot
 GET  /api/strike-timing?addr=N -> fresh compact poll for one slot
 GET  /api/mapping             -> {"mapping": [int|null, ...] | null}; persisted slot->pitch map
+GET  /api/library             -> {"configured": bool, "files": [{"name", "size"}, ...]}
+GET  /api/library/<name>      -> raw .mid bytes from the configured --library-dir
 POST /api/enumerate           -> re-enumerate; returns same shape as /api/status
 POST /api/home                -> {"addresses": [int]?}; homes them, returns ok/error
 POST /api/strike              -> {"address": int, "current_ma": int}; ACK + last-strike timing
@@ -44,6 +46,7 @@ import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 from ring_bus import (
     CommandAck,
@@ -330,6 +333,10 @@ class Bridge:
 
 class Handler(BaseHTTPRequestHandler):
     bridge: Bridge | None = None
+    # Optional on-disk MIDI library. When set by --library-dir, /api/library
+    # lists .mid/.midi files in this folder (flat, no recursion) and
+    # /api/library/<name> serves the raw bytes.
+    library_dir: Path | None = None
 
     def log_message(self, fmt, *args):
         # Quieter than the default per-request stderr spam.
@@ -411,7 +418,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 # /api/strike-timing?address=N triggers a fresh poll;
                 # /api/strike-timing alone returns the cached map.
-                from urllib.parse import urlparse, parse_qs
+                from urllib.parse import parse_qs
                 qs = parse_qs(urlparse(self.path).query)
                 if "address" in qs:
                     addr = int(qs["address"][0])
@@ -423,6 +430,64 @@ class Handler(BaseHTTPRequestHandler):
                             for a in range(self.bridge.count)
                         ]
                     })
+            except Exception as exc:
+                traceback.print_exc()
+                self._json(500, {"error": str(exc)})
+            return
+
+        if self.path == "/api/library":
+            try:
+                lib = Handler.library_dir
+                if lib is None:
+                    self._json(200, {"configured": False, "files": []})
+                    return
+                files = []
+                for p in sorted(lib.iterdir(), key=lambda x: x.name.lower()):
+                    if p.is_file() and p.suffix.lower() in (".mid", ".midi"):
+                        try:
+                            size = p.stat().st_size
+                        except OSError:
+                            continue
+                        files.append({"name": p.name, "size": size})
+                self._json(200, {"configured": True, "files": files})
+            except Exception as exc:
+                traceback.print_exc()
+                self._json(500, {"error": str(exc)})
+            return
+
+        if self.path.startswith("/api/library/"):
+            try:
+                lib = Handler.library_dir
+                if lib is None:
+                    self._json(404, {"error": "No library configured"})
+                    return
+                name = unquote(urlparse(self.path).path[len("/api/library/"):])
+                # Reject anything that tries to escape the library dir.
+                # Path.name strips directory parts; comparing to the raw
+                # request catches "../foo" and "sub/foo" before we touch
+                # the filesystem.
+                if not name or name != Path(name).name:
+                    self._json(400, {"error": "Invalid filename"})
+                    return
+                if Path(name).suffix.lower() not in (".mid", ".midi"):
+                    self._json(400, {"error": "Not a MIDI file"})
+                    return
+                target = (lib / name).resolve()
+                try:
+                    target.relative_to(lib.resolve())
+                except ValueError:
+                    self._json(400, {"error": "Invalid path"})
+                    return
+                if not target.is_file():
+                    self._json(404, {"error": "Not found"})
+                    return
+                data = target.read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "audio/midi")
+                self.send_header("Content-Length", str(len(data)))
+                self._cors()
+                self.end_headers()
+                self.wfile.write(data)
             except Exception as exc:
                 traceback.print_exc()
                 self._json(500, {"error": str(exc)})
@@ -535,7 +600,17 @@ def main(argv: list[str] | None = None) -> int:
                     help="Per-frame RX timeout in ms (default: 1000). Bump higher if you see"
                          " transient 'timeout waiting for frame' errors during homing.")
     ap.add_argument("--trace", action="store_true", help="Print raw ring TX/RX frames")
+    ap.add_argument("--library-dir", default=None,
+                    help="Folder of .mid/.midi files exposed at /api/library. "
+                         "Flat listing only — no recursion.")
     args = ap.parse_args(argv)
+
+    library_dir: Path | None = None
+    if args.library_dir:
+        library_dir = Path(args.library_dir).expanduser().resolve()
+        if not library_dir.is_dir():
+            print(f"--library-dir {library_dir} is not a directory", file=sys.stderr)
+            return 1
 
     port = args.port or auto_detect_port()
     if not port:
@@ -553,10 +628,13 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     Handler.bridge = bridge
+    Handler.library_dir = library_dir
     server = ThreadingHTTPServer((args.host, args.http_port), Handler)
     url = f"http://{args.host}:{args.http_port}/"
     print(f"Serving {PLAYER_HTML.name} at {url}")
     print(f"Looper UI available at {url}looper.html")
+    if library_dir is not None:
+        print(f"MIDI library: {library_dir}")
     print("Open that URL in Chrome to play.  Ctrl-C to stop.")
     try:
         server.serve_forever()

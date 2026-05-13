@@ -51,6 +51,19 @@
   .drop-zone:hover, .drop-zone.dragover { border-color: var(--accent); background: rgba(200,150,64,0.05); }
   .drop-zone input { display: none; }
 
+  .library-list { max-height: 260px; overflow-y: auto; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); }
+  .library-item {
+    display: flex; align-items: baseline; gap: 10px; padding: 6px 10px;
+    border-bottom: 1px solid rgba(48,42,36,0.4); cursor: pointer; transition: background 0.1s;
+  }
+  .library-item:last-child { border-bottom: none; }
+  .library-item:hover { background: var(--surface-alt); }
+  .library-item.active { background: rgba(200,150,64,0.12); }
+  .library-item .name { flex: 1; font-size: 13px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .library-item.active .name { color: var(--accent-bright); }
+  .library-item .size { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--text-dim); flex-shrink: 0; }
+  .library-empty { padding: 14px; text-align: center; font-size: 12px; color: var(--text-dim); font-style: italic; }
+
   .play-btn, .stop-btn {
     border-radius: 6px; padding: 10px 22px; font-size: 15px; cursor: pointer;
     font-family: 'Crimson Pro', serif; font-weight: 600; transition: all 0.15s;
@@ -173,6 +186,14 @@
         <div style="color:var(--text-muted);font-size:13px">Drop a .mid file or click to browse</div>
         <input type="file" id="fileInput" accept=".mid,.midi">
       </div>
+    </div>
+
+    <div id="libraryPanel" class="panel" style="display:none">
+      <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:8px">
+        <label class="label" style="margin-bottom:0">Library</label>
+        <button class="pill" id="libraryRefreshBtn" style="padding:3px 8px;font-size:11px">Refresh</button>
+      </div>
+      <div class="library-list" id="libraryList"></div>
     </div>
 
     <div id="errorBox" class="error-box" style="display:none"></div>
@@ -1510,6 +1531,79 @@ document.addEventListener("DOMContentLoaded", async () => {
     r.onload = () => loadFromMIDI(r.result, file.name);
     r.readAsArrayBuffer(file);
   }
+
+  // ─── Library ────────────────────────────────────────────────
+  const libraryPanel = document.getElementById("libraryPanel");
+  const libraryList = document.getElementById("libraryList");
+  const libraryRefreshBtn = document.getElementById("libraryRefreshBtn");
+  let librarySelected = null;
+
+  function formatSize(bytes) {
+    if (bytes < 1024) return bytes + " B";
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+    return (bytes / 1024 / 1024).toFixed(1) + " MB";
+  }
+
+  function renderLibrary(files) {
+    libraryList.innerHTML = "";
+    if (!files.length) {
+      const empty = document.createElement("div");
+      empty.className = "library-empty";
+      empty.textContent = "No .mid files in library folder.";
+      libraryList.appendChild(empty);
+      return;
+    }
+    for (const f of files) {
+      const row = document.createElement("div");
+      row.className = "library-item";
+      if (f.name === librarySelected) row.classList.add("active");
+      row.innerHTML = `<span class="name"></span><span class="size"></span>`;
+      row.querySelector(".name").textContent = f.name;
+      row.querySelector(".size").textContent = formatSize(f.size);
+      row.addEventListener("click", () => loadFromLibrary(f.name));
+      libraryList.appendChild(row);
+    }
+  }
+
+  async function loadFromLibrary(name) {
+    hideMessages();
+    try {
+      const r = await fetch("/api/library/" + encodeURIComponent(name));
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({ error: r.statusText }));
+        throw new Error(err.error || ("HTTP " + r.status));
+      }
+      const buf = await r.arrayBuffer();
+      librarySelected = name;
+      // Re-render so the active row updates, then hand to the existing loader.
+      for (const row of libraryList.querySelectorAll(".library-item")) {
+        row.classList.toggle("active", row.querySelector(".name")?.textContent === name);
+      }
+      loadFromMIDI(buf, name);
+    } catch (e) {
+      showError("Library load error: " + e.message);
+    }
+  }
+
+  async function refreshLibrary() {
+    try {
+      const r = await fetch("/api/library");
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      const data = await r.json();
+      if (!data.configured) {
+        libraryPanel.style.display = "none";
+        return;
+      }
+      libraryPanel.style.display = "";
+      renderLibrary(data.files || []);
+    } catch (e) {
+      // Silent: the panel just stays hidden if the bridge can't be reached.
+      libraryPanel.style.display = "none";
+    }
+  }
+
+  libraryRefreshBtn.addEventListener("click", refreshLibrary);
+  refreshLibrary();
 
   // Strike current
   const cs = document.getElementById("currentSlider");

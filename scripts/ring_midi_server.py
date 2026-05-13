@@ -18,6 +18,8 @@ GET  /api/strike-timing?addr=N -> fresh compact poll for one slot
 GET  /api/mapping             -> {"mapping": [int|null, ...] | null}; persisted slot->pitch map
 GET  /api/library             -> {"configured": bool, "files": [{"name", "size"}, ...]}
 GET  /api/library/<name>      -> raw .mid bytes from the configured --library-dir
+POST /api/library/<name>      -> writes raw .mid bytes to --library-dir; 409 on
+                                 collision unless ?overwrite=1
 POST /api/enumerate           -> re-enumerate; returns same shape as /api/status
 POST /api/home                -> {"addresses": [int]?}; homes them, returns ok/error
 POST /api/strike              -> {"address": int, "current_ma": int}; ACK + last-strike timing
@@ -578,6 +580,53 @@ class Handler(BaseHTTPRequestHandler):
                     addrs = list(range(count))
                 results = self.bridge.save_settings([int(a) for a in addrs])
                 self._json(200, {"results": results})
+                return
+
+            if self.path.startswith("/api/library/"):
+                from urllib.parse import parse_qs
+                lib = Handler.library_dir
+                if lib is None:
+                    self._json(404, {"error": "No library configured"})
+                    return
+                parsed = urlparse(self.path)
+                name = unquote(parsed.path[len("/api/library/"):])
+                qs = parse_qs(parsed.query)
+                overwrite = (qs.get("overwrite", [""])[0] or "").lower() in ("1", "true", "yes")
+                if not name or name != Path(name).name:
+                    self._json(400, {"error": "Invalid filename"})
+                    return
+                if Path(name).suffix.lower() not in (".mid", ".midi"):
+                    self._json(400, {"error": "Not a MIDI file"})
+                    return
+                target = (lib / name).resolve()
+                try:
+                    target.relative_to(lib.resolve())
+                except ValueError:
+                    self._json(400, {"error": "Invalid path"})
+                    return
+                existed = target.exists()
+                if existed and not overwrite:
+                    self._json(409, {"error": "File exists", "name": name})
+                    return
+                n = int(self.headers.get("Content-Length", "0") or "0")
+                if n <= 0:
+                    self._json(400, {"error": "Empty body"})
+                    return
+                # Soft cap. A normal MIDI file is well under a megabyte; this
+                # is just here to keep a misuse from chewing up disk.
+                MAX_BYTES = 8 * 1024 * 1024
+                if n > MAX_BYTES:
+                    self._json(413, {"error": "File too large"})
+                    return
+                body = self.rfile.read(n)
+                # Sanity check the header so we don't litter the library with
+                # random uploads that aren't even MIDI.
+                if not body.startswith(b"MThd"):
+                    self._json(400, {"error": "Not a MIDI file (missing MThd header)"})
+                    return
+                target.write_bytes(body)
+                self._json(201, {"ok": True, "name": name, "size": len(body),
+                                 "overwritten": existed})
                 return
 
             self.send_error(404, "Not Found")

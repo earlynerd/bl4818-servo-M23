@@ -189,9 +189,12 @@
     </div>
 
     <div id="libraryPanel" class="panel" style="display:none">
-      <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:8px">
+      <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:8px;gap:6px">
         <label class="label" style="margin-bottom:0">Library</label>
-        <button class="pill" id="libraryRefreshBtn" style="padding:3px 8px;font-size:11px">Refresh</button>
+        <div style="display:flex;gap:6px">
+          <button class="pill" id="librarySaveBtn" style="padding:3px 8px;font-size:11px" disabled>Save current</button>
+          <button class="pill" id="libraryRefreshBtn" style="padding:3px 8px;font-size:11px">Refresh</button>
+        </div>
       </div>
       <div class="library-list" id="libraryList"></div>
     </div>
@@ -445,6 +448,12 @@ const S = {
   fallback: {}, // fallback[pitch] = slot, for pitches not directly in mapping
   velFloor: DEFAULT_VEL_FLOOR, // fraction of target at MIDI vel=1 (1.0 = velocity ignored)
   composition: null, // { title, notes:[{pitch,timeMs,vel}], maxMs }
+  // Raw bytes of the most recently loaded MIDI file (drag-drop, file picker,
+  // or library click). Kept so "Save to library" can re-upload the same bytes
+  // without re-reading the original file.
+  loadedMidiBuf: null,
+  loadedMidiName: null,
+  loadedFromLibrary: false,
   kbdEnabled: false,
   playing: false,
   timeouts: [],
@@ -1184,6 +1193,10 @@ function loadFromMIDI(buf, filename) {
       events,
       maxMs,
     };
+    S.loadedMidiBuf = buf;
+    S.loadedMidiName = filename;
+    S.loadedFromLibrary = false;
+    if (typeof updateSaveToLibraryBtn === "function") updateSaveToLibraryBtn();
     showComposition();
     showSuccess(`Loaded "${name}" — ${events.length} note-ons over ${(maxMs/1000).toFixed(1)}s`);
   } catch (e) {
@@ -1536,7 +1549,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   const libraryPanel = document.getElementById("libraryPanel");
   const libraryList = document.getElementById("libraryList");
   const libraryRefreshBtn = document.getElementById("libraryRefreshBtn");
+  const librarySaveBtn = document.getElementById("librarySaveBtn");
   let librarySelected = null;
+  let libraryConfigured = false;
+  let libraryNames = new Set();
 
   function formatSize(bytes) {
     if (bytes < 1024) return bytes + " B";
@@ -1546,6 +1562,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   function renderLibrary(files) {
     libraryList.innerHTML = "";
+    libraryNames = new Set(files.map(f => f.name));
     if (!files.length) {
       const empty = document.createElement("div");
       empty.className = "library-empty";
@@ -1575,11 +1592,14 @@ document.addEventListener("DOMContentLoaded", async () => {
       }
       const buf = await r.arrayBuffer();
       librarySelected = name;
-      // Re-render so the active row updates, then hand to the existing loader.
       for (const row of libraryList.querySelectorAll(".library-item")) {
         row.classList.toggle("active", row.querySelector(".name")?.textContent === name);
       }
       loadFromMIDI(buf, name);
+      // loadFromMIDI sets loadedFromLibrary=false by default; mark it after
+      // so "Save current" knows this came from the library already.
+      S.loadedFromLibrary = true;
+      updateSaveToLibraryBtn();
     } catch (e) {
       showError("Library load error: " + e.message);
     }
@@ -1590,20 +1610,80 @@ document.addEventListener("DOMContentLoaded", async () => {
       const r = await fetch("/api/library");
       if (!r.ok) throw new Error("HTTP " + r.status);
       const data = await r.json();
-      if (!data.configured) {
+      libraryConfigured = !!data.configured;
+      if (!libraryConfigured) {
         libraryPanel.style.display = "none";
+        updateSaveToLibraryBtn();
         return;
       }
       libraryPanel.style.display = "";
       renderLibrary(data.files || []);
+      updateSaveToLibraryBtn();
     } catch (e) {
       // Silent: the panel just stays hidden if the bridge can't be reached.
+      libraryConfigured = false;
       libraryPanel.style.display = "none";
+      updateSaveToLibraryBtn();
     }
   }
 
+  async function saveCurrentToLibrary() {
+    if (!S.loadedMidiBuf || !S.loadedMidiName) return;
+    const name = S.loadedMidiName;
+    const url = "/api/library/" + encodeURIComponent(name);
+    hideMessages();
+    librarySaveBtn.disabled = true;
+    try {
+      let r = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "audio/midi" },
+        body: S.loadedMidiBuf,
+      });
+      if (r.status === 409) {
+        if (!confirm(`"${name}" already exists in the library. Overwrite?`)) {
+          return;
+        }
+        r = await fetch(url + "?overwrite=1", {
+          method: "POST",
+          headers: { "Content-Type": "audio/midi" },
+          body: S.loadedMidiBuf,
+        });
+      }
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({ error: r.statusText }));
+        throw new Error(err.error || ("HTTP " + r.status));
+      }
+      const data = await r.json();
+      S.loadedFromLibrary = true;
+      librarySelected = name;
+      showSuccess(`Saved "${name}" to library${data.overwritten ? " (overwritten)" : ""}.`);
+      await refreshLibrary();
+    } catch (e) {
+      showError("Library save error: " + e.message);
+    } finally {
+      updateSaveToLibraryBtn();
+    }
+  }
+
+  // Exposed at module scope so loadFromMIDI() can call it after each load.
+  window.updateSaveToLibraryBtn = function() {
+    const hasBuf = !!S.loadedMidiBuf;
+    librarySaveBtn.disabled = !(libraryConfigured && hasBuf && !S.loadedFromLibrary);
+    if (!hasBuf) {
+      librarySaveBtn.title = "Load a MIDI file first";
+    } else if (S.loadedFromLibrary) {
+      librarySaveBtn.title = "Already in library";
+    } else if (!libraryConfigured) {
+      librarySaveBtn.title = "Library not configured";
+    } else {
+      librarySaveBtn.title = `Copy "${S.loadedMidiName}" into the library folder`;
+    }
+  };
+
   libraryRefreshBtn.addEventListener("click", refreshLibrary);
+  librarySaveBtn.addEventListener("click", saveCurrentToLibrary);
   refreshLibrary();
+  updateSaveToLibraryBtn();
 
   // Strike current
   const cs = document.getElementById("currentSlider");

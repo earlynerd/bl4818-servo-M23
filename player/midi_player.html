@@ -287,6 +287,7 @@
         <button class="pill" id="cancelBtn" style="flex:1 1 calc(50% - 3px);color:var(--error)">Cancel</button>
         <button class="pill" id="stopMotorsBtn" style="flex:1 1 calc(50% - 3px);color:var(--error)" title="Disable PWM on every drive (motor goes idle, no holding torque)">Disable motors</button>
         <button class="pill" id="enumBtn" style="flex:1 1 calc(50% - 3px)">Enumerate</button>
+        <button class="pill" id="arpBtn" style="flex:1 1 100%;color:var(--accent-bright)" title="Strike each homed mallet ascending then descending at the current master to seed timing compensation.">Arpeggio (warm timings)</button>
       </div>
     </div>
 
@@ -471,6 +472,11 @@ const S = {
   compEnabled: true,
   compDefaultMs: DEFAULT_COMP_MS,
   compEma: {},
+  // Cross-slot per-bucket EMA. Folded in parallel with the per-slot EMA so a
+  // fresh current band gets a usable estimate from any slot's sample, instead
+  // of falling all the way through to compDefaultMs while the per-slot tables
+  // build up. Same bucket index as compEma[slot].
+  compEmaGlobal: {},
   lastStrikeCurrent: {},
   scale: 1,
 };
@@ -520,17 +526,31 @@ async function api(method, path, body) {
 // lands on the intended musical beat. Looks up the per-slot, per-current-bucket
 // EMA. If the targeted bucket has no sample yet, walks outward to the nearest
 // populated bucket (motor latency varies smoothly with drive current). Falls
-// through to S.compDefaultMs only if the slot has no data at all.
+// through to S.compDefaultMs only if no slot has any data. Cross-slot data
+// for the targeted bucket beats this-slot data from a distant bucket: motor
+// latency tracks drive current more strongly than slot-to-slot offset varies,
+// so a bucket-correct estimate from a different slot is closer than a
+// bucket-wrong estimate from this slot.
 function compensationMs(slot, currentMa) {
   if (!S.compEnabled) return 0;
-  const buckets = S.compEma[slot];
   const idx = currentBucket(currentMa);
-  if (buckets && idx >= 0) {
-    if (Number.isFinite(buckets[idx])) return buckets[idx];
+  if (idx < 0) return S.compDefaultMs;
+  const buckets = S.compEma[slot];
+  // Tier 1: this slot, this bucket.
+  if (buckets && Number.isFinite(buckets[idx])) return buckets[idx];
+  // Tier 2: cross-slot, this bucket.
+  if (Number.isFinite(S.compEmaGlobal[idx])) return S.compEmaGlobal[idx];
+  // Tier 3: this slot, nearest neighbor bucket.
+  if (buckets) {
     for (let d = 1; d < COMP_BUCKET_COUNT; d++) {
       if (Number.isFinite(buckets[idx - d])) return buckets[idx - d];
       if (Number.isFinite(buckets[idx + d])) return buckets[idx + d];
     }
+  }
+  // Tier 4: cross-slot, nearest neighbor bucket.
+  for (let d = 1; d < COMP_BUCKET_COUNT; d++) {
+    if (Number.isFinite(S.compEmaGlobal[idx - d])) return S.compEmaGlobal[idx - d];
+    if (Number.isFinite(S.compEmaGlobal[idx + d])) return S.compEmaGlobal[idx + d];
   }
   return S.compDefaultMs;
 }
@@ -551,6 +571,10 @@ function updateLatencyEma(slot, currentMa, metrics) {
   const prev = buckets[idx];
   buckets[idx] = Number.isFinite(prev)
     ? (1 - COMP_EMA_ALPHA) * prev + COMP_EMA_ALPHA * sample
+    : sample;
+  const prevG = S.compEmaGlobal[idx];
+  S.compEmaGlobal[idx] = Number.isFinite(prevG)
+    ? (1 - COMP_EMA_ALPHA) * prevG + COMP_EMA_ALPHA * sample
     : sample;
 }
 
@@ -932,8 +956,15 @@ function refreshCfgTiming() {
       const buckets = S.compEma[slot];
       const populated = buckets ? Object.keys(buckets).filter(k => Number.isFinite(buckets[k])).length : 0;
       const targetIdx = currentBucket(masterMa);
-      const haveTarget = !!(buckets && Number.isFinite(buckets[targetIdx]));
-      const source = populated === 0 ? "default" : (haveTarget ? "smoothed" : "nearest");
+      const haveSlotTarget = !!(buckets && Number.isFinite(buckets[targetIdx]));
+      const haveGlobalTarget = Number.isFinite(S.compEmaGlobal[targetIdx]);
+      const anyGlobal = Object.values(S.compEmaGlobal).some(v => Number.isFinite(v));
+      let source;
+      if (haveSlotTarget)        source = "smoothed";
+      else if (haveGlobalTarget) source = "cross-slot";
+      else if (populated > 0)    source = "nearest";
+      else if (anyGlobal)        source = "cross-slot nearest";
+      else                       source = "default";
       compEl.textContent = `${applied.toFixed(1)} ms @ ${masterMa} mA · ${source} (${populated}/${COMP_BUCKET_COUNT} buckets)`;
     }
   }
@@ -1442,6 +1473,54 @@ function getTempoScale() {
   return Number.isFinite(v) && v > 0 ? v : 1.0;
 }
 
+// Strike each homed slot ascending then descending at the current master so
+// the timing EMA (per-slot and cross-slot) gets seeded across the bucket the
+// user is currently playing in. Each slot's second strike's ACK is what folds
+// the first strike's metrics into the EMA — by hitting each slot twice we
+// guarantee one usable sample per slot.
+async function runArpeggio() {
+  if (S.playing) { log("arpeggio: playback running, ignoring"); return; }
+  if (S.arpRunning) return;
+  if (!S.count) { showError("No devices on ring"); return; }
+  const slots = [];
+  for (let i = 0; i < S.count; i++) {
+    if (S.mapping[i] == null) continue; // skip unmapped slots
+    if (S.homed[i] === false) continue; // skip un-homed slots; they can't strike
+    slots.push(i);
+  }
+  if (!slots.length) { showError("No homed, mapped slots"); return; }
+  const order = slots.concat(slots.slice().reverse());
+  const btn = document.getElementById("arpBtn");
+  S.arpRunning = true;
+  btn.disabled = true;
+  const originalText = btn.textContent;
+  log(`arpeggio: ${order.length} strikes across ${slots.length} slot(s) @ ~${getCurrentMa()} mA`);
+  try {
+    for (let i = 0; i < order.length; i++) {
+      const slot = order[i];
+      const ma = effectiveCurrentForSlot(slot);
+      strikeAsync(slot, ma, "(arp)");
+      btn.textContent = `Arpeggio ${i + 1}/${order.length}…`;
+      await new Promise(r => setTimeout(r, 180));
+    }
+    // Give the final ACKs time to land so the EMA reflects every sample
+    // before we report bucket coverage.
+    await new Promise(r => setTimeout(r, 400));
+    const populatedGlobal = Object.values(S.compEmaGlobal).filter(v => Number.isFinite(v)).length;
+    let slotsWithData = 0;
+    for (const i of slots) {
+      const b = S.compEma[i];
+      if (b && Object.values(b).some(v => Number.isFinite(v))) slotsWithData++;
+    }
+    log(`arpeggio done: ${slotsWithData}/${slots.length} slot tables seeded, ${populatedGlobal}/${COMP_BUCKET_COUNT} global buckets populated`);
+    if (S.cfgSlot >= 0) refreshCfgTiming();
+  } finally {
+    S.arpRunning = false;
+    btn.disabled = false;
+    btn.textContent = originalText;
+  }
+}
+
 function stopPlayback() {
   S.timeouts.forEach(id => clearTimeout(id));
   S.timeouts = [];
@@ -1803,6 +1882,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.getElementById("cancelBtn").addEventListener("click", async () => {
     try { await api("POST", "/api/cancel"); log("cancel sent"); } catch (e) { log("cancel failed: " + e.message); }
   });
+  document.getElementById("arpBtn").addEventListener("click", runArpeggio);
   document.getElementById("stopMotorsBtn").addEventListener("click", async () => {
     log("disable motors…");
     try {

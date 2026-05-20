@@ -16,6 +16,8 @@ GET  /api/status              -> {"count": N, "homed": [bool * N], "slots": [{..
 GET  /api/strike-timing       -> cached compact timing per slot
 GET  /api/strike-timing?addr=N -> fresh compact poll for one slot
 GET  /api/mapping             -> {"mapping": [int|null, ...] | null}; persisted slot->pitch map
+GET  /api/pitches             -> {"pitches": [{"pitch","name","slot","homed"}, ...]};
+                                 currently mapped pitches, sorted ascending
 GET  /api/library             -> {"configured": bool, "files": [{"name", "size"}, ...]}
 GET  /api/library/<name>      -> raw .mid bytes from the configured --library-dir
 POST /api/library/<name>      -> writes raw .mid bytes to --library-dir; 409 on
@@ -25,10 +27,15 @@ POST /api/home                -> {"addresses": [int]?}; homes them, returns ok/e
 POST /api/strike              -> {"address": int, "current_ma": int}; ACK + last-strike timing
 POST /api/strikes             -> {"strikes": [{"address","current_ma"}, ...]}; batch
 POST /api/strike-param        -> {"address": int, "param": str, "value": int}; ACK
-POST /api/cancel              -> cancels all active strikes (panic stop)
+POST /api/cancel              -> cancels all active strikes (panic stop, also stops motif)
 POST /api/stop                -> {"addresses": [int]?}; motor_stop on each (disables PWM)
 POST /api/save-settings       -> {"addresses": [int]?}; persists strike params to NVM
 POST /api/mapping             -> {"mapping": [int|null, ...]}; persists slot->pitch map to disk
+POST /api/motif               -> {"name": str?, "events": [{"t_ms","pitch","velocity"}, ...]};
+                                 fire-and-forget motif playback. Preempts any in-flight motif.
+                                 Pitches not present in /api/mapping are skipped and listed
+                                 in the response. Velocity (0-127) is mapped to current_ma
+                                 using the same curve as the browser player.
 
 Usage
 -----
@@ -46,6 +53,7 @@ import sys
 import threading
 import time
 import traceback
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -71,6 +79,95 @@ STRIKE_PARAM_BY_NAME = {
     "coast_distance": STRIKE_PARAM_COAST_DISTANCE,
     "homing_duty": STRIKE_PARAM_HOMING_DUTY,
 }
+
+NOTE_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
+
+
+def midi_name(pitch: int) -> str:
+    return f"{NOTE_NAMES[pitch % 12]}{pitch // 12 - 1}"
+
+
+class LatencyTracker:
+    """Per-slot, per-current-bucket EMA of trigger_to_impact_ms.
+
+    Mirrors the playback compensation logic in player/midi_player.html so
+    motif playback fires each strike command early enough that the mallet's
+    physical impact lands on the intended beat. The browser maintains its
+    own EMA in JS; this is the bridge's parallel copy, fed by every strike
+    that flows through the bridge (browser or motif).
+
+    Lookup falls through: this slot+bucket -> cross-slot+bucket ->
+    this slot nearest bucket -> cross-slot nearest bucket -> DEFAULT_MS.
+    """
+
+    EMA_ALPHA = 0.3
+    BUCKET_WIDTH_MA = 500
+    BUCKET_COUNT = 6
+    DEFAULT_MS = 50.0
+
+    def __init__(self) -> None:
+        self._per_slot: dict[int, dict[int, float]] = {}
+        self._global: dict[int, float] = {}
+        # Tracks the strike current most recently SENT to each slot. The
+        # firmware reports timing for the *previous* completed strike on
+        # each ACK, so we attribute incoming metrics to the bucket of the
+        # prior strike, not the one whose ACK delivered them.
+        self._last_sent_current: dict[int, int] = {}
+        self._lock = threading.Lock()
+
+    @classmethod
+    def _bucket(cls, current_ma: int) -> int:
+        if current_ma is None or current_ma < 0:
+            return 0
+        idx = current_ma // cls.BUCKET_WIDTH_MA
+        return max(0, min(cls.BUCKET_COUNT - 1, int(idx)))
+
+    def record_sent(self, slot: int, current_ma: int) -> int | None:
+        """Mark that a strike at `current_ma` was just sent to `slot`. Returns
+        the previous current value (or None if this is the first strike on
+        the slot since the bridge started)."""
+        with self._lock:
+            prev = self._last_sent_current.get(slot)
+            self._last_sent_current[slot] = current_ma
+            return prev
+
+    def update(self, slot: int, current_ma: int, impact_ms: float) -> None:
+        if impact_ms is None:
+            return
+        idx = self._bucket(current_ma)
+        with self._lock:
+            buckets = self._per_slot.setdefault(slot, {})
+            prev = buckets.get(idx)
+            buckets[idx] = (
+                impact_ms if prev is None
+                else (1 - self.EMA_ALPHA) * prev + self.EMA_ALPHA * impact_ms
+            )
+            prev_g = self._global.get(idx)
+            self._global[idx] = (
+                impact_ms if prev_g is None
+                else (1 - self.EMA_ALPHA) * prev_g + self.EMA_ALPHA * impact_ms
+            )
+
+    def compensation_ms(self, slot: int, current_ma: int) -> float:
+        idx = self._bucket(current_ma)
+        with self._lock:
+            buckets = self._per_slot.get(slot)
+            if buckets is not None and idx in buckets:
+                return buckets[idx]
+            if idx in self._global:
+                return self._global[idx]
+            if buckets is not None:
+                for d in range(1, self.BUCKET_COUNT):
+                    if (idx - d) in buckets:
+                        return buckets[idx - d]
+                    if (idx + d) in buckets:
+                        return buckets[idx + d]
+            for d in range(1, self.BUCKET_COUNT):
+                if (idx - d) in self._global:
+                    return self._global[idx - d]
+                if (idx + d) in self._global:
+                    return self._global[idx + d]
+            return self.DEFAULT_MS
 
 ROOT = Path(__file__).resolve().parent.parent
 PLAYER_HTML = ROOT / "player" / "midi_player.html"
@@ -99,6 +196,13 @@ class Bridge:
         # on strike replies and by explicit /api/strike-timing polls. Each
         # entry is the dict shape produced by _strike_timing_to_dict.
         self.strike_timing: dict[int, dict] = {}
+        # Latency EMA used by motif playback for trigger-to-impact compensation.
+        # Fed by every strike that goes through this bridge (browser too), so
+        # the player's arpeggio warm-up also warms the bridge's table.
+        self.latency = LatencyTracker()
+        # Motif scheduler. Lazily attached after construction so it can hold a
+        # reference back to this Bridge for self.strike() / self.latency.
+        self.motif_player: "MotifPlayer | None" = None
 
     def enumerate(self) -> int:
         with self.lock:
@@ -138,23 +242,43 @@ class Bridge:
         # ACK_TIMED costs 12 extra payload bytes (~480 us at 250 kbaud) and
         # replaces the otherwise-needed query_strike round trip. Net: less
         # ring traffic per strike, plus the host gets timing for free.
+        prev_current = self.latency.record_sent(address, current_ma)
         with self.lock:
             reply = self.client.strike(
                 address, current_ma, reply_mode=REPLY_MODE_ACK_TIMED
             )
-        return self._ack_to_dict(address, reply, cache_metrics=True)
+        result = self._ack_to_dict(address, reply, cache_metrics=True)
+        self._fold_metrics_into_ema(address, prev_current, result.get("metrics"))
+        return result
 
     def strikes(self, items: list[dict]) -> list[dict]:
         results: list[dict] = []
+        prev_currents: list[int | None] = []
         with self.lock:
             for item in items:
                 addr = int(item["address"])
                 cur = int(item["current_ma"])
+                prev_currents.append(self.latency.record_sent(addr, cur))
                 reply = self.client.strike(
                     addr, cur, reply_mode=REPLY_MODE_ACK_TIMED
                 )
                 results.append(self._ack_to_dict(addr, reply, cache_metrics=True))
+        for item, result, prev in zip(items, results, prev_currents):
+            self._fold_metrics_into_ema(int(item["address"]), prev, result.get("metrics"))
         return results
+
+    def _fold_metrics_into_ema(self, address: int, prev_current: int | None,
+                                metrics: dict | None) -> None:
+        """Attribute incoming impact-time metrics to the prior strike's current
+        bucket. Skips if we have no record of the prior strike yet (first
+        strike on this slot since bridge launch) or if the impact flag was
+        invalid (in which case the bridge already nulled the field)."""
+        if metrics is None or prev_current is None:
+            return
+        impact = metrics.get("trigger_to_impact_ms")
+        if impact is None:
+            return
+        self.latency.update(address, prev_current, float(impact))
 
     def query_strike_timing(self, address: int) -> dict:
         """Compact poll. Use this to harvest the very last strike's timing
@@ -203,12 +327,46 @@ class Bridge:
             self.client.strike_home(addr)
 
     def cancel_all(self) -> None:
+        # Stop the motif worker first so it can't fire a new strike between
+        # our cancel calls. motif_player.cancel() blocks on the worker's join,
+        # which only takes one strike RTT to return (the worker checks the
+        # stop event between strikes and at every wait).
+        if self.motif_player is not None:
+            self.motif_player.cancel()
         with self.lock:
             for addr in range(self.count):
                 try:
                     self.client.strike_cancel(addr, reply_mode=REPLY_MODE_ACK)
                 except Exception:
                     pass
+
+    def pitches(self) -> list[dict]:
+        """Currently mapped pitches, with note name + slot + homed flag,
+        sorted ascending by pitch. Used by remote integrations to discover
+        what's playable without having to interpret the raw slot->pitch list."""
+        mapping = self.load_mapping()
+        if not mapping:
+            return []
+        homed_by_slot: dict[int, bool] = {}
+        with self.lock:
+            for addr in range(self.count):
+                try:
+                    s = self.client.query_strike(addr)
+                    homed_by_slot[addr] = bool(s.homed)
+                except Exception:
+                    homed_by_slot[addr] = False
+        out: list[dict] = []
+        for slot, pitch in enumerate(mapping):
+            if pitch is None:
+                continue
+            out.append({
+                "pitch": int(pitch),
+                "name": midi_name(int(pitch)),
+                "slot": slot,
+                "homed": homed_by_slot.get(slot, False),
+            })
+        out.sort(key=lambda x: x["pitch"])
+        return out
 
     def stop(self, addresses: list[int]) -> list[dict]:
         """Send SUBCMD_STOP to each address — disables PWM and drops target
@@ -332,6 +490,154 @@ class Bridge:
         }
 
 
+STRIKE_MA_MIN = 0
+STRIKE_MA_MAX = 3000
+
+
+class MotifPlayer:
+    """Plays short motifs scheduled by remote integrations (calendar, Slack,
+    etc). Owns a single worker thread — a new motif preempts whatever was
+    playing. Pitches are resolved via the bridge's persisted mapping, so
+    callers speak in MIDI semantics and don't need to know the physical
+    slot layout."""
+
+    def __init__(self, bridge: Bridge, master_current_ma: int, vel_floor: float) -> None:
+        self.bridge = bridge
+        self.master_current_ma = max(STRIKE_MA_MIN, min(STRIKE_MA_MAX, int(master_current_ma)))
+        self.vel_floor = max(0.0, min(1.0, float(vel_floor)))
+        # _play_lock serializes whole play()/cancel() calls so two motif POSTs
+        # arriving at the same time can't leave two worker threads running.
+        # _control_lock guards just the small mutable state (thread handle,
+        # stop event, id) and is held only briefly.
+        self._play_lock = threading.Lock()
+        self._control_lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._current_id: str | None = None
+        self._current_name: str | None = None
+
+    def velocity_to_current(self, velocity: int) -> int:
+        """Same curve as the browser: master * (floor + (1-floor) * v/127),
+        clamped to the firmware-supported current range."""
+        v = max(0, min(127, int(velocity)))
+        scale = self.vel_floor + (1 - self.vel_floor) * (v / 127.0)
+        ma = int(round(self.master_current_ma * scale))
+        return max(STRIKE_MA_MIN, min(STRIKE_MA_MAX, ma))
+
+    def status(self) -> dict:
+        with self._control_lock:
+            running = self._thread is not None and self._thread.is_alive()
+            return {
+                "playing": running,
+                "id": self._current_id if running else None,
+                "name": self._current_name if running else None,
+            }
+
+    def play(self, events: list[dict], name: str | None = None) -> dict:
+        """Resolve, schedule, and start playback. Returns immediately with a
+        motif id, the scheduled duration, and the list of events that had to
+        be skipped (e.g. unmapped pitches)."""
+        mapping = self.bridge.load_mapping() or []
+        pitch_to_addr: dict[int, int] = {}
+        for addr, pitch in enumerate(mapping):
+            if pitch is None:
+                continue
+            # Mapping can in principle assign the same pitch to multiple slots
+            # (chorus). Keep the first; everything else is fine to ignore for
+            # motif playback — integrations don't care which slot rings.
+            pitch_to_addr.setdefault(int(pitch), addr)
+
+        resolved: list[dict] = []
+        skipped: list[dict] = []
+        for ev in events:
+            try:
+                t_ms = int(ev["t_ms"])
+                pitch = int(ev["pitch"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(f"bad motif event {ev!r}: {exc}") from exc
+            if t_ms < 0:
+                raise ValueError(f"motif event t_ms must be >= 0, got {t_ms}")
+            if not 0 <= pitch <= 127:
+                raise ValueError(f"motif event pitch out of range: {pitch}")
+            velocity = int(ev.get("velocity", 100))
+            addr = pitch_to_addr.get(pitch)
+            if addr is None:
+                skipped.append({"t_ms": t_ms, "pitch": pitch, "reason": "unmapped"})
+                continue
+            resolved.append({
+                "t_ms": t_ms,
+                "address": addr,
+                "current_ma": self.velocity_to_current(velocity),
+                "pitch": pitch,
+                "velocity": velocity,
+            })
+        resolved.sort(key=lambda e: e["t_ms"])
+        duration_ms = resolved[-1]["t_ms"] if resolved else 0
+
+        motif_id = uuid.uuid4().hex[:8]
+        with self._play_lock:
+            self._stop_and_join()
+            with self._control_lock:
+                self._stop_event = threading.Event()
+                self._current_id = motif_id
+                self._current_name = name
+                self._thread = threading.Thread(
+                    target=self._run,
+                    args=(resolved, self._stop_event, motif_id),
+                    name=f"motif-{motif_id}",
+                    daemon=True,
+                )
+                self._thread.start()
+        return {
+            "id": motif_id,
+            "name": name,
+            "duration_ms": duration_ms,
+            "scheduled": len(resolved),
+            "skipped": skipped,
+        }
+
+    def cancel(self) -> None:
+        with self._play_lock:
+            self._stop_and_join()
+
+    def _stop_and_join(self) -> None:
+        with self._control_lock:
+            self._stop_event.set()
+            thread = self._thread
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            # 2s is generous: the worker only blocks on serial round-trips
+            # (~1-2 ms each) and on its own stop_event.wait().
+            thread.join(timeout=2.0)
+        with self._control_lock:
+            # Clear the "currently playing" labels only if the thread we just
+            # joined is still the recorded one (a new play() could have raced
+            # in here and installed its own thread).
+            if self._thread is thread:
+                self._thread = None
+                self._current_id = None
+                self._current_name = None
+
+    def _run(self, events: list[dict], stop: threading.Event, motif_id: str) -> None:
+        t0 = time.monotonic()
+        for ev in events:
+            comp_ms = self.bridge.latency.compensation_ms(ev["address"], ev["current_ma"])
+            target = t0 + (ev["t_ms"] - comp_ms) / 1000.0
+            remaining = target - time.monotonic()
+            if remaining > 0:
+                # Event.wait returns True when set, False on timeout. Either
+                # way we re-check stop before striking — a wait that fell
+                # through to timeout might still race with a concurrent stop.
+                if stop.wait(remaining):
+                    return
+            if stop.is_set():
+                return
+            try:
+                self.bridge.strike(ev["address"], ev["current_ma"])
+            except Exception:
+                # One bad strike shouldn't tank the whole motif. Log and move
+                # on — the next event has its own scheduled time.
+                traceback.print_exc()
+
 
 class Handler(BaseHTTPRequestHandler):
     bridge: Bridge | None = None
@@ -411,6 +717,14 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/mapping":
             try:
                 self._json(200, {"mapping": self.bridge.load_mapping()})
+            except Exception as exc:
+                traceback.print_exc()
+                self._json(500, {"error": str(exc)})
+            return
+
+        if self.path == "/api/pitches":
+            try:
+                self._json(200, {"pitches": self.bridge.pitches()})
             except Exception as exc:
                 traceback.print_exc()
                 self._json(500, {"error": str(exc)})
@@ -572,6 +886,24 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, {"ok": True, "mapping": cleaned})
                 return
 
+            if self.path == "/api/motif":
+                data = self._read_json()
+                events = data.get("events")
+                if not isinstance(events, list):
+                    self._json(400, {"error": "expected {'events': [...]}"})
+                    return
+                name = data.get("name")
+                if name is not None and not isinstance(name, str):
+                    self._json(400, {"error": "'name' must be a string"})
+                    return
+                try:
+                    result = self.bridge.motif_player.play(events, name=name)
+                except ValueError as exc:
+                    self._json(400, {"error": str(exc)})
+                    return
+                self._json(200, {"ok": True, **result})
+                return
+
             if self.path == "/api/save-settings":
                 data = self._read_json()
                 count = self.bridge.count
@@ -652,6 +984,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--library-dir", default=None,
                     help="Folder of .mid/.midi files exposed at /api/library. "
                          "Flat listing only — no recursion.")
+    ap.add_argument("--motif-current-ma", type=int, default=800,
+                    help="Master strike current used by /api/motif when converting "
+                         "MIDI velocity to current_ma (default: 800). Matches the "
+                         "browser player's default master.")
+    ap.add_argument("--motif-vel-floor", type=float, default=0.5,
+                    help="Fraction of master current applied at velocity=1 "
+                         "(default: 0.5). 1.0 = velocity ignored; 0.0 = soft notes "
+                         "barely strike. Matches the browser's DEFAULT_VEL_FLOOR.")
     args = ap.parse_args(argv)
 
     library_dir: Path | None = None
@@ -668,6 +1008,11 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"Opening {port} at {args.baud} baud (rx timeout {args.timeout_ms} ms)")
     bridge = Bridge(port=port, baud=args.baud, timeout_ms=args.timeout_ms, trace=args.trace)
+    bridge.motif_player = MotifPlayer(
+        bridge,
+        master_current_ma=args.motif_current_ma,
+        vel_floor=args.motif_vel_floor,
+    )
     try:
         count = bridge.enumerate()
         print(f"Enumerated {count} device(s) on the ring")
@@ -684,6 +1029,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Looper UI available at {url}looper.html")
     if library_dir is not None:
         print(f"MIDI library: {library_dir}")
+    print(f"Motif playback: {args.motif_current_ma} mA master, "
+          f"velocity floor {args.motif_vel_floor:.2f}")
     print("Open that URL in Chrome to play.  Ctrl-C to stop.")
     try:
         server.serve_forever()
@@ -691,6 +1038,8 @@ def main(argv: list[str] | None = None) -> int:
         print("\nShutting down")
     finally:
         server.server_close()
+        if bridge.motif_player is not None:
+            bridge.motif_player.cancel()
         bridge.close()
     return 0
 

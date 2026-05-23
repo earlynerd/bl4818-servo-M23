@@ -31,11 +31,14 @@ POST /api/cancel              -> cancels all active strikes (panic stop, also st
 POST /api/stop                -> {"addresses": [int]?}; motor_stop on each (disables PWM)
 POST /api/save-settings       -> {"addresses": [int]?}; persists strike params to NVM
 POST /api/mapping             -> {"mapping": [int|null, ...]}; persists slot->pitch map to disk
-POST /api/motif               -> {"name": str?, "events": [{"t_ms","pitch","velocity"}, ...]};
+POST /api/motif               -> {"name": str?, "events": [{"t_ms","pitch","velocity"}, ...],
+                                  "master_current_ma": int?, "vel_floor": float?};
                                  fire-and-forget motif playback. Preempts any in-flight motif.
                                  Pitches not present in /api/mapping are skipped and listed
                                  in the response. Velocity (0-127) is mapped to current_ma
-                                 using the same curve as the browser player.
+                                 using the same curve as the browser player. master_current_ma
+                                 (0-3000) and vel_floor (0.0-1.0) override the server-wide
+                                 defaults for this motif only; out-of-range values are clamped.
 
 Usage
 -----
@@ -516,13 +519,17 @@ class MotifPlayer:
         self._current_id: str | None = None
         self._current_name: str | None = None
 
-    def velocity_to_current(self, velocity: int) -> int:
+    @staticmethod
+    def _velocity_to_current(velocity: int, master_ma: int, vel_floor: float) -> int:
         """Same curve as the browser: master * (floor + (1-floor) * v/127),
         clamped to the firmware-supported current range."""
         v = max(0, min(127, int(velocity)))
-        scale = self.vel_floor + (1 - self.vel_floor) * (v / 127.0)
-        ma = int(round(self.master_current_ma * scale))
+        scale = vel_floor + (1 - vel_floor) * (v / 127.0)
+        ma = int(round(master_ma * scale))
         return max(STRIKE_MA_MIN, min(STRIKE_MA_MAX, ma))
+
+    def velocity_to_current(self, velocity: int) -> int:
+        return self._velocity_to_current(velocity, self.master_current_ma, self.vel_floor)
 
     def status(self) -> dict:
         with self._control_lock:
@@ -533,10 +540,21 @@ class MotifPlayer:
                 "name": self._current_name if running else None,
             }
 
-    def play(self, events: list[dict], name: str | None = None) -> dict:
+    def play(self, events: list[dict], name: str | None = None,
+             master_current_ma: int | None = None,
+             vel_floor: float | None = None) -> dict:
         """Resolve, schedule, and start playback. Returns immediately with a
         motif id, the scheduled duration, and the list of events that had to
-        be skipped (e.g. unmapped pitches)."""
+        be skipped (e.g. unmapped pitches).
+
+        master_current_ma and vel_floor override the server-wide defaults for
+        this motif only — out-of-range values are clamped, same as __init__.
+        The actual values used are echoed back in the response so callers can
+        verify what landed."""
+        master = (self.master_current_ma if master_current_ma is None
+                  else max(STRIKE_MA_MIN, min(STRIKE_MA_MAX, int(master_current_ma))))
+        floor = (self.vel_floor if vel_floor is None
+                 else max(0.0, min(1.0, float(vel_floor))))
         mapping = self.bridge.load_mapping() or []
         pitch_to_addr: dict[int, int] = {}
         for addr, pitch in enumerate(mapping):
@@ -567,7 +585,7 @@ class MotifPlayer:
             resolved.append({
                 "t_ms": t_ms,
                 "address": addr,
-                "current_ma": self.velocity_to_current(velocity),
+                "current_ma": self._velocity_to_current(velocity, master, floor),
                 "pitch": pitch,
                 "velocity": velocity,
             })
@@ -594,6 +612,8 @@ class MotifPlayer:
             "duration_ms": duration_ms,
             "scheduled": len(resolved),
             "skipped": skipped,
+            "master_current_ma": master,
+            "vel_floor": floor,
         }
 
     def cancel(self) -> None:
@@ -896,8 +916,23 @@ class Handler(BaseHTTPRequestHandler):
                 if name is not None and not isinstance(name, str):
                     self._json(400, {"error": "'name' must be a string"})
                     return
+                # bool is a subclass of int — reject explicitly so True/False
+                # don't sneak through as 1/1.0 or 0/0.0.
+                master = data.get("master_current_ma")
+                if master is not None and (isinstance(master, bool)
+                                           or not isinstance(master, (int, float))):
+                    self._json(400, {"error": "'master_current_ma' must be a number"})
+                    return
+                floor = data.get("vel_floor")
+                if floor is not None and (isinstance(floor, bool)
+                                          or not isinstance(floor, (int, float))):
+                    self._json(400, {"error": "'vel_floor' must be a number"})
+                    return
                 try:
-                    result = self.bridge.motif_player.play(events, name=name)
+                    result = self.bridge.motif_player.play(
+                        events, name=name,
+                        master_current_ma=master, vel_floor=floor,
+                    )
                 except ValueError as exc:
                     self._json(400, {"error": str(exc)})
                     return

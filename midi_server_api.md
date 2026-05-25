@@ -38,6 +38,12 @@ Base URL throughout this document is `http://<host>:<http-port>`.
 All endpoints accept any `Origin` (CORS is open by default), so calling
 from a browser on another port is fine.
 
+> **Windows gotcha:** the server binds IPv4 only by default. Python's
+> `urllib` (and a few other clients) resolve `localhost` to `::1` first
+> and eat a ~2 s IPv6 connect timeout before falling back to IPv4. Use
+> `http://127.0.0.1:8765` from Python clients on Windows to skip that
+> entirely. curl and browsers do not hit this.
+
 ---
 
 ## Quickstart
@@ -275,6 +281,48 @@ Schedule and play a motif. Fire-and-forget. Preempts any in-flight motif.
 { "error": "motif event pitch out of range: 200" }
 { "error": "bad motif event {...}: ..." }
 ```
+
+### `GET /api/motif`
+
+Snapshot of the currently running motif. Useful for polling — the
+`POST /api/motif` call is fire-and-forget, so this is how callers
+learn when a motif is about to finish without having to track
+`duration_ms` themselves.
+
+**Response (200), playing:**
+```json
+{
+  "playing": true,
+  "id": "a1b2c3d4",
+  "name": "ci-passed",
+  "duration_ms": 500,
+  "elapsed_ms": 213,
+  "remaining_ms": 287,
+  "master_current_ma": 1000,
+  "vel_floor": 0.5
+}
+```
+
+**Response (200), idle:**
+```json
+{
+  "playing": false,
+  "id": null,
+  "name": null,
+  "duration_ms": null,
+  "elapsed_ms": null,
+  "remaining_ms": null,
+  "master_current_ma": null,
+  "vel_floor": null
+}
+```
+
+`elapsed_ms` and `remaining_ms` are computed from the server's
+monotonic clock at the time of the request. They're clamped so that
+`elapsed_ms + remaining_ms == duration_ms` once the schedule is
+complete; the worker thread may keep `playing: true` for a brief
+moment after `remaining_ms` reaches 0 while it tears down. Treat
+`playing: false` as the authoritative "done" signal.
 
 ### `POST /api/cancel`
 

@@ -18,6 +18,9 @@ GET  /api/strike-timing?addr=N -> fresh compact poll for one slot
 GET  /api/mapping             -> {"mapping": [int|null, ...] | null}; persisted slot->pitch map
 GET  /api/pitches             -> {"pitches": [{"pitch","name","slot","homed"}, ...]};
                                  currently mapped pitches, sorted ascending
+GET  /api/motif               -> {"playing", "id", "name", "duration_ms", "elapsed_ms",
+                                  "remaining_ms", "master_current_ma", "vel_floor"};
+                                 snapshot of the running motif. All fields null when idle.
 GET  /api/library             -> {"configured": bool, "files": [{"name", "size"}, ...]}
 GET  /api/library/<name>      -> raw .mid bytes from the configured --library-dir
 POST /api/library/<name>      -> writes raw .mid bytes to --library-dir; 409 on
@@ -516,8 +519,10 @@ class MotifPlayer:
         self._control_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
-        self._current_id: str | None = None
-        self._current_name: str | None = None
+        # Snapshot of the motif this worker is playing. None when idle.
+        # Kept in sync with _thread under _control_lock so status() always
+        # sees a consistent pair.
+        self._current_motif: dict | None = None
 
     @staticmethod
     def _velocity_to_current(velocity: int, master_ma: int, vel_floor: float) -> int:
@@ -532,12 +537,46 @@ class MotifPlayer:
         return self._velocity_to_current(velocity, self.master_current_ma, self.vel_floor)
 
     def status(self) -> dict:
+        """Snapshot of what the worker is currently playing.
+
+        `elapsed_ms` and `remaining_ms` are computed against the monotonic
+        clock at status() time, so callers can poll this endpoint to know
+        when a fire-and-forget motif is about to finish without needing
+        to track duration_ms themselves."""
         with self._control_lock:
-            running = self._thread is not None and self._thread.is_alive()
+            thread = self._thread
+            motif = self._current_motif
+            running = (
+                thread is not None
+                and thread.is_alive()
+                and motif is not None
+            )
+            if not running:
+                return {
+                    "playing": False,
+                    "id": None,
+                    "name": None,
+                    "duration_ms": None,
+                    "elapsed_ms": None,
+                    "remaining_ms": None,
+                    "master_current_ma": None,
+                    "vel_floor": None,
+                }
+            duration_ms = motif["duration_ms"]
+            elapsed_ms = int((time.monotonic() - motif["started_monotonic"]) * 1000)
+            # Clamp elapsed at duration so the pair is always self-consistent
+            # (elapsed + remaining == duration) once we're past the last event.
+            elapsed_ms = max(0, min(duration_ms, elapsed_ms))
+            remaining_ms = duration_ms - elapsed_ms
             return {
-                "playing": running,
-                "id": self._current_id if running else None,
-                "name": self._current_name if running else None,
+                "playing": True,
+                "id": motif["id"],
+                "name": motif["name"],
+                "duration_ms": duration_ms,
+                "elapsed_ms": elapsed_ms,
+                "remaining_ms": remaining_ms,
+                "master_current_ma": motif["master_current_ma"],
+                "vel_floor": motif["vel_floor"],
             }
 
     def play(self, events: list[dict], name: str | None = None,
@@ -597,8 +636,14 @@ class MotifPlayer:
             self._stop_and_join()
             with self._control_lock:
                 self._stop_event = threading.Event()
-                self._current_id = motif_id
-                self._current_name = name
+                self._current_motif = {
+                    "id": motif_id,
+                    "name": name,
+                    "duration_ms": duration_ms,
+                    "master_current_ma": master,
+                    "vel_floor": floor,
+                    "started_monotonic": time.monotonic(),
+                }
                 self._thread = threading.Thread(
                     target=self._run,
                     args=(resolved, self._stop_event, motif_id),
@@ -634,8 +679,7 @@ class MotifPlayer:
             # in here and installed its own thread).
             if self._thread is thread:
                 self._thread = None
-                self._current_id = None
-                self._current_name = None
+                self._current_motif = None
 
     def _run(self, events: list[dict], stop: threading.Event, motif_id: str) -> None:
         t0 = time.monotonic()
@@ -745,6 +789,14 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/pitches":
             try:
                 self._json(200, {"pitches": self.bridge.pitches()})
+            except Exception as exc:
+                traceback.print_exc()
+                self._json(500, {"error": str(exc)})
+            return
+
+        if self.path == "/api/motif":
+            try:
+                self._json(200, self.bridge.motif_player.status())
             except Exception as exc:
                 traceback.print_exc()
                 self._json(500, {"error": str(exc)})

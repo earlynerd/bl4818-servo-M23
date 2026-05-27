@@ -384,6 +384,20 @@
         <span style="font-size:10px;color:var(--text-dim);text-transform:uppercase;letter-spacing:1.2px">Compensation</span>
         <span id="cfgCompApplied" style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--accent)">— ms</span>
       </div>
+      <div style="display:flex;align-items:baseline;justify-content:space-between" title="Residual = measured trigger_to_impact_ms − the EMA prediction at strike time. Positive = impact landed late (under-compensated). 'last' is the most recent sample; 'mean' is the bias; 'rms' captures the per-strike spread.">
+        <span style="font-size:10px;color:var(--text-dim);text-transform:uppercase;letter-spacing:1.2px">Residual</span>
+        <span id="cfgResidual" style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--accent)">no data yet</span>
+      </div>
+      <div style="border-top:1px dashed var(--border);padding-top:6px;margin-top:2px;display:flex;flex-direction:column;gap:3px" title="Session-wide pipeline breakdown. Sum of all rows ≈ total beat error from 'intended fire time' to 'physical impact'. Scheduler jitter is signed (positive = late). The rest are unsigned durations.">
+        <div style="font-size:10px;color:var(--text-dim);text-transform:uppercase;letter-spacing:1.2px">Pipeline (session)</div>
+        <div style="display:grid;grid-template-columns:auto 1fr;column-gap:8px;row-gap:2px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-muted)">
+          <span>sched&nbsp;jitter</span><span id="cfgPipeSched">—</span>
+          <span>network</span><span id="cfgPipeNet">—</span>
+          <span>server&nbsp;total</span><span id="cfgPipeServer">—</span>
+          <span>&nbsp;&nbsp;lock&nbsp;wait</span><span id="cfgPipeLock">—</span>
+          <span>&nbsp;&nbsp;serial&nbsp;RTT</span><span id="cfgPipeSerial">—</span>
+        </div>
+      </div>
     </div>
 
     <div class="modal-footer">
@@ -478,6 +492,29 @@ const S = {
   // build up. Same bucket index as compEma[slot].
   compEmaGlobal: {},
   lastStrikeCurrent: {},
+  // Predicted compensation (ms) snapshot per slot at the moment its most-recent
+  // strike was sent. The ACK that follows carries trigger_to_impact_ms for that
+  // strike, so residual_ms = actual_impact - predicted = trigger - predicted.
+  // A nonzero residual mean indicates EMA bias; a wide residual spread is the
+  // run-to-run jitter our compensation can't predict.
+  lastStrikePredictedMs: {},
+  // Per-slot residual stats. value[slot] = { last, sum, sumSq, n, maxAbs }.
+  residualStats: {},
+  // Session-wide pipeline timing breakdown — decomposes the total beat error
+  // into the components between "intended fire time" and "physical impact":
+  //   schedJitter — setTimeout fired N ms vs when we wanted it to (signed)
+  //   network    — browser↔server transit, round-trip minus server handler time
+  //   serverTotal — full time inside the bridge handler
+  //   lockWait   — time waiting for the ring-lock inside the handler
+  //   serialRtt  — UART tx + firmware processing + UART rx (the lock-held part)
+  // Plus the residual (per-slot) and trigger_to_impact_ms = the whole chain.
+  pipelineStats: {
+    schedJitter: { last: 0, sum: 0, sumSq: 0, n: 0, maxAbs: 0 },
+    network:     { last: 0, sum: 0, sumSq: 0, n: 0, maxAbs: 0 },
+    serverTotal: { last: 0, sum: 0, sumSq: 0, n: 0, maxAbs: 0 },
+    lockWait:    { last: 0, sum: 0, sumSq: 0, n: 0, maxAbs: 0 },
+    serialRtt:   { last: 0, sum: 0, sumSq: 0, n: 0, maxAbs: 0 },
+  },
   scale: 1,
 };
 
@@ -592,7 +629,13 @@ function strikeAsync(addr, currentMa, label) {
   // the next ACK. Out-of-order ACKs aren't an issue because the bridge
   // serializes the ring lock per request.
   const priorCurrent = S.lastStrikeCurrent[addr];
+  const priorPredictedMs = S.lastStrikePredictedMs[addr];
   S.lastStrikeCurrent[addr] = currentMa;
+  // Snapshot what our EMA predicts impact latency to be for THIS strike. When
+  // the next ACK on this slot lands, it'll carry the measured impact for this
+  // strike, and we'll diff against this prediction to get the residual.
+  S.lastStrikePredictedMs[addr] = compensationMs(addr, currentMa);
+  const tFire = performance.now();
   fetch(API_BASE + "/api/strike", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -603,14 +646,55 @@ function strikeAsync(addr, currentMa, label) {
     if (!j.accepted && j.result_name && j.result_name !== "OK") {
       log(`strike addr=${addr} -> ${j.result_name}`);
     }
+    // Pipeline timing breakdown. roundTrip is the only side-by-side anchor
+    // between performance.now() and the server's time.monotonic(); subtracting
+    // the handler-reported server time yields the network-in-flight portion
+    // (both directions combined). We don't try to split that 50/50 — for
+    // localhost it's sub-ms anyway.
+    const roundTrip = performance.now() - tFire;
+    const st = j.server_timing_us;
+    if (st && Number.isFinite(st.handler_total)) {
+      const serverMs = st.handler_total / 1000;
+      foldStat(S.pipelineStats.serverTotal, serverMs);
+      foldStat(S.pipelineStats.network, Math.max(0, roundTrip - serverMs));
+      if (Number.isFinite(st.lock_wait))  foldStat(S.pipelineStats.lockWait,  st.lock_wait  / 1000);
+      if (Number.isFinite(st.serial_rtt)) foldStat(S.pipelineStats.serialRtt, st.serial_rtt / 1000);
+    }
     if (j.metrics) {
       S.strikeTiming[addr] = j.metrics;
       if (Number.isFinite(priorCurrent)) {
         updateLatencyEma(addr, priorCurrent, j.metrics);
       }
+      const sample = j.metrics.trigger_to_impact_ms;
+      if (Number.isFinite(sample) && Number.isFinite(priorPredictedMs)) {
+        recordResidual(addr, sample - priorPredictedMs);
+      }
       if (S.cfgSlot === addr) refreshCfgTiming();
     }
   }).catch(e => log(`strike addr=${addr} ${label||""} failed: ${e.message}`));
+}
+
+// Fold a sample into a stats bag (last/sum/sumSq/n/maxAbs). Bag is mutated
+// in place so caller can keep its reference. Sign is preserved in last/sum,
+// magnitude in maxAbs — works for both signed (residual, jitter) and unsigned
+// (timings) values.
+function foldStat(bag, value) {
+  if (!Number.isFinite(value)) return;
+  bag.last = value;
+  bag.sum += value;
+  bag.sumSq += value * value;
+  bag.n += 1;
+  const a = Math.abs(value);
+  if (a > bag.maxAbs) bag.maxAbs = a;
+}
+
+// Fold a fresh prediction-residual sample into the per-slot stats. `residual`
+// is signed ms: positive means impact landed late (we under-compensated),
+// negative means it landed early (we over-compensated).
+function recordResidual(slot, residual) {
+  let s = S.residualStats[slot];
+  if (!s) s = S.residualStats[slot] = { last: 0, sum: 0, sumSq: 0, n: 0, maxAbs: 0 };
+  foldStat(s, residual);
 }
 
 async function refreshStatus() {
@@ -968,6 +1052,39 @@ function refreshCfgTiming() {
       compEl.textContent = `${applied.toFixed(1)} ms @ ${masterMa} mA · ${source} (${populated}/${COMP_BUCKET_COUNT} buckets)`;
     }
   }
+  const residualEl = document.getElementById("cfgResidual");
+  if (residualEl) {
+    const rs = S.residualStats[slot];
+    if (!rs || rs.n === 0) {
+      residualEl.textContent = "no data yet";
+    } else {
+      const mean = rs.sum / rs.n;
+      const rms = Math.sqrt(Math.max(0, rs.sumSq / rs.n));
+      residualEl.textContent =
+        `last ${rs.last >= 0 ? "+" : ""}${rs.last.toFixed(2)} ms · ` +
+        `mean ${mean >= 0 ? "+" : ""}${mean.toFixed(2)} · ` +
+        `rms ${rms.toFixed(2)} · max ±${rs.maxAbs.toFixed(2)} (n=${rs.n})`;
+    }
+  }
+  // Pipeline section. Scheduler jitter is signed (can show a bias from
+  // setTimeout always firing slightly late); other rows are unsigned
+  // durations where "max" already equals "max abs".
+  const fmtSigned = (bag) => {
+    if (!bag || bag.n === 0) return "—";
+    const m = bag.sum / bag.n;
+    return `mean ${m >= 0 ? "+" : ""}${m.toFixed(2)} ms · max ±${bag.maxAbs.toFixed(2)} (n=${bag.n})`;
+  };
+  const fmtUnsigned = (bag) => {
+    if (!bag || bag.n === 0) return "—";
+    const m = bag.sum / bag.n;
+    return `mean ${m.toFixed(2)} ms · max ${bag.maxAbs.toFixed(2)} (n=${bag.n})`;
+  };
+  const ps = S.pipelineStats;
+  document.getElementById("cfgPipeSched").textContent  = fmtSigned(ps.schedJitter);
+  document.getElementById("cfgPipeNet").textContent    = fmtUnsigned(ps.network);
+  document.getElementById("cfgPipeServer").textContent = fmtUnsigned(ps.serverTotal);
+  document.getElementById("cfgPipeLock").textContent   = fmtUnsigned(ps.lockWait);
+  document.getElementById("cfgPipeSerial").textContent = fmtUnsigned(ps.serialRtt);
   if (!t) {
     seqEl.textContent = "no data yet";
     document.getElementById("cfgTimingCoast").textContent = "—";
@@ -1565,9 +1682,20 @@ function play() {
     const comp = compensationMs(slot, projectedCurrent);
     compTotalMs += comp;
     const rawDelay = e.timeMs / scale - comp;
-    if (rawDelay < 0) lateClamped++;
+    const clamped = rawDelay < 0;
+    if (clamped) lateClamped++;
     const delay = Math.max(0, rawDelay);
+    // Wall-clock time we *wanted* setTimeout to fire at. Subtracting the
+    // actual performance.now() inside the callback gives signed scheduler
+    // jitter: positive = setTimeout was late (the usual case under any tab
+    // load), negative would mean it fired early (impossible — setTimeout is
+    // a minimum delay). Skip clamped events because their "intended" time is
+    // in the past and the strike couldn't have hit it regardless of jitter.
+    const intendedFireMs = S.startWall + rawDelay;
     S.timeouts.push(setTimeout(() => {
+      if (!clamped) {
+        foldStat(S.pipelineStats.schedJitter, performance.now() - intendedFireMs);
+      }
       strikeAsync(slot, effectiveCurrentForSlot(slot, vel));
     }, delay));
   }

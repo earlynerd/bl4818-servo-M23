@@ -248,13 +248,23 @@ class Bridge:
         # ACK_TIMED costs 12 extra payload bytes (~480 us at 250 kbaud) and
         # replaces the otherwise-needed query_strike round trip. Net: less
         # ring traffic per strike, plus the host gets timing for free.
+        # Stamps below let the browser decompose total beat error into
+        # scheduler jitter / network / lock / serial-RTT / impact.
+        t_recv = time.monotonic()
         prev_current = self.latency.record_sent(address, current_ma)
         with self.lock:
+            t_lock = time.monotonic()
             reply = self.client.strike(
                 address, current_ma, reply_mode=REPLY_MODE_ACK_TIMED
             )
+            t_post_ack = time.monotonic()
         result = self._ack_to_dict(address, reply, cache_metrics=True)
         self._fold_metrics_into_ema(address, prev_current, result.get("metrics"))
+        result["server_timing_us"] = {
+            "lock_wait": int((t_lock - t_recv) * 1_000_000),
+            "serial_rtt": int((t_post_ack - t_lock) * 1_000_000),
+            "handler_total": int((time.monotonic() - t_recv) * 1_000_000),
+        }
         return result
 
     def strikes(self, items: list[dict]) -> list[dict]:

@@ -31,7 +31,7 @@ Common flags:
 | `--http-port`         | 8765          | HTTP bind port                                                         |
 | `--timeout-ms`        | 1000          | Per-frame RX timeout                                                   |
 | `--library-dir`       | (none)        | Folder of `.mid`/`.midi` files exposed at `/api/library`               |
-| `--motif-current-ma`  | 800           | Default master current at velocity 127 for `/api/motif`. 0-3000 mA     |
+| `--motif-current-ma`  | 800           | Default master current for pitch-style /api/play requests at velocity 127. 0-3000 mA     |
 | `--motif-vel-floor`   | 0.5           | Default velocity scale floor. See "Velocity curve" below               |
 
 Base URL throughout this document is `http://<host>:<http-port>`.
@@ -55,7 +55,7 @@ Three calls to play a chime:
 curl http://localhost:8765/api/pitches
 
 # 2. Build a motif (chord on the first three pitches, t_ms is absolute).
-curl -X POST http://localhost:8765/api/motif \
+curl -X POST http://localhost:8765/api/play \
   -H 'Content-Type: application/json' \
   -d '{
     "name": "ci-passed",
@@ -116,7 +116,7 @@ current_ma = master_current_ma * scale          # clamped to [0, 3000]
   makes soft notes barely strike.
 
 Server-wide defaults come from `--motif-current-ma` and
-`--motif-vel-floor`. Any individual `POST /api/motif` can override
+`--motif-vel-floor`. Any individual `POST /api/play` can override
 them with `master_current_ma` and `vel_floor` fields, applied only to
 that motif. Out-of-range values are clamped; the response echoes back
 the values actually used.
@@ -217,7 +217,7 @@ usually want `/api/pitches` instead.
 
 If no mapping has been saved, `"mapping": null`.
 
-### `POST /api/motif`
+### `POST /api/play`
 
 Schedule and play a motif. Fire-and-forget. Preempts any in-flight motif.
 
@@ -241,7 +241,7 @@ Schedule and play a motif. Fire-and-forget. Preempts any in-flight motif.
 | `events[].t_ms`     | int >= 0  | yes      | Absolute time from motif start. Multiple events at the same `t_ms` form a chord    |
 | `events[].pitch`    | int 0-127 | yes      | MIDI pitch. Unmapped pitches are skipped (reported in response)                    |
 | `events[].velocity` | int 0-127 | no       | Default 100. Maps to current_ma via the velocity curve                             |
-| `name`              | string    | no       | Free-form label. Echoed in the response and in `MotifPlayer.status()`              |
+| `name`              | string    | no       | Free-form label. Echoed in the response and in `Player.status()`              |
 | `master_current_ma` | number    | no       | Per-motif master current. Defaults to `--motif-current-ma`. Clamped to [0, 3000]   |
 | `vel_floor`         | number    | no       | Per-motif velocity floor. Defaults to `--motif-vel-floor`. Clamped to [0.0, 1.0]   |
 
@@ -282,22 +282,31 @@ Schedule and play a motif. Fire-and-forget. Preempts any in-flight motif.
 { "error": "bad motif event {...}: ..." }
 ```
 
-### `GET /api/motif`
+### `GET /api/play`
 
-Snapshot of the currently running motif. Useful for polling — the
-`POST /api/motif` call is fire-and-forget, so this is how callers
-learn when a motif is about to finish without having to track
-`duration_ms` themselves.
+Snapshot of the currently running playback. Useful for polling — the
+`POST /api/play` call is fire-and-forget, so this is how callers learn
+when playback is about to finish without having to track `duration_ms`
+themselves.
 
-**Response (200), playing:**
+The shape is the same whether playback was started via the pitch-style
+or canonical-form `POST /api/play`. Anything stashed in metadata at
+play-time (`name`, `master_current_ma`, `vel_floor` from pitch-style;
+`schedule_master_ma` from canonical) is spread into the response.
+
+**Response (200), playing pitch-style:**
 ```json
 {
   "playing": true,
   "id": "a1b2c3d4",
-  "name": "ci-passed",
+  "scheduled": 3,
+  "cursor": 1,
   "duration_ms": 500,
   "elapsed_ms": 213,
   "remaining_ms": 287,
+  "master_scale": 1.0,
+  "muted": [],
+  "name": "ci-passed",
   "master_current_ma": 1000,
   "vel_floor": 0.5
 }
@@ -309,24 +318,98 @@ learn when a motif is about to finish without having to track
   "playing": false,
   "id": null,
   "name": null,
+  "scheduled": 0,
+  "cursor": 0,
   "duration_ms": null,
   "elapsed_ms": null,
   "remaining_ms": null,
+  "master_scale": 1.0,
+  "muted": [],
   "master_current_ma": null,
   "vel_floor": null
 }
 ```
 
-`elapsed_ms` and `remaining_ms` are computed from the server's
-monotonic clock at the time of the request. They're clamped so that
-`elapsed_ms + remaining_ms == duration_ms` once the schedule is
-complete; the worker thread may keep `playing: true` for a brief
-moment after `remaining_ms` reaches 0 while it tears down. Treat
-`playing: false` as the authoritative "done" signal.
+- `cursor` is the index of the next event the worker will dispatch.
+  `cursor == scheduled` once playback finishes.
+- `master_scale` and `muted` reflect any live tweaks from
+  `/api/play/update`. They reset on each `/api/play`.
+- `elapsed_ms` and `remaining_ms` are computed from the server's
+  monotonic clock at the time of the request. They're clamped so that
+  `elapsed_ms + remaining_ms == duration_ms` once the schedule is
+  complete; the worker thread may keep `playing: true` for a brief
+  moment after `remaining_ms` reaches 0 while it tears down. Treat
+  `playing: false` as the authoritative "done" signal.
+
+### `POST /api/play` (canonical form)
+
+The browser player uses a second event shape that bypasses pitch resolution
+and the velocity curve — the events are already tied to ring addresses and
+specific currents:
+
+```json
+{
+  "master_ma": 800,
+  "events": [
+    {"t_ms": 0,    "address": 0, "nominal_current_ma": 600},
+    {"t_ms": 250,  "address": 2, "nominal_current_ma": 750}
+  ]
+}
+```
+
+`master_ma` is informational — it's the master the caller used when
+computing each `nominal_current_ma`. `POST /api/play/update` uses it as
+the denominator when computing the live scale ratio. The server detects
+this form vs the pitch-style form by looking at the first event's keys.
+
+### `POST /api/play/stop`
+
+Stop the in-flight playback worker. Does NOT disable motors (use
+`/api/stop` for that, or `/api/cancel` for a full panic stop).
+
+**Request body:** none.
+
+**Response (200):** `{"ok": true}`
+
+### `POST /api/play/update`
+
+Apply live tweaks to in-flight playback. Both fields are optional and
+independent. Takes effect on the next strike.
+
+**Request body:**
+```json
+{
+  "master_scale": 1.25,
+  "muted": [3, 7]
+}
+```
+
+Or send a new master in mA along with the schedule's original master and
+let the server divide:
+
+```json
+{
+  "master_ma": 1000,
+  "schedule_master_ma": 800,
+  "muted": []
+}
+```
+
+| Field                 | Type        | Notes                                                                          |
+|-----------------------|-------------|--------------------------------------------------------------------------------|
+| `master_scale`        | number      | Direct multiplier on every event's nominal current. Wins if both forms set     |
+| `master_ma`           | number      | New master mA. Combined with `schedule_master_ma` → ratio                      |
+| `schedule_master_ma`  | number      | Original master used when computing the schedule's nominal currents            |
+| `muted`               | int[]       | Addresses to skip until the next update. `[]` clears the mute set              |
+
+**Response (200):** echoes the new state. Example:
+```json
+{"ok": true, "master_scale": 1.25, "muted": [3, 7]}
+```
 
 ### `POST /api/cancel`
 
-Stop the running motif (if any) and cancel all in-flight strikes
+Stop the running playback (if any) and cancel all in-flight strikes
 across the ring. Panic stop.
 
 **Request body:** none.
@@ -536,7 +619,7 @@ Upload a `.mid` file to the library dir.
 All endpoints return JSON errors of the form `{"error": "..."}` for
 expected failures (400 / 404 / 409 / 413) and `{"error": "<exception>"}`
 for unexpected failures (500). The motif endpoint can also return 400
-with specific validation messages — see the table under `POST /api/motif`.
+with specific validation messages — see the table under `POST /api/play`.
 
 The server does not currently distinguish between "ring disconnected"
 and "device returned an error" in the HTTP response. Inspect

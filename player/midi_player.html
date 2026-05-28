@@ -500,6 +500,10 @@ const S = {
   lastStrikePredictedMs: {},
   // Per-slot residual stats. value[slot] = { last, sum, sumSq, n, maxAbs }.
   residualStats: {},
+  // The master mA we sent with /api/play, kept so /api/play/update can
+  // request a scale ratio = newMaster / scheduleMasterMa. Zero outside of
+  // active playback. Reset each play().
+  scheduleMasterMa: 0,
   // Session-wide pipeline timing breakdown — decomposes the total beat error
   // into the components between "intended fire time" and "physical impact":
   //   schedJitter — setTimeout fired N ms vs when we wanted it to (signed)
@@ -1639,10 +1643,16 @@ async function runArpeggio() {
 }
 
 function stopPlayback() {
+  // Tell the server to stop dispatching. Fire-and-forget — UI shouldn't
+  // wait on the network. If the request never arrives (link gone), the
+  // server worker still exits naturally at end-of-schedule.
+  fetch(API_BASE + "/api/play/stop", { method: "POST", keepalive: true })
+    .catch(() => {});
   S.timeouts.forEach(id => clearTimeout(id));
   S.timeouts = [];
   if (S.animFrame) cancelAnimationFrame(S.animFrame);
   S.playing = false;
+  S.scheduleMasterMa = 0;
   document.getElementById("playBtn").textContent = "▶ Play";
   document.getElementById("playBtn").classList.remove("playing");
   document.getElementById("stopBtn").style.display = "none";
@@ -1650,7 +1660,7 @@ function stopPlayback() {
   const cur = document.getElementById("cursor"); if (cur) cur.style.opacity = "0";
 }
 
-function play() {
+async function play() {
   if (!S.composition) return;
   if (S.playing) { stopPlayback(); return; }
   hideMessages();
@@ -1658,48 +1668,61 @@ function play() {
   const c = S.composition;
   const cur = getCurrentMa();
   const scale = getTempoScale();
-  const wallTotal = c.maxMs / scale;
-  let scheduled = 0, dropped = 0, merged = 0;
   const sched = c.scheduled || buildSchedule(c.events);
 
-  S.startWall = performance.now();
-  S.scale = scale;
-  let lateClamped = 0;
-  let compTotalMs = 0;
+  // Build canonical events for the server. Trim and velFloor are baked in
+  // here via effectiveCurrentForSlot — they're frozen for this playback.
+  // (Master mA stays live; see the slider handler.) Server-side compensation
+  // is applied at fire time using the bridge's fresh EMA, so we don't
+  // subtract comp from t_ms here.
+  const events = [];
+  let scheduled = 0, dropped = 0, merged = 0;
   for (const e of sched) {
     if (e.slot < 0) { dropped++; continue; }
     if (e.suppressed) { merged++; continue; }
     scheduled++;
-    const slot = e.slot, vel = e.vel;
-    // Latency compensation is in real wall-clock ms, so subtract AFTER the
-    // tempo scale division. Project the strike current at schedule time to
-    // pick the right bucket; the actual strike still reads live current so
-    // the master slider, per-slot trim, and velocity floor remain tunable
-    // during play. If the user moves the master slider mid-play, queued
-    // events keep their original compensation but the new current is honored
-    // at strike time — small mismatch, acceptable.
-    const projectedCurrent = effectiveCurrentForSlot(slot, vel);
-    const comp = compensationMs(slot, projectedCurrent);
-    compTotalMs += comp;
-    const rawDelay = e.timeMs / scale - comp;
-    const clamped = rawDelay < 0;
-    if (clamped) lateClamped++;
-    const delay = Math.max(0, rawDelay);
-    // Wall-clock time we *wanted* setTimeout to fire at. Subtracting the
-    // actual performance.now() inside the callback gives signed scheduler
-    // jitter: positive = setTimeout was late (the usual case under any tab
-    // load), negative would mean it fired early (impossible — setTimeout is
-    // a minimum delay). Skip clamped events because their "intended" time is
-    // in the past and the strike couldn't have hit it regardless of jitter.
-    const intendedFireMs = S.startWall + rawDelay;
-    S.timeouts.push(setTimeout(() => {
-      if (!clamped) {
-        foldStat(S.pipelineStats.schedJitter, performance.now() - intendedFireMs);
-      }
-      strikeAsync(slot, effectiveCurrentForSlot(slot, vel));
-    }, delay));
+    events.push({
+      t_ms: Math.round(e.timeMs / scale),
+      address: e.slot,
+      nominal_current_ma: effectiveCurrentForSlot(e.slot, e.vel),
+    });
   }
-  S.timeouts.push(setTimeout(stopPlayback, wallTotal + 500));
+
+  if (!events.length) {
+    showError("No mappable notes to play");
+    return;
+  }
+
+  // Capture wall start for cursor animation BEFORE the network call. The
+  // few ms of fetch latency before the server starts its dispatch loop is
+  // accepted error in our local clock; we don't try to compensate. The
+  // server's monotonic clock is the authority for actual strike timing.
+  S.startWall = performance.now();
+  S.scale = scale;
+  S.scheduleMasterMa = cur;
+
+  try {
+    const r = await fetch(API_BASE + "/api/play", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ master_ma: cur, events }),
+    });
+    if (!r.ok) {
+      let detail = `HTTP ${r.status}`;
+      try { const j = await r.json(); detail = j.error || detail; } catch {}
+      showError(`Play failed: ${detail}`);
+      S.scheduleMasterMa = 0;
+      return;
+    }
+    const result = await r.json();
+    log(`play: ${result.scheduled} events, ${result.duration_ms} ms, id=${result.id} ` +
+        `(merged=${merged}, dropped=${dropped}, target=${cur} mA, ` +
+        `vfloor=${Math.round(S.velFloor*100)}%, ${scale.toFixed(2)}x)`);
+  } catch (e) {
+    showError("Play failed: " + e.message);
+    S.scheduleMasterMa = 0;
+    return;
+  }
 
   S.playing = true;
   document.getElementById("playBtn").textContent = "■ Stop";
@@ -1707,11 +1730,10 @@ function play() {
   document.getElementById("progressContainer").style.display = "block";
   const curEl = document.getElementById("cursor"); if (curEl) curEl.style.opacity = "0.8";
 
-  const compAvg = scheduled ? (compTotalMs / scheduled) : 0;
-  const compPart = S.compEnabled
-    ? `, comp=${compAvg.toFixed(1)} ms avg${lateClamped ? ` (${lateClamped} clamped)` : ""}`
-    : ", comp=off";
-  log(`play: ${scheduled} scheduled, ${merged} merged, ${dropped} unmapped (target=${cur} mA, vfloor=${Math.round(S.velFloor*100)}%, ${scale.toFixed(2)}x${compPart})`);
+  // Final teardown — the server worker has already exited by the time the
+  // last note's wall position elapses. This just resets the UI.
+  const wallTotal = c.maxMs / scale;
+  S.timeouts.push(setTimeout(stopPlayback, wallTotal + 500));
 
   (function animate() {
     const elapsed = performance.now() - S.startWall;
@@ -1898,6 +1920,22 @@ document.addEventListener("DOMContentLoaded", async () => {
   cs.addEventListener("input", () => {
     cd.textContent = `${cs.value} mA`;
     if (S.cfgSlot >= 0) refreshCfgTiming();
+    // Live-scale upcoming strikes during playback. Fire-and-forget — drops
+    // are tolerable (the next slider tick supersedes them anyway). The
+    // ratio newMaster/scheduleMaster is what the server multiplies into
+    // each event's nominal current at fire time.
+    if (S.playing && S.scheduleMasterMa > 0) {
+      const newMaster = parseInt(cs.value, 10);
+      fetch(API_BASE + "/api/play/update", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          master_ma: newMaster,
+          schedule_master_ma: S.scheduleMasterMa,
+        }),
+        keepalive: true,
+      }).catch(() => {});
+    }
   });
 
   // Velocity floor

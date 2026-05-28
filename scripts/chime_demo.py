@@ -138,10 +138,10 @@ class ChimeClient:
             body["master_current_ma"] = master_current_ma
         if vel_floor is not None:
             body["vel_floor"] = vel_floor
-        return self._request("POST", "/api/motif", body)
+        return self._request("POST", "/api/play", body)
 
     def motif_status(self) -> dict:
-        return self._request("GET", "/api/motif")
+        return self._request("GET", "/api/play")
 
     def cancel(self) -> dict:
         return self._request("POST", "/api/cancel")
@@ -149,7 +149,7 @@ class ChimeClient:
     # ---- convenience -------------------------------------------------------
 
     def wait_for_motif(self, *, poll_interval: float = 0.1, timeout: float = 10.0) -> dict:
-        """Poll /api/motif until `playing: false` or the timeout elapses.
+        """Poll /api/play until `playing: false` or the timeout elapses.
 
         Returns the final status dict. Note: the worker thread keeps
         `playing: true` for a brief moment after `remaining_ms` reaches 0

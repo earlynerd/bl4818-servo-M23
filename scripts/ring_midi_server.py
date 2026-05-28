@@ -18,9 +18,12 @@ GET  /api/strike-timing?addr=N -> fresh compact poll for one slot
 GET  /api/mapping             -> {"mapping": [int|null, ...] | null}; persisted slot->pitch map
 GET  /api/pitches             -> {"pitches": [{"pitch","name","slot","homed"}, ...]};
                                  currently mapped pitches, sorted ascending
-GET  /api/motif               -> {"playing", "id", "name", "duration_ms", "elapsed_ms",
-                                  "remaining_ms", "master_current_ma", "vel_floor"};
-                                 snapshot of the running motif. All fields null when idle.
+GET  /api/play                -> {"playing", "id", "scheduled", "cursor", "duration_ms",
+                                  "elapsed_ms", "remaining_ms", "master_scale", "muted", ...};
+                                 snapshot of the running playback (whatever started it).
+                                 Anything stashed in metadata at play-time (name,
+                                 master_current_ma, vel_floor, schedule_master_ma) is
+                                 spread into the response.
 GET  /api/library             -> {"configured": bool, "files": [{"name", "size"}, ...]}
 GET  /api/library/<name>      -> raw .mid bytes from the configured --library-dir
 POST /api/library/<name>      -> writes raw .mid bytes to --library-dir; 409 on
@@ -30,18 +33,28 @@ POST /api/home                -> {"addresses": [int]?}; homes them, returns ok/e
 POST /api/strike              -> {"address": int, "current_ma": int}; ACK + last-strike timing
 POST /api/strikes             -> {"strikes": [{"address","current_ma"}, ...]}; batch
 POST /api/strike-param        -> {"address": int, "param": str, "value": int}; ACK
-POST /api/cancel              -> cancels all active strikes (panic stop, also stops motif)
+POST /api/cancel              -> cancels all active strikes (panic stop, also stops playback)
 POST /api/stop                -> {"addresses": [int]?}; motor_stop on each (disables PWM)
 POST /api/save-settings       -> {"addresses": [int]?}; persists strike params to NVM
 POST /api/mapping             -> {"mapping": [int|null, ...]}; persists slot->pitch map to disk
-POST /api/motif               -> {"name": str?, "events": [{"t_ms","pitch","velocity"}, ...],
-                                  "master_current_ma": int?, "vel_floor": float?};
-                                 fire-and-forget motif playback. Preempts any in-flight motif.
-                                 Pitches not present in /api/mapping are skipped and listed
-                                 in the response. Velocity (0-127) is mapped to current_ma
-                                 using the same curve as the browser player. master_current_ma
-                                 (0-3000) and vel_floor (0.0-1.0) override the server-wide
-                                 defaults for this motif only; out-of-range values are clamped.
+POST /api/play                -> Start scheduled playback. Accepts two event shapes:
+                                  (a) canonical (browser path):
+                                      {"events": [{"t_ms","address","nominal_current_ma"}, ...],
+                                       "master_ma": int?}
+                                  (b) pitch-style (chime/motif integrations):
+                                      {"events": [{"t_ms","pitch","velocity"}, ...],
+                                       "name": str?, "master_current_ma": int?,
+                                       "vel_floor": float?}
+                                 In (b) the server resolves pitch->address via the persisted
+                                 mapping and computes current = master * (floor + (1-floor)*v/127).
+                                 Pitches not in /api/mapping are returned in "skipped".
+                                 Preempts any in-flight playback.
+POST /api/play/stop           -> stop in-flight playback (does NOT disable motors).
+POST /api/play/update         -> {"master_scale": float?, "master_ma": int?,
+                                  "schedule_master_ma": int?, "muted": [int]?};
+                                 live tweaks. master_scale wins if set; otherwise
+                                 master_ma/schedule_master_ma form the ratio. Applied
+                                 to the next strike.
 
 Usage
 -----
@@ -206,9 +219,11 @@ class Bridge:
         # Fed by every strike that goes through this bridge (browser too), so
         # the player's arpeggio warm-up also warms the bridge's table.
         self.latency = LatencyTracker()
-        # Motif scheduler. Lazily attached after construction so it can hold a
-        # reference back to this Bridge for self.strike() / self.latency.
-        self.motif_player: "MotifPlayer | None" = None
+        # Playback scheduler — server-side dispatch for both chime motifs
+        # (HTTP integrations) and browser song playback. Lazily attached
+        # after construction so it can hold a reference back to this Bridge
+        # for self.strike() / self.latency.
+        self.player: "Player | None" = None
 
     def enumerate(self) -> int:
         with self.lock:
@@ -343,12 +358,12 @@ class Bridge:
             self.client.strike_home(addr)
 
     def cancel_all(self) -> None:
-        # Stop the motif worker first so it can't fire a new strike between
-        # our cancel calls. motif_player.cancel() blocks on the worker's join,
-        # which only takes one strike RTT to return (the worker checks the
-        # stop event between strikes and at every wait).
-        if self.motif_player is not None:
-            self.motif_player.cancel()
+        # Stop the playback worker first so it can't fire a new strike
+        # between our cancel calls. player.cancel() blocks on the worker's
+        # join, which only takes one strike RTT to return (the worker
+        # checks the stop event between strikes and at every wait).
+        if self.player is not None:
+            self.player.cancel()
         with self.lock:
             for addr in range(self.count):
                 try:
@@ -510,166 +525,215 @@ STRIKE_MA_MIN = 0
 STRIKE_MA_MAX = 3000
 
 
-class MotifPlayer:
-    """Plays short motifs scheduled by remote integrations (calendar, Slack,
-    etc). Owns a single worker thread — a new motif preempts whatever was
-    playing. Pitches are resolved via the bridge's persisted mapping, so
-    callers speak in MIDI semantics and don't need to know the physical
-    slot layout."""
+def velocity_to_current(velocity: int, master_ma: int, vel_floor: float) -> int:
+    """Same curve as the browser: master * (floor + (1-floor) * v/127),
+    clamped to the firmware-supported current range. Pure function so both
+    the /api/motif handler and any tests can reuse it without instantiating
+    a player."""
+    v = max(0, min(127, int(velocity)))
+    scale = vel_floor + (1 - vel_floor) * (v / 127.0)
+    ma = int(round(master_ma * scale))
+    return max(STRIKE_MA_MIN, min(STRIKE_MA_MAX, ma))
 
-    def __init__(self, bridge: Bridge, master_current_ma: int, vel_floor: float) -> None:
+
+def motif_events_to_canonical(
+    events: list[dict],
+    mapping: list,
+    master_ma: int,
+    vel_floor: float,
+) -> tuple[list[dict], list[dict]]:
+    """Translate motif-style events ({t_ms, pitch, velocity}) into the
+    canonical Player shape ({t_ms, address, nominal_current_ma}). Returns
+    (resolved, skipped). Pitches not in the mapping are reported in
+    `skipped` with a reason — the motif HTTP layer echoes them back so
+    callers can see what was dropped."""
+    pitch_to_addr: dict[int, int] = {}
+    for addr, pitch in enumerate(mapping or []):
+        if pitch is None:
+            continue
+        # Mapping can in principle assign the same pitch to multiple slots
+        # (chorus). Keep the first; everything else is fine to ignore for
+        # motif playback — integrations don't care which slot rings.
+        pitch_to_addr.setdefault(int(pitch), addr)
+
+    resolved: list[dict] = []
+    skipped: list[dict] = []
+    for ev in events:
+        try:
+            t_ms = int(ev["t_ms"])
+            pitch = int(ev["pitch"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"bad motif event {ev!r}: {exc}") from exc
+        if t_ms < 0:
+            raise ValueError(f"motif event t_ms must be >= 0, got {t_ms}")
+        if not 0 <= pitch <= 127:
+            raise ValueError(f"motif event pitch out of range: {pitch}")
+        velocity = int(ev.get("velocity", 100))
+        addr = pitch_to_addr.get(pitch)
+        if addr is None:
+            skipped.append({"t_ms": t_ms, "pitch": pitch, "reason": "unmapped"})
+            continue
+        resolved.append({
+            "t_ms": t_ms,
+            "address": addr,
+            "nominal_current_ma": velocity_to_current(velocity, master_ma, vel_floor),
+        })
+    return resolved, skipped
+
+
+class Player:
+    """Single playback engine: schedule of canonical events fired by one
+    worker thread off the bridge's monotonic clock. Both the motif HTTP API
+    (calendar/Slack-style notification chimes) and the browser song player
+    route through this — they differ only in how they shape their input
+    before calling play(), not in how dispatch works.
+
+    Each new play() preempts whatever was running. Live tweaks via update()
+    apply on the next strike: master_scale multiplies every event's nominal
+    current, muted is a set of addresses to skip. Metadata passed to play()
+    is opaque to the engine — it's stored and echoed in status(), so the
+    motif endpoint can carry name/master_current_ma/vel_floor for its
+    consumers without the engine knowing what those mean.
+    """
+
+    def __init__(self, bridge: Bridge) -> None:
         self.bridge = bridge
-        self.master_current_ma = max(STRIKE_MA_MIN, min(STRIKE_MA_MAX, int(master_current_ma)))
-        self.vel_floor = max(0.0, min(1.0, float(vel_floor)))
-        # _play_lock serializes whole play()/cancel() calls so two motif POSTs
+        # _play_lock serializes whole play()/cancel() calls so two POSTs
         # arriving at the same time can't leave two worker threads running.
-        # _control_lock guards just the small mutable state (thread handle,
-        # stop event, id) and is held only briefly.
+        # _control_lock guards just the small mutable state read by the
+        # worker and by update()/status() and is held only briefly.
         self._play_lock = threading.Lock()
         self._control_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
-        # Snapshot of the motif this worker is playing. None when idle.
-        # Kept in sync with _thread under _control_lock so status() always
-        # sees a consistent pair.
-        self._current_motif: dict | None = None
-
-    @staticmethod
-    def _velocity_to_current(velocity: int, master_ma: int, vel_floor: float) -> int:
-        """Same curve as the browser: master * (floor + (1-floor) * v/127),
-        clamped to the firmware-supported current range."""
-        v = max(0, min(127, int(velocity)))
-        scale = vel_floor + (1 - vel_floor) * (v / 127.0)
-        ma = int(round(master_ma * scale))
-        return max(STRIKE_MA_MIN, min(STRIKE_MA_MAX, ma))
-
-    def velocity_to_current(self, velocity: int) -> int:
-        return self._velocity_to_current(velocity, self.master_current_ma, self.vel_floor)
+        # Mutable per-play state. Reset on each play().
+        self._master_scale = 1.0
+        self._muted: set[int] = set()
+        self._started_monotonic = 0.0
+        self._cursor = 0
+        self._total = 0
+        self._duration_ms = 0
+        self._id: str | None = None
+        self._metadata: dict = {}
 
     def status(self) -> dict:
-        """Snapshot of what the worker is currently playing.
-
-        `elapsed_ms` and `remaining_ms` are computed against the monotonic
-        clock at status() time, so callers can poll this endpoint to know
-        when a fire-and-forget motif is about to finish without needing
-        to track duration_ms themselves."""
+        """Snapshot of what the worker is currently playing. `elapsed_ms` and
+        `remaining_ms` are computed against the monotonic clock at status()
+        time, so motif/chime callers can poll until `playing` is false
+        without tracking duration themselves. Anything the caller stored in
+        metadata at play() time (e.g. name, master_current_ma, vel_floor)
+        gets spread into the response."""
         with self._control_lock:
             thread = self._thread
-            motif = self._current_motif
-            running = (
-                thread is not None
-                and thread.is_alive()
-                and motif is not None
-            )
+            running = thread is not None and thread.is_alive()
             if not running:
+                # Keep the documented motif keys (name/master_current_ma/
+                # vel_floor) present-but-null so chime_demo and friends see
+                # the same shape as the old MotifPlayer when idle.
                 return {
                     "playing": False,
                     "id": None,
                     "name": None,
+                    "scheduled": 0,
+                    "cursor": 0,
                     "duration_ms": None,
                     "elapsed_ms": None,
                     "remaining_ms": None,
+                    "master_scale": self._master_scale,
+                    "muted": sorted(self._muted),
                     "master_current_ma": None,
                     "vel_floor": None,
                 }
-            duration_ms = motif["duration_ms"]
-            elapsed_ms = int((time.monotonic() - motif["started_monotonic"]) * 1000)
-            # Clamp elapsed at duration so the pair is always self-consistent
-            # (elapsed + remaining == duration) once we're past the last event.
-            elapsed_ms = max(0, min(duration_ms, elapsed_ms))
-            remaining_ms = duration_ms - elapsed_ms
+            elapsed_ms = int((time.monotonic() - self._started_monotonic) * 1000)
+            elapsed_ms = max(0, min(self._duration_ms, elapsed_ms))
             return {
                 "playing": True,
-                "id": motif["id"],
-                "name": motif["name"],
-                "duration_ms": duration_ms,
+                "id": self._id,
+                "scheduled": self._total,
+                "cursor": self._cursor,
+                "duration_ms": self._duration_ms,
                 "elapsed_ms": elapsed_ms,
-                "remaining_ms": remaining_ms,
-                "master_current_ma": motif["master_current_ma"],
-                "vel_floor": motif["vel_floor"],
+                "remaining_ms": self._duration_ms - elapsed_ms,
+                "master_scale": self._master_scale,
+                "muted": sorted(self._muted),
+                **self._metadata,
             }
 
-    def play(self, events: list[dict], name: str | None = None,
-             master_current_ma: int | None = None,
-             vel_floor: float | None = None) -> dict:
-        """Resolve, schedule, and start playback. Returns immediately with a
-        motif id, the scheduled duration, and the list of events that had to
-        be skipped (e.g. unmapped pitches).
+    def play(self, events: list[dict], **metadata) -> dict:
+        """Start playback of canonical events: a list of
+        {t_ms, address, nominal_current_ma}. Returns immediately with an id,
+        scheduled count, duration, and an echo of metadata. Preempts any
+        playback already running.
 
-        master_current_ma and vel_floor override the server-wide defaults for
-        this motif only — out-of-range values are clamped, same as __init__.
-        The actual values used are echoed back in the response so callers can
-        verify what landed."""
-        master = (self.master_current_ma if master_current_ma is None
-                  else max(STRIKE_MA_MIN, min(STRIKE_MA_MAX, int(master_current_ma))))
-        floor = (self.vel_floor if vel_floor is None
-                 else max(0.0, min(1.0, float(vel_floor))))
-        mapping = self.bridge.load_mapping() or []
-        pitch_to_addr: dict[int, int] = {}
-        for addr, pitch in enumerate(mapping):
-            if pitch is None:
-                continue
-            # Mapping can in principle assign the same pitch to multiple slots
-            # (chorus). Keep the first; everything else is fine to ignore for
-            # motif playback — integrations don't care which slot rings.
-            pitch_to_addr.setdefault(int(pitch), addr)
-
+        metadata is opaque to the engine — callers attach whatever they want
+        echoed in status() (e.g. the motif endpoint stores name +
+        master_current_ma + vel_floor; the song endpoint stores
+        schedule_master_ma). Stored verbatim under _metadata and spread back
+        into status()."""
         resolved: list[dict] = []
-        skipped: list[dict] = []
         for ev in events:
             try:
                 t_ms = int(ev["t_ms"])
-                pitch = int(ev["pitch"])
+                addr = int(ev["address"])
+                nominal = int(ev["nominal_current_ma"])
             except (KeyError, TypeError, ValueError) as exc:
-                raise ValueError(f"bad motif event {ev!r}: {exc}") from exc
+                raise ValueError(f"bad player event {ev!r}: {exc}") from exc
             if t_ms < 0:
-                raise ValueError(f"motif event t_ms must be >= 0, got {t_ms}")
-            if not 0 <= pitch <= 127:
-                raise ValueError(f"motif event pitch out of range: {pitch}")
-            velocity = int(ev.get("velocity", 100))
-            addr = pitch_to_addr.get(pitch)
-            if addr is None:
-                skipped.append({"t_ms": t_ms, "pitch": pitch, "reason": "unmapped"})
-                continue
+                raise ValueError(f"player event t_ms must be >= 0, got {t_ms}")
             resolved.append({
                 "t_ms": t_ms,
                 "address": addr,
-                "current_ma": self._velocity_to_current(velocity, master, floor),
-                "pitch": pitch,
-                "velocity": velocity,
+                "nominal_current_ma": max(
+                    STRIKE_MA_MIN, min(STRIKE_MA_MAX, nominal)
+                ),
             })
         resolved.sort(key=lambda e: e["t_ms"])
         duration_ms = resolved[-1]["t_ms"] if resolved else 0
+        play_id = uuid.uuid4().hex[:8]
 
-        motif_id = uuid.uuid4().hex[:8]
         with self._play_lock:
             self._stop_and_join()
             with self._control_lock:
                 self._stop_event = threading.Event()
-                self._current_motif = {
-                    "id": motif_id,
-                    "name": name,
-                    "duration_ms": duration_ms,
-                    "master_current_ma": master,
-                    "vel_floor": floor,
-                    "started_monotonic": time.monotonic(),
-                }
+                self._master_scale = 1.0
+                self._muted = set()
+                self._cursor = 0
+                self._total = len(resolved)
+                self._duration_ms = duration_ms
+                self._id = play_id
+                self._metadata = dict(metadata)
+                self._started_monotonic = time.monotonic()
                 self._thread = threading.Thread(
                     target=self._run,
-                    args=(resolved, self._stop_event, motif_id),
-                    name=f"motif-{motif_id}",
+                    args=(resolved, self._stop_event, play_id),
+                    name=f"player-{play_id}",
                     daemon=True,
                 )
                 self._thread.start()
         return {
-            "id": motif_id,
-            "name": name,
-            "duration_ms": duration_ms,
+            "id": play_id,
             "scheduled": len(resolved),
-            "skipped": skipped,
-            "master_current_ma": master,
-            "vel_floor": floor,
+            "duration_ms": duration_ms,
+            **dict(metadata),
         }
+
+    def update(self, master_scale: float | None = None,
+               muted: list | None = None) -> dict:
+        """Apply live tweaks to in-flight playback. Both args optional and
+        independent. Returns the post-update state for echo/debug. Tweaks
+        take effect on the next strike — the worker re-reads both values
+        at the top of each iteration."""
+        with self._control_lock:
+            if master_scale is not None:
+                # Cap at 10x so an errant slider can't silently clamp every
+                # strike to STRIKE_MA_MAX. Zero is fine — silent playback.
+                self._master_scale = max(0.0, min(10.0, float(master_scale)))
+            if muted is not None:
+                self._muted = {int(a) for a in muted}
+            return {
+                "master_scale": self._master_scale,
+                "muted": sorted(self._muted),
+            }
 
     def cancel(self) -> None:
         with self._play_lock:
@@ -684,17 +748,32 @@ class MotifPlayer:
             # (~1-2 ms each) and on its own stop_event.wait().
             thread.join(timeout=2.0)
         with self._control_lock:
-            # Clear the "currently playing" labels only if the thread we just
-            # joined is still the recorded one (a new play() could have raced
-            # in here and installed its own thread).
+            # Clear identity only if the thread we just joined is still the
+            # recorded one (a new play() could have raced in here and
+            # installed its own thread).
             if self._thread is thread:
                 self._thread = None
-                self._current_motif = None
+                self._id = None
 
-    def _run(self, events: list[dict], stop: threading.Event, motif_id: str) -> None:
-        t0 = time.monotonic()
-        for ev in events:
-            comp_ms = self.bridge.latency.compensation_ms(ev["address"], ev["current_ma"])
+    def _run(self, events: list[dict], stop: threading.Event, play_id: str) -> None:
+        t0 = self._started_monotonic
+        for i, ev in enumerate(events):
+            # Snapshot live state for this iteration. master_scale and muted
+            # take effect on the next strike after the slider/UI changes.
+            # Don't hold _control_lock across the wait — update() needs it.
+            with self._control_lock:
+                scale = self._master_scale
+                muted = self._muted
+                self._cursor = i
+
+            addr = ev["address"]
+            nominal = ev["nominal_current_ma"]
+            live_ma = max(
+                STRIKE_MA_MIN,
+                min(STRIKE_MA_MAX, int(round(nominal * scale))),
+            )
+            # Comp uses the post-scale current so we look up the right bucket.
+            comp_ms = self.bridge.latency.compensation_ms(addr, live_ma)
             target = t0 + (ev["t_ms"] - comp_ms) / 1000.0
             remaining = target - time.monotonic()
             if remaining > 0:
@@ -705,12 +784,15 @@ class MotifPlayer:
                     return
             if stop.is_set():
                 return
+            if addr in muted or live_ma <= 0:
+                continue
             try:
-                self.bridge.strike(ev["address"], ev["current_ma"])
+                self.bridge.strike(addr, live_ma)
             except Exception:
-                # One bad strike shouldn't tank the whole motif. Log and move
-                # on — the next event has its own scheduled time.
+                # One bad strike shouldn't tank the whole playback.
                 traceback.print_exc()
+        with self._control_lock:
+            self._cursor = len(events)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -719,6 +801,11 @@ class Handler(BaseHTTPRequestHandler):
     # lists .mid/.midi files in this folder (flat, no recursion) and
     # /api/library/<name> serves the raw bytes.
     library_dir: Path | None = None
+    # Defaults used by /api/play when the request is pitch-style and doesn't
+    # carry its own master_current_ma / vel_floor. Set from the
+    # --motif-current-ma / --motif-vel-floor CLI flags in main().
+    default_master_ma: int = 800
+    default_vel_floor: float = 0.5
 
     def log_message(self, fmt, *args):
         # Quieter than the default per-request stderr spam.
@@ -804,9 +891,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(500, {"error": str(exc)})
             return
 
-        if self.path == "/api/motif":
+        if self.path == "/api/play":
             try:
-                self._json(200, self.bridge.motif_player.status())
+                self._json(200, self.bridge.player.status())
             except Exception as exc:
                 traceback.print_exc()
                 self._json(500, {"error": str(exc)})
@@ -968,36 +1055,107 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, {"ok": True, "mapping": cleaned})
                 return
 
-            if self.path == "/api/motif":
+            if self.path == "/api/play":
+                # Unified playback start. Two accepted event shapes:
+                #
+                #   canonical (browser): {t_ms, address, nominal_current_ma}
+                #     Plus optional top-level "master_ma" so /api/play/update
+                #     can scale relative to it.
+                #
+                #   pitch-style (motif/chime integrations):
+                #     {t_ms, pitch, velocity}
+                #     Plus optional top-level "name", "master_current_ma",
+                #     "vel_floor". The server resolves pitch->address via the
+                #     persisted mapping and computes current via the master *
+                #     (floor + (1-floor)*v/127) curve. Defaults come from the
+                #     --motif-current-ma / --motif-vel-floor CLI flags.
+                #
+                # Detection: presence of "pitch" on the first event picks the
+                # pitch-style branch. An empty events list is allowed and
+                # produces an immediately-done playback.
                 data = self._read_json()
                 events = data.get("events")
                 if not isinstance(events, list):
                     self._json(400, {"error": "expected {'events': [...]}"})
                     return
-                name = data.get("name")
-                if name is not None and not isinstance(name, str):
-                    self._json(400, {"error": "'name' must be a string"})
-                    return
-                # bool is a subclass of int — reject explicitly so True/False
-                # don't sneak through as 1/1.0 or 0/0.0.
-                master = data.get("master_current_ma")
-                if master is not None and (isinstance(master, bool)
-                                           or not isinstance(master, (int, float))):
-                    self._json(400, {"error": "'master_current_ma' must be a number"})
-                    return
-                floor = data.get("vel_floor")
-                if floor is not None and (isinstance(floor, bool)
-                                          or not isinstance(floor, (int, float))):
-                    self._json(400, {"error": "'vel_floor' must be a number"})
-                    return
+
+                def _is_num(x):
+                    return x is None or (not isinstance(x, bool) and isinstance(x, (int, float)))
+
+                pitch_style = bool(events) and "pitch" in events[0]
+                metadata: dict = {}
                 try:
-                    result = self.bridge.motif_player.play(
-                        events, name=name,
-                        master_current_ma=master, vel_floor=floor,
-                    )
+                    if pitch_style:
+                        name = data.get("name")
+                        if name is not None and not isinstance(name, str):
+                            self._json(400, {"error": "'name' must be a string"})
+                            return
+                        master = data.get("master_current_ma", self.default_master_ma)
+                        floor = data.get("vel_floor", self.default_vel_floor)
+                        if not _is_num(master):
+                            self._json(400, {"error": "'master_current_ma' must be a number"})
+                            return
+                        if not _is_num(floor):
+                            self._json(400, {"error": "'vel_floor' must be a number"})
+                            return
+                        master = max(STRIKE_MA_MIN, min(STRIKE_MA_MAX, int(master)))
+                        floor = max(0.0, min(1.0, float(floor)))
+                        mapping = self.bridge.load_mapping() or []
+                        canonical, skipped = motif_events_to_canonical(
+                            events, mapping, master, floor
+                        )
+                        metadata = {
+                            "name": name,
+                            "master_current_ma": master,
+                            "vel_floor": floor,
+                            "skipped": skipped,
+                        }
+                    else:
+                        master = data.get("master_ma")
+                        if not _is_num(master):
+                            self._json(400, {"error": "'master_ma' must be a number"})
+                            return
+                        canonical = events
+                        if master is not None:
+                            metadata["schedule_master_ma"] = int(master)
+                    result = self.bridge.player.play(canonical, **metadata)
                 except ValueError as exc:
                     self._json(400, {"error": str(exc)})
                     return
+                self._json(200, {"ok": True, **result})
+                return
+
+            if self.path == "/api/play/stop":
+                self.bridge.player.cancel()
+                self._json(200, {"ok": True})
+                return
+
+            if self.path == "/api/play/update":
+                data = self._read_json()
+                # Accept master_scale directly OR master_ma + the original
+                # schedule_master_ma so the browser doesn't have to divide.
+                # master_scale wins if both are present.
+                master_scale = data.get("master_scale")
+                if master_scale is None:
+                    new_master = data.get("master_ma")
+                    orig_master = data.get("schedule_master_ma")
+                    if new_master is not None and orig_master:
+                        try:
+                            master_scale = float(new_master) / float(orig_master)
+                        except (TypeError, ValueError, ZeroDivisionError):
+                            master_scale = None
+                if master_scale is not None and (isinstance(master_scale, bool)
+                                                 or not isinstance(master_scale, (int, float))):
+                    self._json(400, {"error": "'master_scale' must be a number"})
+                    return
+                muted = data.get("muted")
+                if muted is not None and not isinstance(muted, list):
+                    self._json(400, {"error": "'muted' must be a list of addresses"})
+                    return
+                result = self.bridge.player.update(
+                    master_scale=float(master_scale) if master_scale is not None else None,
+                    muted=muted,
+                )
                 self._json(200, {"ok": True, **result})
                 return
 
@@ -1082,13 +1240,14 @@ def main(argv: list[str] | None = None) -> int:
                     help="Folder of .mid/.midi files exposed at /api/library. "
                          "Flat listing only — no recursion.")
     ap.add_argument("--motif-current-ma", type=int, default=800,
-                    help="Master strike current used by /api/motif when converting "
-                         "MIDI velocity to current_ma (default: 800). Matches the "
-                         "browser player's default master.")
+                    help="Default master current for pitch-style /api/play requests "
+                         "(default: 800). The request body can override per call. "
+                         "Matches the browser player's default master.")
     ap.add_argument("--motif-vel-floor", type=float, default=0.5,
-                    help="Fraction of master current applied at velocity=1 "
-                         "(default: 0.5). 1.0 = velocity ignored; 0.0 = soft notes "
-                         "barely strike. Matches the browser's DEFAULT_VEL_FLOOR.")
+                    help="Default fraction of master current applied at velocity=1 "
+                         "for pitch-style /api/play requests (default: 0.5). "
+                         "1.0 = velocity ignored; 0.0 = soft notes barely strike. "
+                         "Matches the browser's DEFAULT_VEL_FLOOR.")
     args = ap.parse_args(argv)
 
     library_dir: Path | None = None
@@ -1105,11 +1264,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"Opening {port} at {args.baud} baud (rx timeout {args.timeout_ms} ms)")
     bridge = Bridge(port=port, baud=args.baud, timeout_ms=args.timeout_ms, trace=args.trace)
-    bridge.motif_player = MotifPlayer(
-        bridge,
-        master_current_ma=args.motif_current_ma,
-        vel_floor=args.motif_vel_floor,
-    )
+    bridge.player = Player(bridge)
     try:
         count = bridge.enumerate()
         print(f"Enumerated {count} device(s) on the ring")
@@ -1120,14 +1275,18 @@ def main(argv: list[str] | None = None) -> int:
 
     Handler.bridge = bridge
     Handler.library_dir = library_dir
+    Handler.default_master_ma = max(
+        STRIKE_MA_MIN, min(STRIKE_MA_MAX, int(args.motif_current_ma))
+    )
+    Handler.default_vel_floor = max(0.0, min(1.0, float(args.motif_vel_floor)))
     server = ThreadingHTTPServer((args.host, args.http_port), Handler)
     url = f"http://{args.host}:{args.http_port}/"
     print(f"Serving {PLAYER_HTML.name} at {url}")
     print(f"Looper UI available at {url}looper.html")
     if library_dir is not None:
         print(f"MIDI library: {library_dir}")
-    print(f"Motif playback: {args.motif_current_ma} mA master, "
-          f"velocity floor {args.motif_vel_floor:.2f}")
+    print(f"Pitch-style /api/play defaults: {Handler.default_master_ma} mA master, "
+          f"velocity floor {Handler.default_vel_floor:.2f}")
     print("Open that URL in Chrome to play.  Ctrl-C to stop.")
     try:
         server.serve_forever()
@@ -1135,8 +1294,8 @@ def main(argv: list[str] | None = None) -> int:
         print("\nShutting down")
     finally:
         server.server_close()
-        if bridge.motif_player is not None:
-            bridge.motif_player.cancel()
+        if bridge.player is not None:
+            bridge.player.cancel()
         bridge.close()
     return 0
 

@@ -615,6 +615,38 @@ class Player:
         self._duration_ms = 0
         self._id: str | None = None
         self._metadata: dict = {}
+        # Per-slot residual stats (actual trigger_to_impact_ms minus what the
+        # EMA predicted at strike time). Browser shows these in its popup
+        # during server-dispatched playback, since strikeAsync — which used
+        # to compute residual client-side — is bypassed on this code path.
+        # Accumulated across plays; resets only on server restart.
+        self.residual_stats: dict[int, dict] = {}
+        # Per-strike server-side timing decomposition. lock_wait and
+        # serial_rtt come from bridge.strike()'s server_timing_us; sched
+        # jitter and network don't exist here (no setTimeout, no fetch),
+        # so the browser leaves those rows showing pre-playback data.
+        self.timing_stats: dict[str, dict] = {
+            "lock_wait_ms": self._new_stats_bag(),
+            "serial_rtt_ms": self._new_stats_bag(),
+        }
+        # ACK metrics describe the *previous* strike on each address, so
+        # we hold the prediction we made for THIS strike here, and pair
+        # it with the NEXT strike's returned metric.
+        self._last_prediction_ms: dict[int, float] = {}
+
+    @staticmethod
+    def _new_stats_bag() -> dict:
+        return {"last": 0.0, "sum": 0.0, "sumSq": 0.0, "n": 0, "maxAbs": 0.0}
+
+    @staticmethod
+    def _fold_stat(bag: dict, value: float) -> None:
+        bag["last"] = value
+        bag["sum"] += value
+        bag["sumSq"] += value * value
+        bag["n"] += 1
+        a = abs(value)
+        if a > bag["maxAbs"]:
+            bag["maxAbs"] = a
 
     def status(self) -> dict:
         """Snapshot of what the worker is currently playing. `elapsed_ms` and
@@ -622,10 +654,17 @@ class Player:
         time, so motif/chime callers can poll until `playing` is false
         without tracking duration themselves. Anything the caller stored in
         metadata at play() time (e.g. name, master_current_ma, vel_floor)
-        gets spread into the response."""
+        gets spread into the response.
+
+        Includes `residual_stats` (per-address) and `timing_stats` (global)
+        so the browser popup can show meaningful numbers during
+        server-dispatched playback. Stats accumulate across plays — only a
+        server restart resets them."""
         with self._control_lock:
             thread = self._thread
             running = thread is not None and thread.is_alive()
+            residual = {str(k): dict(v) for k, v in self.residual_stats.items()}
+            timing = {k: dict(v) for k, v in self.timing_stats.items()}
             if not running:
                 # Keep the documented motif keys (name/master_current_ma/
                 # vel_floor) present-but-null so chime_demo and friends see
@@ -643,6 +682,8 @@ class Player:
                     "muted": sorted(self._muted),
                     "master_current_ma": None,
                     "vel_floor": None,
+                    "residual_stats": residual,
+                    "timing_stats": timing,
                 }
             elapsed_ms = int((time.monotonic() - self._started_monotonic) * 1000)
             elapsed_ms = max(0, min(self._duration_ms, elapsed_ms))
@@ -656,6 +697,8 @@ class Player:
                 "remaining_ms": self._duration_ms - elapsed_ms,
                 "master_scale": self._master_scale,
                 "muted": sorted(self._muted),
+                "residual_stats": residual,
+                "timing_stats": timing,
                 **self._metadata,
             }
 
@@ -785,12 +828,39 @@ class Player:
             if stop.is_set():
                 return
             if addr in muted or live_ma <= 0:
+                # Muted strikes don't reach the bus, so no metric comes
+                # back — wipe the stashed prediction so a future strike on
+                # this slot doesn't get attributed across a gap.
+                self._last_prediction_ms.pop(addr, None)
                 continue
+            # Stash our prediction BEFORE striking. The ACK we're about to
+            # get carries the metric for the previous strike on this addr,
+            # which we'll attribute to the prediction we stashed for THAT
+            # one (held in prev_prediction).
+            prev_prediction = self._last_prediction_ms.get(addr)
+            self._last_prediction_ms[addr] = comp_ms
             try:
-                self.bridge.strike(addr, live_ma)
+                result = self.bridge.strike(addr, live_ma)
             except Exception:
                 # One bad strike shouldn't tank the whole playback.
                 traceback.print_exc()
+                continue
+            # Fold server-side timing components.
+            st = result.get("server_timing_us") or {}
+            metrics = result.get("metrics") or {}
+            impact = metrics.get("trigger_to_impact_ms")
+            with self._control_lock:
+                if "lock_wait" in st:
+                    self._fold_stat(self.timing_stats["lock_wait_ms"],
+                                    st["lock_wait"] / 1000.0)
+                if "serial_rtt" in st:
+                    self._fold_stat(self.timing_stats["serial_rtt_ms"],
+                                    st["serial_rtt"] / 1000.0)
+                if impact is not None and prev_prediction is not None:
+                    bag = self.residual_stats.setdefault(
+                        addr, self._new_stats_bag()
+                    )
+                    self._fold_stat(bag, float(impact) - prev_prediction)
         with self._control_lock:
             self._cursor = len(events)
 

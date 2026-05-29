@@ -504,6 +504,12 @@ const S = {
   // request a scale ratio = newMaster / scheduleMasterMa. Zero outside of
   // active playback. Reset each play().
   scheduleMasterMa: 0,
+  // Server-reported stats cache. Populated by polling /api/play during
+  // playback; the popup reads from here instead of the local stat bags
+  // when S.playing is true. Same bag shape as the local equivalents.
+  serverResidualStats: {},  // {addr: {last, sum, sumSq, n, maxAbs}}
+  serverTimingStats: {},    // {lock_wait_ms: bag, serial_rtt_ms: bag}
+  playPollIntervalId: null,
   // Session-wide pipeline timing breakdown — decomposes the total beat error
   // into the components between "intended fire time" and "physical impact":
   //   schedJitter — setTimeout fired N ms vs when we wanted it to (signed)
@@ -1056,9 +1062,13 @@ function refreshCfgTiming() {
       compEl.textContent = `${applied.toFixed(1)} ms @ ${masterMa} mA · ${source} (${populated}/${COMP_BUCKET_COUNT} buckets)`;
     }
   }
+  // Residual: prefer the server's view during playback (strikeAsync isn't
+  // called per-strike on the server-dispatch path, so the local bag stays
+  // frozen). Server stats use stringified addr keys; check both.
   const residualEl = document.getElementById("cfgResidual");
   if (residualEl) {
-    const rs = S.residualStats[slot];
+    const serverBag = S.serverResidualStats[slot] || S.serverResidualStats[String(slot)];
+    const rs = (S.playing && serverBag && serverBag.n > 0) ? serverBag : S.residualStats[slot];
     if (!rs || rs.n === 0) {
       residualEl.textContent = "no data yet";
     } else {
@@ -1070,9 +1080,13 @@ function refreshCfgTiming() {
         `rms ${rms.toFixed(2)} · max ±${rs.maxAbs.toFixed(2)} (n=${rs.n})`;
     }
   }
-  // Pipeline section. Scheduler jitter is signed (can show a bias from
-  // setTimeout always firing slightly late); other rows are unsigned
-  // durations where "max" already equals "max abs".
+  // Pipeline section. Scheduler jitter is signed; the rest are unsigned
+  // durations where "max" already equals "max abs". During server-dispatched
+  // playback only lock_wait_ms and serial_rtt_ms have a meaningful server
+  // source — sched jitter and network don't exist on that path (no
+  // setTimeout, no per-strike fetch). For those, leave the session-total
+  // from prior keyboard taps in place; they don't refresh until the next
+  // tap, which is honest.
   const fmtSigned = (bag) => {
     if (!bag || bag.n === 0) return "—";
     const m = bag.sum / bag.n;
@@ -1084,11 +1098,16 @@ function refreshCfgTiming() {
     return `mean ${m.toFixed(2)} ms · max ${bag.maxAbs.toFixed(2)} (n=${bag.n})`;
   };
   const ps = S.pipelineStats;
+  const sTiming = S.serverTimingStats || {};
+  const serverLock = sTiming.lock_wait_ms;
+  const serverSerial = sTiming.serial_rtt_ms;
+  const pickUnsigned = (local, server) =>
+    (S.playing && server && server.n > 0) ? server : local;
   document.getElementById("cfgPipeSched").textContent  = fmtSigned(ps.schedJitter);
   document.getElementById("cfgPipeNet").textContent    = fmtUnsigned(ps.network);
   document.getElementById("cfgPipeServer").textContent = fmtUnsigned(ps.serverTotal);
-  document.getElementById("cfgPipeLock").textContent   = fmtUnsigned(ps.lockWait);
-  document.getElementById("cfgPipeSerial").textContent = fmtUnsigned(ps.serialRtt);
+  document.getElementById("cfgPipeLock").textContent   = fmtUnsigned(pickUnsigned(ps.lockWait, serverLock));
+  document.getElementById("cfgPipeSerial").textContent = fmtUnsigned(pickUnsigned(ps.serialRtt, serverSerial));
   if (!t) {
     seqEl.textContent = "no data yet";
     document.getElementById("cfgTimingCoast").textContent = "—";
@@ -1648,6 +1667,7 @@ function stopPlayback() {
   // server worker still exits naturally at end-of-schedule.
   fetch(API_BASE + "/api/play/stop", { method: "POST", keepalive: true })
     .catch(() => {});
+  stopPlayPolling();
   S.timeouts.forEach(id => clearTimeout(id));
   S.timeouts = [];
   if (S.animFrame) cancelAnimationFrame(S.animFrame);
@@ -1658,6 +1678,39 @@ function stopPlayback() {
   document.getElementById("stopBtn").style.display = "none";
   document.getElementById("progressContainer").style.display = "none";
   const cur = document.getElementById("cursor"); if (cur) cur.style.opacity = "0";
+}
+
+// While the server is dispatching, the popup's residual / lock_wait /
+// serial_rtt rows are blind to the strikes happening (strikeAsync is
+// bypassed). Poll /api/play so we have fresh per-slot residual stats and
+// the lock_wait + serial_rtt aggregates the server can see. 250 ms is
+// frequent enough that the popup feels live without spamming the link.
+function startPlayPolling() {
+  if (S.playPollIntervalId) return;
+  S.playPollIntervalId = setInterval(async () => {
+    try {
+      const r = await fetch(API_BASE + "/api/play");
+      if (!r.ok) return;
+      const j = await r.json();
+      S.serverResidualStats = j.residual_stats || {};
+      S.serverTimingStats = j.timing_stats || {};
+      // If the server says playback finished while we weren't paying
+      // attention, drop our UI to idle. The teardown setTimeout in play()
+      // will still fire later but stopPlayback is idempotent.
+      if (!j.playing && S.playing) {
+        stopPlayback();
+        return;
+      }
+      if (S.cfgSlot >= 0) refreshCfgTiming();
+    } catch {}
+  }, 250);
+}
+
+function stopPlayPolling() {
+  if (S.playPollIntervalId) {
+    clearInterval(S.playPollIntervalId);
+    S.playPollIntervalId = null;
+  }
 }
 
 async function play() {
@@ -1729,6 +1782,7 @@ async function play() {
   document.getElementById("playBtn").classList.add("playing");
   document.getElementById("progressContainer").style.display = "block";
   const curEl = document.getElementById("cursor"); if (curEl) curEl.style.opacity = "0.8";
+  startPlayPolling();
 
   // Final teardown — the server worker has already exited by the time the
   // last note's wall position elapses. This just resets the UI.

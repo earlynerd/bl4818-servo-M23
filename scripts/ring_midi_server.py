@@ -80,6 +80,7 @@ from urllib.parse import unquote, urlparse
 from ring_bus import (
     CommandAck,
     RingClientV2,
+    RingCRCError,
     RingError,
     RingTimeout,
     StrikeTiming,
@@ -198,6 +199,69 @@ LOOPER_HTML = ROOT / "player" / "looper.html"
 MAPPING_FILE = ROOT / "mapping.json"
 
 
+class BusHealth:
+    """Per-address ring-transaction health: round-trip latency distribution
+    plus drop / CRC / error counts.
+
+    Fed by the Bridge on every transaction that actually touches the bus
+    (strikes and the per-address query_strike used by status/pitches/probe),
+    so it reflects real link behavior whether or not a song is playing. The
+    counts are cumulative since the last reset() — the browser's bus-health
+    panel renders mean / stddev / max latency and a drop-rate from these, and
+    the user resets when they wiggle a connector to get a clean before/after.
+
+    Has its own lock so the Bridge can update it from inside the bus lock and
+    the HTTP thread can snapshot it without contending on the bus lock. Never
+    acquires the bus lock, so there's no lock-ordering cycle."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._addr: dict[int, dict] = {}
+        self._since = time.monotonic()
+
+    @staticmethod
+    def _new_bag() -> dict:
+        # rtt_* accumulate only over successful (ok) transactions, in
+        # microseconds; the drop-rate denominator is `n` (every attempt).
+        return {
+            "n": 0, "ok": 0, "timeouts": 0, "crc_errors": 0, "errors": 0,
+            "rtt_sum_us": 0.0, "rtt_sumsq_us": 0.0,
+            "rtt_max_us": 0.0, "rtt_last_us": 0.0,
+            "last_error": None,
+        }
+
+    def record_ok(self, address: int, rtt_us: float) -> None:
+        with self._lock:
+            bag = self._addr.get(address) or self._addr.setdefault(address, self._new_bag())
+            bag["n"] += 1
+            bag["ok"] += 1
+            bag["rtt_sum_us"] += rtt_us
+            bag["rtt_sumsq_us"] += rtt_us * rtt_us
+            bag["rtt_last_us"] = rtt_us
+            if rtt_us > bag["rtt_max_us"]:
+                bag["rtt_max_us"] = rtt_us
+
+    def record_fail(self, address: int, kind: str, error: str) -> None:
+        # kind is "timeouts", "crc_errors", or "errors".
+        with self._lock:
+            bag = self._addr.get(address) or self._addr.setdefault(address, self._new_bag())
+            bag["n"] += 1
+            bag[kind] = bag.get(kind, 0) + 1
+            bag["last_error"] = error
+
+    def reset(self) -> None:
+        with self._lock:
+            self._addr.clear()
+            self._since = time.monotonic()
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return {
+                "since_s": round(time.monotonic() - self._since, 1),
+                "addresses": {str(a): dict(b) for a, b in sorted(self._addr.items())},
+            }
+
+
 class Bridge:
     """Thread-safe wrapper around RingClientV2."""
 
@@ -219,6 +283,9 @@ class Bridge:
         # Fed by every strike that goes through this bridge (browser too), so
         # the player's arpeggio warm-up also warms the bridge's table.
         self.latency = LatencyTracker()
+        # Per-address bus link health (RTT distribution + drop/CRC/error
+        # counts). Fed by strike() and the per-address query_strike path.
+        self.health = BusHealth()
         # Playback scheduler — server-side dispatch for both chime motifs
         # (HTTP integrations) and browser song playback. Lazily attached
         # after construction so it can hold a reference back to this Bridge
@@ -230,6 +297,31 @@ class Bridge:
             self.count = self.client.enumerate()
         return self.count
 
+    def _record_bus_exc(self, address: int, exc: Exception) -> None:
+        """Classify a failed bus transaction into the BusHealth buckets.
+        Timeout = the device never answered (the 'packet disappeared' case);
+        CRC = a frame came back mangled (bus noise / marginal wiring); other =
+        anything else (framing, serial layer)."""
+        if isinstance(exc, RingTimeout):
+            self.health.record_fail(address, "timeouts", str(exc))
+        elif isinstance(exc, RingCRCError):
+            self.health.record_fail(address, "crc_errors", str(exc))
+        else:
+            self.health.record_fail(address, "errors", str(exc))
+
+    def _query_strike_timed(self, address: int):
+        """query_strike with BusHealth accounting. Caller must hold self.lock.
+        Records the round-trip on success and the failure kind on exception,
+        then re-raises so existing error handling is unchanged."""
+        t0 = time.monotonic()
+        try:
+            s = self.client.query_strike(address)
+        except Exception as exc:
+            self._record_bus_exc(address, exc)
+            raise
+        self.health.record_ok(address, (time.monotonic() - t0) * 1_000_000)
+        return s
+
     def status(self) -> dict:
         with self.lock:
             count = self.count
@@ -237,7 +329,7 @@ class Bridge:
             slots: list[dict] = []
             for addr in range(count):
                 try:
-                    s = self.client.query_strike(addr)
+                    s = self._query_strike_timed(addr)
                     homed.append(bool(s.homed))
                     slot = {
                         "homed": bool(s.homed),
@@ -259,6 +351,26 @@ class Bridge:
                     })
         return {"count": count, "homed": homed, "slots": slots}
 
+    def probe_bus(self) -> dict:
+        """Run one query_strike round across every enumerated address purely to
+        exercise the link and feed BusHealth, then return the health snapshot.
+        Used by the browser's bus-health monitor to keep a steady per-address
+        sampling cadence while the ring is otherwise idle (organic traffic —
+        strikes, status polls — feeds the same counters; this just guarantees
+        coverage when nothing else is happening). Failures are swallowed: the
+        point is to *measure* drops, not propagate them.
+
+        Takes the ring lock per-address rather than around the whole sweep, so
+        a concurrent strike or keyboard tap only ever waits behind a single
+        query — not the full round, which matters on a ring with many devices."""
+        for addr in range(self.count):
+            with self.lock:
+                try:
+                    self._query_strike_timed(addr)
+                except Exception:
+                    pass
+        return self.health.snapshot()
+
     def strike(self, address: int, current_ma: int) -> dict:
         # ACK_TIMED costs 12 extra payload bytes (~480 us at 250 kbaud) and
         # replaces the otherwise-needed query_strike round trip. Net: less
@@ -269,10 +381,18 @@ class Bridge:
         prev_current = self.latency.record_sent(address, current_ma)
         with self.lock:
             t_lock = time.monotonic()
-            reply = self.client.strike(
-                address, current_ma, reply_mode=REPLY_MODE_ACK_TIMED
-            )
+            try:
+                reply = self.client.strike(
+                    address, current_ma, reply_mode=REPLY_MODE_ACK_TIMED
+                )
+            except Exception as exc:
+                # A dropped/mangled strike reply is exactly the bus trouble the
+                # health panel exists to surface — record it before propagating
+                # (the playback worker catches and skips, /api/strike → 500).
+                self._record_bus_exc(address, exc)
+                raise
             t_post_ack = time.monotonic()
+        self.health.record_ok(address, (t_post_ack - t_lock) * 1_000_000)
         result = self._ack_to_dict(address, reply, cache_metrics=True)
         self._fold_metrics_into_ema(address, prev_current, result.get("metrics"))
         result["server_timing_us"] = {
@@ -382,7 +502,7 @@ class Bridge:
         with self.lock:
             for addr in range(self.count):
                 try:
-                    s = self.client.query_strike(addr)
+                    s = self._query_strike_timed(addr)
                     homed_by_slot[addr] = bool(s.homed)
                 except Exception:
                     homed_by_slot[addr] = False
@@ -969,6 +1089,14 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(500, {"error": str(exc)})
             return
 
+        if self.path == "/api/bus-health":
+            try:
+                self._json(200, self.bridge.health.snapshot())
+            except Exception as exc:
+                traceback.print_exc()
+                self._json(500, {"error": str(exc)})
+            return
+
         if self.path.startswith("/api/strike-timing"):
             try:
                 # /api/strike-timing?address=N triggers a fresh poll;
@@ -1099,6 +1227,16 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/api/cancel":
                 self.bridge.cancel_all()
                 self._json(200, {"ok": True})
+                return
+
+            if self.path == "/api/bus-health/probe":
+                # Active per-address sampling round; returns the fresh snapshot.
+                self._json(200, self.bridge.probe_bus())
+                return
+
+            if self.path == "/api/bus-health/reset":
+                self.bridge.health.reset()
+                self._json(200, {"ok": True, **self.bridge.health.snapshot()})
                 return
 
             if self.path == "/api/stop":

@@ -291,6 +291,19 @@
       </div>
     </div>
 
+    <div class="panel" id="busHealthPanel">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+        <label class="label" style="margin:0">Bus Health</label>
+        <div style="display:flex;gap:6px;align-items:center">
+          <button class="pill" id="busProbeBtn" style="padding:3px 8px;font-size:10px" title="Actively ping every device once per second to sample ring round-trip latency and catch dropped or CRC-failed replies. Auto-pauses during playback (live strikes feed the same counters then).">Probe: on</button>
+          <button class="pill" id="busResetBtn" style="padding:3px 8px;font-size:10px" title="Zero all counters. Reset right before wiggling a connector to get a clean before/after.">Reset</button>
+        </div>
+      </div>
+      <div id="busHealthMeta" style="font-size:10px;color:var(--text-dim);font-family:'JetBrains Mono',monospace;margin-top:5px">no samples yet</div>
+      <div id="busHealthRows" style="margin-top:8px;display:flex;flex-direction:column;gap:3px"></div>
+      <p style="font-size:11px;color:var(--text-dim);margin-top:8px">Per-device ring round-trip <b>mean±σ</b> / max (ms), plus dropped (timeout) and CRC-failed replies. <span style="color:var(--error)">Red</span> = CRC errors or ≥5% drops — suspect that device's link; <span style="color:#ffb300">amber</span> = occasional drops. The drop column shows rate, with <code>Nc</code> = CRC count.</p>
+    </div>
+
     <div>
       <label class="label">Log</label>
       <pre id="log" class="log"></pre>
@@ -510,6 +523,12 @@ const S = {
   serverResidualStats: {},  // {addr: {last, sum, sumSq, n, maxAbs}}
   serverTimingStats: {},    // {lock_wait_ms: bag, serial_rtt_ms: bag}
   playPollIntervalId: null,
+  // Bus-health monitor. busProbe = actively ping the ring each tick to sample
+  // per-device link latency / drops; auto-suspends during playback so it never
+  // competes with live strikes for the ring lock. The panel still renders the
+  // accumulated counters every tick regardless (organic traffic feeds them).
+  busProbe: true,
+  busHealthIntervalId: null,
   // Session-wide pipeline timing breakdown — decomposes the total beat error
   // into the components between "intended fire time" and "physical impact":
   //   schedJitter — setTimeout fired N ms vs when we wanted it to (signed)
@@ -743,6 +762,110 @@ function setConn(ok, text) {
   el.textContent = text;
   el.classList.remove("ok", "err");
   el.classList.add(ok ? "ok" : "err");
+}
+
+// ─── Bus health monitor ──────────────────────────────────────
+// Reads /api/bus-health (per-device RTT distribution + drop/CRC/error counts
+// the bridge accumulates on every ring transaction) and renders a compact
+// per-device table. When probing is on and nothing is playing, each tick first
+// POSTs /api/bus-health/probe so the ring is actively sampled even when idle —
+// that's what makes an intermittent connector show up as a climbing drop count.
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+const BUS_COLS = "grid-template-columns:30px 1fr 44px 48px";
+function renderBusHealth(snap) {
+  const meta = document.getElementById("busHealthMeta");
+  const rowsEl = document.getElementById("busHealthRows");
+  if (!meta || !rowsEl) return;
+  const addrMap = (snap && snap.addresses) || {};
+  const addrs = Object.keys(addrMap).map(Number).sort((a, b) => a - b);
+  const since = (snap && snap.since_s != null) ? `${snap.since_s}s` : "—";
+  if (!addrs.length) {
+    meta.textContent = `no samples yet · ${since}`;
+    rowsEl.innerHTML = "";
+    return;
+  }
+  let totN = 0, totBad = 0;
+  for (const a of addrs) {
+    const b = addrMap[a];
+    totN += b.n || 0;
+    totBad += (b.timeouts || 0) + (b.crc_errors || 0) + (b.errors || 0);
+  }
+  meta.textContent = `${addrs.length} dev · ${totN} txns · ${totBad} bad · ${since}` +
+    (S.busProbe ? (S.playing ? " · probe paused" : " · probing") : " · probe off");
+
+  const toMs = us => (us / 1000);
+  let html = `<div style="display:grid;${BUS_COLS};gap:4px;font-size:9px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.5px">` +
+    `<span>dev</span><span>rtt ms</span><span>max</span><span>drop</span></div>`;
+  for (const a of addrs) {
+    const b = addrMap[a];
+    const ok = b.ok || 0;
+    const mean = ok ? b.rtt_sum_us / ok : 0;
+    let varv = ok ? (b.rtt_sumsq_us / ok - mean * mean) : 0;
+    if (varv < 0) varv = 0;                 // float guard
+    const sd = Math.sqrt(varv);
+    const bad = (b.timeouts || 0) + (b.crc_errors || 0) + (b.errors || 0);
+    const rate = b.n ? bad / b.n : 0;
+    // Color strictly on reliability: red = any CRC error (bus noise) or a
+    // drop-rate >= 5%; amber = occasional drops below that; green = clean.
+    // Latency spread is left to the σ / max columns — coloring on it would
+    // cry wolf, since sub-ms RTTs see large relative jitter on a healthy bus.
+    let dot = "var(--text-dim)";
+    if (b.crc_errors > 0 || rate >= 0.05) dot = "var(--error)";
+    else if (bad > 0) dot = "#ffb300";
+    else if (ok > 0) dot = "#4caf50";
+    const rttTxt = ok ? `${toMs(mean).toFixed(2)}±${toMs(sd).toFixed(2)}` : "—";
+    const maxTxt = ok ? toMs(b.rtt_max_us).toFixed(2) : "—";
+    let dropTxt = "·";
+    if (bad) {
+      dropTxt = `${(rate * 100).toFixed(0)}%`;
+      if (b.crc_errors) dropTxt += ` ${b.crc_errors}c`;
+    }
+    const title = `addr ${a}: ${b.n} attempts, ${ok} ok, ${b.timeouts || 0} timeout, ` +
+      `${b.crc_errors || 0} crc, ${b.errors || 0} err` +
+      (b.last_error ? ` — last: ${b.last_error}` : "");
+    const dropColor = bad ? dot : "var(--text-dim)";
+    html += `<div title="${escapeHtml(title)}" style="display:grid;${BUS_COLS};gap:4px;` +
+      `font-family:'JetBrains Mono',monospace;font-size:11px;align-items:center">` +
+      `<span style="color:${dot}">●&nbsp;${a}</span>` +
+      `<span style="color:var(--text-muted)">${rttTxt}</span>` +
+      `<span style="color:var(--text-dim)">${maxTxt}</span>` +
+      `<span style="color:${dropColor}">${dropTxt}</span></div>`;
+  }
+  rowsEl.innerHTML = html;
+}
+
+async function busHealthTick() {
+  try {
+    let snap;
+    if (S.busProbe && !S.playing && S.count > 0) {
+      const r = await fetch(API_BASE + "/api/bus-health/probe", { method: "POST" });
+      snap = r.ok ? await r.json() : null;
+    } else {
+      const r = await fetch(API_BASE + "/api/bus-health");
+      snap = r.ok ? await r.json() : null;
+    }
+    if (snap) renderBusHealth(snap);
+  } catch (e) {
+    // Bridge unreachable — the connection pill already reflects that; don't
+    // spam the log on every tick.
+  }
+}
+
+function updateBusProbeBtn() {
+  const b = document.getElementById("busProbeBtn");
+  if (!b) return;
+  b.textContent = "Probe: " + (S.busProbe ? "on" : "off");
+  b.style.color = S.busProbe ? "var(--accent-bright)" : "var(--text-dim)";
+}
+
+function startBusHealthMonitor() {
+  if (S.busHealthIntervalId) return;
+  updateBusProbeBtn();
+  busHealthTick();
+  S.busHealthIntervalId = setInterval(busHealthTick, 1000);
 }
 
 // ─── Mapping & trim persistence ──────────────────────────────
@@ -2104,6 +2227,17 @@ document.addEventListener("DOMContentLoaded", async () => {
     try { await api("POST", "/api/cancel"); log("cancel sent"); } catch (e) { log("cancel failed: " + e.message); }
   });
   document.getElementById("arpBtn").addEventListener("click", runArpeggio);
+  document.getElementById("busProbeBtn").addEventListener("click", () => {
+    S.busProbe = !S.busProbe;
+    updateBusProbeBtn();
+    busHealthTick();   // reflect the change immediately
+  });
+  document.getElementById("busResetBtn").addEventListener("click", async () => {
+    try {
+      const r = await fetch(API_BASE + "/api/bus-health/reset", { method: "POST" });
+      if (r.ok) { renderBusHealth(await r.json()); log("bus-health counters reset"); }
+    } catch (e) { log("bus-health reset failed: " + e.message); }
+  });
   document.getElementById("stopMotorsBtn").addEventListener("click", async () => {
     log("disable motors…");
     try {
@@ -2275,6 +2409,9 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // Initial connection
   await refreshStatus();
+
+  // Live ring-link health monitor (per-device latency + dropped/CRC replies).
+  startBusHealthMonitor();
 });
 </script>
 </body>

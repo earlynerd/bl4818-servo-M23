@@ -564,6 +564,68 @@ same shape as one entry of `/api/strike-timing.slots`, or
 `{"address": N, "sequence": 0, "flags": 0}` if the slot hasn't
 completed any strike yet.
 
+### `GET /api/bus-health`
+
+Per-address ring-link health, accumulated by the bridge on every transaction
+that actually touches the bus (strikes and the per-address `query_strike` used
+by `/api/status`, `/api/pitches`, and `/api/bus-health/probe`). Use it to spot
+a flaky connector: a marginal device shows a climbing drop/CRC count and/or a
+wide round-trip spread. The browser player renders this as a live "Bus Health"
+panel.
+
+Counts are cumulative since the last `POST /api/bus-health/reset` (or server
+start). RTT figures (`rtt_*`) accumulate only over successful transactions and
+are in **microseconds**; the drop-rate denominator is `n` (every attempt).
+
+**Response (200):**
+```json
+{
+  "since_s": 42.3,
+  "addresses": {
+    "0": {
+      "n": 41, "ok": 41, "timeouts": 0, "crc_errors": 0, "errors": 0,
+      "rtt_sum_us": 41000.0, "rtt_sumsq_us": 41410000.0,
+      "rtt_max_us": 1200.0, "rtt_last_us": 980.0,
+      "last_error": null
+    },
+    "1": {
+      "n": 41, "ok": 38, "timeouts": 2, "crc_errors": 1, "errors": 0,
+      "rtt_sum_us": 57000.0, "rtt_sumsq_us": 87000000.0,
+      "rtt_max_us": 2100.0, "rtt_last_us": 1490.0,
+      "last_error": "crc mismatch addr=1 ..."
+    }
+  }
+}
+```
+
+- `timeouts` — device never answered (the "packet disappeared" case).
+- `crc_errors` — a reply came back mangled (bus noise / marginal wiring).
+- `errors` — any other transaction failure (framing, serial layer).
+- `last_error` — the most recent failure string for that address, or `null`.
+- Mean RTT = `rtt_sum_us / ok`; variance = `rtt_sumsq_us / ok − mean²`
+  (clamp to ≥ 0 for float noise) — the panel shows `mean ± σ` and `max` in ms.
+
+### `POST /api/bus-health/probe`
+
+Run one `query_strike` round across every enumerated address purely to exercise
+the link and feed the health counters, then return the same snapshot shape as
+`GET /api/bus-health`. The browser monitor calls this once a second (only while
+idle — it auto-pauses during playback, where live strikes feed the same
+counters) so an intermittent fault keeps showing up even when the ring isn't
+otherwise busy. Locks the ring per-address, so a concurrent strike only ever
+waits behind a single query.
+
+**Request body:** none.
+
+### `POST /api/bus-health/reset`
+
+Zero all health counters and restart the `since_s` clock. Do this right before
+wiggling a connector to get a clean before/after.
+
+**Request body:** none.
+
+**Response (200):** `{"ok": true, "since_s": 0.0, "addresses": {}}`
+
 ### `POST /api/mapping`
 
 Replace the persisted slot→pitch mapping.

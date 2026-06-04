@@ -2,8 +2,11 @@
  * Status LED Indicator on the shared SSI_CSN pin.
  *
  * The external status LED is wired to PB1 — the same pin that the MT6701
- * encoder driver uses for CSn (via an N-FET inversion: PB1=1 turns the
- * FET on, which both asserts CSn at the encoder and lights the LED).
+ * encoder driver uses for CSn.  Lighting the LED and asserting CSn are the
+ * same electrical event, so the LED lights at PB1's CSn *assert* level.  That
+ * level is board-dependent (PB1=1 on the modchip variant, PB1=0 on the
+ * FET-inverting / CSn-active-low variant), so the indicator maps its patterns
+ * through the autodetected polarity (encoder_get_csn_polarity).
  *
  * This module cooperates with encoder_poll().  encoder_poll() owns the pin
  * for the ~15 µs duration of each 24-bit SSI frame and restores PB1 to the
@@ -25,8 +28,9 @@ void indicator_init(void);
  * level that encoder_poll() should restore on frame exit. */
 void indicator_tick(void);
 
-/* Desired PB1 level between SSI frames (0 = off, 1 = on).  Read by
- * encoder_poll() at frame end. */
+/* Desired physical PB1 level between SSI frames (already mapped through the
+ * board's CSn polarity — equals the assert level when the LED should be lit).
+ * Read by encoder_poll() at frame end. */
 uint8_t indicator_get_csn_level(void);
 
 #endif /* INDICATOR_H */

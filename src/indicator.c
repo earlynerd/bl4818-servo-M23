@@ -6,6 +6,13 @@
  *   MOTOR_RUN    — solid on
  *   MOTOR_FAULT  — N blinks then a 1 s pause, where N = fault_code_t value
  *                  (1=overcurrent, 2=hall, 3=encoder, 4=adc)
+ *
+ * The LED lights when PB1 sits at the encoder's CSn *assert* level (the FET
+ * that asserts CSn also drives the LED).  That level differs per board
+ * variant, so every pattern's logical "lit" is mapped to the physical pin
+ * through the autodetected polarity (encoder_get_csn_polarity) rather than a
+ * fixed high — otherwise the indicator reads inverted on CSn-active-low
+ * boards.
  */
 
 #include <stdint.h>
@@ -13,6 +20,7 @@
 #include "m2003_config.h"
 #include "M2003.h"
 #include "motor.h"
+#include "encoder.h"
 
 #define IDLE_PERIOD_TICKS   (INDICATOR_TICK_HZ * 3u / 2u)   /* 1.5 s */
 #define FAULT_BLINK_TICKS   (INDICATOR_TICK_HZ / 5u)        /* 200 ms per blink slot */
@@ -24,6 +32,17 @@ static uint16_t         phase_ticks;
 static motor_state_t    prev_state;
 static fault_code_t     prev_fault;
 
+/* Translate a logical lit/dark intent into the physical PB1 level for the
+ * current board.  "Lit" is the autodetected CSn assert level; "dark" is its
+ * complement (the idle/de-assert level the encoder also parks at between
+ * frames).  On the modchip variant (assert=1) this is the identity map; on
+ * the FET-inverting / CSn-active-low variant (assert=0) it inverts. */
+static uint8_t pin_level_for(uint8_t lit)
+{
+    uint8_t assert_level = encoder_get_csn_polarity();
+    return lit ? assert_level : (uint8_t)(assert_level ^ 1u);
+}
+
 uint8_t indicator_get_csn_level(void)
 {
     return csn_level;
@@ -31,11 +50,14 @@ uint8_t indicator_get_csn_level(void)
 
 void indicator_init(void)
 {
-    csn_level = 0u;
+    /* Park dark (LED off) at the de-assert level for this board's polarity. */
+    uint8_t off_level = pin_level_for(0u);
+
+    csn_level = off_level;
     phase_ticks = 0u;
     prev_state = MOTOR_IDLE;
     prev_fault = FAULT_NONE;
-    PIN_SSI_CSN = 0;
+    PIN_SSI_CSN = off_level;
 }
 
 static uint8_t pattern_idle(uint16_t t)
@@ -98,6 +120,10 @@ void indicator_tick(void)
         break;
     }
 
+    /* Map logical on/off onto the pin so the pattern reads the same on both
+     * board variants; csn_level publishes the physical level for the encoder
+     * to restore on frame exit. */
+    level = pin_level_for(level);
     csn_level = level;
     PIN_SSI_CSN = level;
 

@@ -36,3 +36,11 @@ When a decision is reversed or superseded, append a new entry rather than rewrit
 - **Status:** Completes the deferred item in the 2026-05-28 entry. Does not supersede that decision — the architecture is unchanged; this is the visibility layer on top of it.
 - **Supersedes:** (none — completes deferred work from 2026-05-28).
 - **Affects:** `scripts/ring_midi_server.py` (`Player.residual_stats` / `timing_stats` / `_last_prediction_ms` / `_fold_stat`; `status()` payload includes the new bags); `player/midi_player.html` (`startPlayPolling` / `stopPlayPolling`; `refreshCfgTiming` reads server bags when `S.playing`).
+
+## 2026-06-04 — Status LED polarity tracks autodetected CSn polarity
+
+- **Decision:** The indicator no longer assumes "PB1 high = LED lit". It maps each pattern's logical lit/dark through the autodetected CSn assert level (`encoder_get_csn_polarity()`) via a new `pin_level_for()` helper: lit → assert level, dark → de-assert level. The LED lights and CSn asserts on the same electrical event, so "lit" must follow the same per-board polarity the encoder already learns. `indicator_get_csn_level()` now publishes the *physical* PB1 level (was logical).
+- **Why:** PB1 is shared between SSI CSn and the status LED, and the LED lights at whichever level asserts CSn. The old fixed `PIN_SSI_CSN = level` only matched the modchip variant (assert=1); on FET-inverting / CSn-active-low boards (assert=0) every pattern read inverted. Behavior is byte-identical on assert=1 boards (identity map) and inverted-as-intended on assert=0 boards.
+- **Caveat:** Mapping assumes the LED lights at the *assert* level. Consistent with the symptom (active-low boards read inverted) but unverified on the bench at time of writing — if still inverted on an assert=0 unit, flip the ternary in `pin_level_for()`.
+- **Supersedes:** (initial) — first polarity-aware behavior for the indicator; builds on the existing CSn autodetect (`encoder_autodetect_csn_polarity`).
+- **Affects:** `src/indicator.c` (`pin_level_for`, `indicator_init`, `indicator_tick`), `include/indicator.h` (module doc + `indicator_get_csn_level` contract).

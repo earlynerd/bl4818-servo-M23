@@ -1629,6 +1629,7 @@ async function runArpeggio() {
     slots.push(i);
   }
   if (!slots.length) { showError("No homed, mapped slots"); return; }
+  slots.sort((a, b) => S.mapping[a] - S.mapping[b]);
   const order = slots.concat(slots.slice().reverse());
   const btn = document.getElementById("arpBtn");
   S.arpRunning = true;

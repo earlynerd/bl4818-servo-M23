@@ -1,0 +1,54 @@
+{
+  "_comment": "Copy this to welcome_config.json and edit. Run 'python scripts/ring_welcome.py scan' to discover device hostnames/MACs, then fill in each person's 'match' block. A device matches if ANY listed hostname/mac/ip matches.",
+
+  "ip_range": "192.168.1.0/24",
+  "interval_s": 25,
+  "active_hours": "06:30-19:00",
+  "server": "http://127.0.0.1:8765",
+
+  "people": [
+    {
+      "name": "Sly",
+      "match": {
+        "hostname": ["sly"],
+        "mac": [],
+        "ip": []
+      },
+      "song": {
+        "midi": "songs/sly.mid",
+        "fit": "nearest",
+        "transpose": 0,
+        "min_gap_ms": 150,
+        "max_ms": 8000,
+        "master_current_ma": 900
+      }
+    },
+    {
+      "name": "Ada",
+      "match": {
+        "hostname": ["adas-iphone", "ada-laptop"]
+      },
+      "song": {
+        "builtin": "ascending",
+        "master_current_ma": 850
+      }
+    },
+    {
+      "name": "Grace",
+      "match": {
+        "mac": ["aa:bb:cc:dd:ee:ff"]
+      },
+      "song": {
+        "name": "grace-hopper",
+        "master_current_ma": 950,
+        "vel_floor": 0.5,
+        "events": [
+          { "t_ms": 0,   "pitch": 60, "velocity": 100 },
+          { "t_ms": 200, "pitch": 64, "velocity": 100 },
+          { "t_ms": 400, "pitch": 67, "velocity": 105 },
+          { "t_ms": 600, "pitch": 72, "velocity": 115 }
+        ]
+      }
+    }
+  ]
+}

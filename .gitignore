@@ -26,3 +26,9 @@ __pycache__
 *.lck
 pcb/interface/interface-backups/
 *_autosave*
+
+# ring_welcome.py runtime files: the roster (may hold private MACs) and the
+# per-day "already greeted" state. The example config is committed.
+welcome_config.json
+welcome_state.json
+welcome_state.json.tmp

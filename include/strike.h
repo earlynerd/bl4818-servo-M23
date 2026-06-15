@@ -6,6 +6,11 @@
  *   → COASTING (phases floating through impact) → CATCHING
  *   (position servo captures the rebound back to home) → IDLE
  *
+ * Dead strikes (STRIKE_TYPE_DEAD) insert a MUTING state at impact:
+ *   COASTING → MUTING (velocity-0 brake kills the rebound, then a small
+ *   torque presses the mallet into the surface to damp the note)
+ *   → CATCHING → IDLE
+ *
  * Homing: low duty toward drum until stall → record drum surface →
  *         position servo to home offset above drum.
  */
@@ -20,8 +25,14 @@ typedef enum {
     STRIKE_HOMING   = 1,
     STRIKE_DRIVING  = 2,
     STRIKE_COASTING = 3,
-    STRIKE_CATCHING = 5  /* wire value 4 is left unused to preserve legacy protocol numbering */
+    STRIKE_CATCHING = 5, /* wire value 4 is left unused to preserve legacy protocol numbering */
+    STRIKE_MUTING   = 6  /* dead strike: braking/pressing mallet against the surface */
 } strike_state_t;
+
+typedef enum {
+    STRIKE_TYPE_NORMAL = 0,  /* strike, rebound, catch — let the note ring */
+    STRIKE_TYPE_DEAD   = 1   /* strike, then hold contact to mute the note */
+} strike_type_t;
 
 typedef enum {
     STRIKE_TRIGGER_ACCEPTED = 0,
@@ -30,6 +41,7 @@ typedef enum {
     STRIKE_TRIGGER_REJECT_FAULT,
     STRIKE_TRIGGER_REJECT_ZERO,
     STRIKE_TRIGGER_REJECT_NOT_READY,
+    STRIKE_TRIGGER_REJECT_BAD_TYPE,
 } strike_trigger_result_t;
 
 /* Validity / state flags packed into a uint16. The low byte (0x01..0x80)
@@ -44,6 +56,7 @@ typedef enum {
 #define STRIKE_TIMING_VELOCITY_VALID   0x0040u
 #define STRIKE_TIMING_RETRIGGER_READY_VALID 0x0080u
 #define STRIKE_TIMING_IMPACT_VALID     0x0100u  /* trigger->mallet-stops time */
+#define STRIKE_TIMING_DEAD             0x0200u  /* strike was a dead (muted) strike; rebound fields never valid */
 
 typedef struct {
     uint16_t flags;
@@ -80,6 +93,9 @@ void strike_tick(void);             /* call at STRIKE_LOOP_HZ */
 
 /* Commands */
 strike_trigger_result_t strike_trigger(int32_t current_ma);  /* fire strike with given current magnitude in mA */
+/* fire strike with explicit articulation; mute_ms = total contact dwell for
+ * STRIKE_TYPE_DEAD (0 = STRIKE_MUTE_HOLD_DEFAULT_MS), ignored for NORMAL */
+strike_trigger_result_t strike_trigger_ex(int32_t current_ma, uint8_t type, uint16_t mute_ms);
 void strike_home(void);             /* run homing sequence */
 void strike_cancel(void);           /* abort sequence, return to idle */
 
@@ -87,9 +103,15 @@ void strike_cancel(void);           /* abort sequence, return to idle */
 void strike_set_home_offset(int32_t counts);
 void strike_set_coast_distance(int32_t counts);
 void strike_set_homing_duty(int32_t duty);
+void strike_set_mute_brake_ms(int32_t ms);
+void strike_set_mute_press_ma(int32_t ma);
+void strike_set_mute_engage_offset(int32_t counts);  /* counts before drum surface; negative = past it */
 int32_t strike_get_home_offset(void);
 int32_t strike_get_coast_distance(void);
 int32_t strike_get_homing_duty(void);
+int32_t strike_get_mute_brake_ms(void);
+int32_t strike_get_mute_press_ma(void);
+int32_t strike_get_mute_engage_offset(void);
 void strike_restore_calibration(int32_t drum_position, int32_t home_position);
 void strike_shift_position_reference(int32_t delta);
 

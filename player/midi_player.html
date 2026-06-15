@@ -51,18 +51,42 @@
   .drop-zone:hover, .drop-zone.dragover { border-color: var(--accent); background: rgba(200,150,64,0.05); }
   .drop-zone input { display: none; }
 
-  .library-list { max-height: 260px; overflow-y: auto; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); }
-  .library-item {
-    display: flex; align-items: baseline; gap: 10px; padding: 6px 10px;
+  .library-list { max-height: 320px; overflow-y: auto; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); }
+  .library-item, .folder-item {
+    display: flex; align-items: center; gap: 8px; padding: 6px 10px;
     border-bottom: 1px solid rgba(48,42,36,0.4); cursor: pointer; transition: background 0.1s;
   }
-  .library-item:last-child { border-bottom: none; }
-  .library-item:hover { background: var(--surface-alt); }
+  .library-item:last-child, .folder-item:last-child { border-bottom: none; }
+  .library-item:hover, .folder-item:hover { background: var(--surface-alt); }
   .library-item.active { background: rgba(200,150,64,0.12); }
-  .library-item .name { flex: 1; font-size: 13px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .library-item .name, .folder-item .name { flex: 1; font-size: 13px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .library-item.active .name { color: var(--accent-bright); }
-  .library-item .size { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--text-dim); flex-shrink: 0; }
+  .library-item .size, .folder-item .count { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--text-dim); flex-shrink: 0; }
+  .folder-item .glyph { font-size: 13px; flex-shrink: 0; opacity: 0.8; }
   .library-empty { padding: 14px; text-align: center; font-size: 12px; color: var(--text-dim); font-style: italic; }
+
+  /* Favorite heart + rating stars on each library row */
+  .lib-fav { flex-shrink: 0; font-size: 14px; line-height: 1; cursor: pointer; color: var(--text-dim); transition: color 0.1s, transform 0.1s; }
+  .lib-fav:hover { transform: scale(1.2); }
+  .lib-fav.on { color: var(--error); }
+  .lib-stars { flex-shrink: 0; display: inline-flex; gap: 1px; font-size: 12px; line-height: 1; }
+  .lib-stars .star { cursor: pointer; color: var(--text-dim); transition: color 0.1s; }
+  .lib-stars .star.on { color: var(--accent-bright); }
+  .lib-stars .star:hover { color: var(--accent); }
+
+  /* Library toolbar (search + shuffle/autoplay/fav/sort) */
+  .lib-toolbar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 8px; }
+  .lib-search { flex: 1 1 120px; min-width: 90px; background: var(--surface); border: 1px solid var(--border); border-radius: 4px; padding: 5px 8px; color: var(--text); font-family: 'Crimson Pro', serif; font-size: 13px; }
+  .lib-search::placeholder { color: var(--text-dim); }
+  .lib-sort { background: var(--surface-alt); border: 1px solid var(--border); border-radius: 4px; padding: 4px 6px; color: var(--text-muted); font-family: 'JetBrains Mono', monospace; font-size: 11px; cursor: pointer; }
+  .lib-breadcrumb { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; margin-bottom: 8px; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-dim); }
+  .lib-crumb { cursor: pointer; color: var(--text-muted); padding: 1px 3px; border-radius: 3px; }
+  .lib-crumb:hover { color: var(--accent-bright); }
+  .lib-crumb.here { color: var(--accent); cursor: default; }
+  .lib-crumb-sep { opacity: 0.4; }
+  .skip-btn { background: var(--surface-alt); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 10px 14px; font-size: 15px; cursor: pointer; font-family: 'Crimson Pro', serif; transition: all 0.15s; }
+  .skip-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent-bright); }
+  .skip-btn:disabled { opacity: 0.35; cursor: default; }
 
   .play-btn, .stop-btn {
     border-radius: 6px; padding: 10px 22px; font-size: 15px; cursor: pointer;
@@ -196,6 +220,19 @@
           <button class="pill" id="libraryRefreshBtn" style="padding:3px 8px;font-size:11px">Refresh</button>
         </div>
       </div>
+      <div class="lib-toolbar">
+        <input type="search" class="lib-search" id="librarySearch" placeholder="Search all folders…">
+        <button class="pill" id="libraryShuffleBtn" title="Pick the next track at random from the current view">🔀 Shuffle</button>
+        <button class="pill" id="libraryAutoplayBtn" title="When a track finishes, automatically play the next one">▶▶ Auto</button>
+        <button class="pill" id="libraryFavBtn" title="Show only favorited tracks (across all folders)">★ Favs</button>
+        <select class="lib-sort" id="librarySort" title="Sort the file list">
+          <option value="name">name</option>
+          <option value="rating">rating</option>
+          <option value="recent">recent</option>
+          <option value="plays">plays</option>
+        </select>
+      </div>
+      <div class="lib-breadcrumb" id="libraryBreadcrumb"></div>
       <div class="library-list" id="libraryList"></div>
     </div>
 
@@ -324,7 +361,9 @@
           <p id="pieceInfo" style="margin-top:4px;font-size:12px;color:var(--text-muted);font-family:'JetBrains Mono',monospace"></p>
         </div>
         <div style="display:flex;gap:8px">
+          <button class="skip-btn" id="prevBtn" title="Previous track in the library list" disabled>⏮</button>
           <button class="play-btn" id="playBtn" disabled>▶ Play</button>
+          <button class="skip-btn" id="nextBtn" title="Next track in the library list" disabled>⏭</button>
           <button class="stop-btn" id="stopBtn" style="display:none">■ Stop</button>
         </div>
       </div>
@@ -434,6 +473,7 @@ const STORAGE_KEY_VEL = "robotdrum.velfloor.v1";
 const STORAGE_KEY_FB = "robotdrum.fallback.v1";
 const STORAGE_KEY_KBD = "robotdrum.kbd.v1";
 const STORAGE_KEY_COMP = "robotdrum.comp.v1";
+const STORAGE_KEY_LIB = "robotdrum.library.v1"; // library UI prefs: shuffle/autoplay/sort/favOnly
 // Home row first (most ergonomic for 10-mallet drums), then top row for
 // extra slots. Keys are matched against e.key.toLowerCase().
 const KEYBOARD_KEYS = ["a","s","d","f","g","h","j","k","l",";","'","q","w","e","r","t","y","u","i","o","p"];
@@ -1785,7 +1825,11 @@ async function runArpeggio() {
   }
 }
 
-function stopPlayback() {
+// reason: "user" (manual stop / button toggle / cancel — the default) vs
+// "ended" (the schedule ran to completion). Only "ended" can trigger the
+// library's autoplay-next; a user-initiated stop must never auto-advance.
+function stopPlayback(reason = "user") {
+  const wasPlaying = S.playing;
   // Tell the server to stop dispatching. Fire-and-forget — UI shouldn't
   // wait on the network. If the request never arrives (link gone), the
   // server worker still exits naturally at end-of-schedule.
@@ -1802,6 +1846,11 @@ function stopPlayback() {
   document.getElementById("stopBtn").style.display = "none";
   document.getElementById("progressContainer").style.display = "none";
   const cur = document.getElementById("cursor"); if (cur) cur.style.opacity = "0";
+  // Hand off to the library for autoplay. wasPlaying guards against a second
+  // "ended" call (poll + teardown timer can both fire) re-triggering advance.
+  if (wasPlaying && reason === "ended" && typeof window.libraryOnTrackEnded === "function") {
+    window.libraryOnTrackEnded();
+  }
 }
 
 // While the server is dispatching, the popup's residual / lock_wait /
@@ -1822,7 +1871,7 @@ function startPlayPolling() {
       // attention, drop our UI to idle. The teardown setTimeout in play()
       // will still fire later but stopPlayback is idempotent.
       if (!j.playing && S.playing) {
-        stopPlayback();
+        stopPlayback("ended");
         return;
       }
       if (S.cfgSlot >= 0) refreshCfgTiming();
@@ -1907,11 +1956,13 @@ async function play() {
   document.getElementById("progressContainer").style.display = "block";
   const curEl = document.getElementById("cursor"); if (curEl) curEl.style.opacity = "0.8";
   startPlayPolling();
+  // Count this as a play for the library (if the track came from there).
+  if (typeof window.libraryNotePlayed === "function") window.libraryNotePlayed();
 
   // Final teardown — the server worker has already exited by the time the
   // last note's wall position elapses. This just resets the UI.
   const wallTotal = c.maxMs / scale;
-  S.timeouts.push(setTimeout(stopPlayback, wallTotal + 500));
+  S.timeouts.push(setTimeout(() => stopPlayback("ended"), wallTotal + 500));
 
   (function animate() {
     const elapsed = performance.now() - S.startWall;
@@ -1953,91 +2004,290 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   // ─── Library ────────────────────────────────────────────────
+  // A drill-down browser over the server's --library-dir. The server hands
+  // back a flat, recursive list of files (each with a POSIX-relative `path`
+  // and `dir`) plus a favorites/ratings `meta` map keyed by path; the folder
+  // tree, breadcrumb, and play queue are all derived here from that flat list.
   const libraryPanel = document.getElementById("libraryPanel");
   const libraryList = document.getElementById("libraryList");
   const libraryRefreshBtn = document.getElementById("libraryRefreshBtn");
   const librarySaveBtn = document.getElementById("librarySaveBtn");
-  let librarySelected = null;
+  const librarySearchInput = document.getElementById("librarySearch");
+  const libraryShuffleBtn = document.getElementById("libraryShuffleBtn");
+  const libraryAutoplayBtn = document.getElementById("libraryAutoplayBtn");
+  const libraryFavBtn = document.getElementById("libraryFavBtn");
+  const librarySortSel = document.getElementById("librarySort");
+  const libraryBreadcrumbEl = document.getElementById("libraryBreadcrumb");
+  const prevBtn = document.getElementById("prevBtn");
+  const nextBtn = document.getElementById("nextBtn");
+
   let libraryConfigured = false;
-  let libraryNames = new Set();
+  let libraryFiles = [];          // [{path, name, dir, size, mtime}, ...]
+  let libraryMeta = {};           // {path: {favorite, rating, play_count, last_played}}
+  let libraryCwd = "";            // current folder (POSIX-relative; "" = root)
+  let librarySearchStr = "";
+  let libraryFavOnly = false;
+  let librarySortVal = "name";    // name | rating | recent | plays
+  let shuffle = false;
+  let autoplay = false;
+  let librarySelectedPath = null; // path of the currently loaded library track
+  let libraryView = [];           // ordered file paths currently shown = play queue
 
   function formatSize(bytes) {
     if (bytes < 1024) return bytes + " B";
     if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
     return (bytes / 1024 / 1024).toFixed(1) + " MB";
   }
-
-  function renderLibrary(files) {
-    libraryList.innerHTML = "";
-    libraryNames = new Set(files.map(f => f.name));
-    if (!files.length) {
-      const empty = document.createElement("div");
-      empty.className = "library-empty";
-      empty.textContent = "No .mid files in library folder.";
-      libraryList.appendChild(empty);
-      return;
-    }
-    for (const f of files) {
-      const row = document.createElement("div");
-      row.className = "library-item";
-      if (f.name === librarySelected) row.classList.add("active");
-      row.innerHTML = `<span class="name"></span><span class="size"></span>`;
-      row.querySelector(".name").textContent = f.name;
-      row.querySelector(".size").textContent = formatSize(f.size);
-      row.addEventListener("click", () => loadFromLibrary(f.name));
-      libraryList.appendChild(row);
-    }
+  function metaFor(path) { return libraryMeta[path] || {}; }
+  function byName(a, b) {
+    return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
+  }
+  // Build the request URL for a (possibly nested) library path. Encode each
+  // segment but keep the slashes real, so the server sees ordinary path parts
+  // rather than an %2F-laden single component.
+  function libUrl(path) {
+    return "/api/library/" + path.split("/").map(encodeURIComponent).join("/");
   }
 
-  async function loadFromLibrary(name) {
+  // ── UI prefs persistence (shuffle/autoplay/sort/fav filter) ──
+  function loadLibPrefs() {
+    try {
+      const o = JSON.parse(localStorage.getItem(STORAGE_KEY_LIB) || "{}");
+      if (o && typeof o === "object") {
+        shuffle = !!o.shuffle;
+        autoplay = !!o.autoplay;
+        libraryFavOnly = !!o.favOnly;
+        if (typeof o.sort === "string") librarySortVal = o.sort;
+      }
+    } catch {}
+  }
+  function saveLibPrefs() {
+    localStorage.setItem(STORAGE_KEY_LIB, JSON.stringify({
+      shuffle, autoplay, favOnly: libraryFavOnly, sort: librarySortVal,
+    }));
+  }
+
+  // ── Deriving the view from the flat file list ──
+  // Whether we're in flat mode (search text or favorites-only) — in flat mode
+  // folders/breadcrumb are hidden and matches span every subfolder.
+  function isFlatMode() { return !!librarySearchStr.trim() || libraryFavOnly; }
+
+  function sortFiles(files) {
+    const arr = files.slice();
+    switch (librarySortVal) {
+      case "rating": arr.sort((a, b) => (metaFor(b.path).rating || 0) - (metaFor(a.path).rating || 0) || byName(a, b)); break;
+      case "recent": arr.sort((a, b) => (metaFor(b.path).last_played || 0) - (metaFor(a.path).last_played || 0) || byName(a, b)); break;
+      case "plays":  arr.sort((a, b) => (metaFor(b.path).play_count || 0) - (metaFor(a.path).play_count || 0) || byName(a, b)); break;
+      default:       arr.sort(byName);
+    }
+    return arr;
+  }
+
+  function visibleFiles() {
+    let files;
+    if (isFlatMode()) {
+      const q = librarySearchStr.trim().toLowerCase();
+      files = libraryFiles.filter(f => {
+        if (libraryFavOnly && !metaFor(f.path).favorite) return false;
+        if (q && !f.path.toLowerCase().includes(q)) return false;
+        return true;
+      });
+    } else {
+      files = libraryFiles.filter(f => f.dir === libraryCwd);
+    }
+    return sortFiles(files);
+  }
+
+  // Immediate subfolders of `cwd`, with a recursive file count for each.
+  function childFolders(cwd) {
+    const prefix = cwd ? cwd + "/" : "";
+    const counts = new Map();
+    for (const f of libraryFiles) {
+      const d = f.dir;
+      if (!d) continue;
+      let rest;
+      if (cwd) {
+        if (d !== cwd && !d.startsWith(prefix)) continue;
+        rest = d === cwd ? "" : d.slice(prefix.length);
+      } else {
+        rest = d;
+      }
+      if (!rest) continue; // file lives directly in cwd, not a subfolder
+      const child = rest.split("/")[0];
+      if (!child) continue;
+      counts.set(child, (counts.get(child) || 0) + 1);
+    }
+    return [...counts.entries()]
+      .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true, sensitivity: "base" }))
+      .map(([name, count]) => ({ name, count, path: prefix + name }));
+  }
+
+  // ── Rendering ──
+  function renderToolbarState() {
+    libraryShuffleBtn.classList.toggle("active", shuffle);
+    libraryAutoplayBtn.classList.toggle("active", autoplay);
+    libraryFavBtn.classList.toggle("active", libraryFavOnly);
+  }
+
+  function renderBreadcrumb() {
+    libraryBreadcrumbEl.innerHTML = "";
+    if (isFlatMode()) { libraryBreadcrumbEl.style.display = "none"; return; }
+    libraryBreadcrumbEl.style.display = "flex";
+    const segs = libraryCwd ? libraryCwd.split("/") : [];
+    const home = document.createElement("span");
+    home.className = "lib-crumb" + (segs.length === 0 ? " here" : "");
+    home.textContent = "🎵 Home";
+    if (segs.length) home.addEventListener("click", () => { libraryCwd = ""; renderLibrary(); });
+    libraryBreadcrumbEl.appendChild(home);
+    let acc = "";
+    segs.forEach((seg, i) => {
+      const sep = document.createElement("span");
+      sep.className = "lib-crumb-sep"; sep.textContent = "/";
+      libraryBreadcrumbEl.appendChild(sep);
+      acc = acc ? acc + "/" + seg : seg;
+      const isLast = i === segs.length - 1;
+      const crumb = document.createElement("span");
+      crumb.className = "lib-crumb" + (isLast ? " here" : "");
+      crumb.textContent = seg;
+      if (!isLast) { const target = acc; crumb.addEventListener("click", () => { libraryCwd = target; renderLibrary(); }); }
+      libraryBreadcrumbEl.appendChild(crumb);
+    });
+  }
+
+  function buildFileRow(f, flat) {
+    const m = metaFor(f.path);
+    const row = document.createElement("div");
+    row.className = "library-item";
+    if (f.path === librarySelectedPath) row.classList.add("active");
+    row.title = f.path;
+
+    const fav = document.createElement("span");
+    fav.className = "lib-fav" + (m.favorite ? " on" : "");
+    fav.textContent = m.favorite ? "♥" : "♡";
+    fav.title = m.favorite ? "Unfavorite" : "Favorite";
+    fav.addEventListener("click", (e) => {
+      e.stopPropagation();
+      setMeta(f.path, { favorite: !metaFor(f.path).favorite });
+    });
+    row.appendChild(fav);
+
+    const name = document.createElement("span");
+    name.className = "name";
+    // In flat mode show the folder for context; in folder mode just the name.
+    name.textContent = (flat && f.dir) ? (f.dir + "/" + f.name) : f.name;
+    row.appendChild(name);
+
+    const stars = document.createElement("span");
+    stars.className = "lib-stars";
+    const rating = m.rating || 0;
+    for (let i = 1; i <= 5; i++) {
+      const s = document.createElement("span");
+      s.className = "star" + (i <= rating ? " on" : "");
+      s.textContent = "★";
+      s.title = `Rate ${i}★`;
+      s.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const cur = metaFor(f.path).rating || 0;
+        setMeta(f.path, { rating: cur === i ? 0 : i }); // re-click the current rating clears it
+      });
+      stars.appendChild(s);
+    }
+    row.appendChild(stars);
+
+    const size = document.createElement("span");
+    size.className = "size";
+    size.textContent = formatSize(f.size);
+    row.appendChild(size);
+
+    row.addEventListener("click", () => loadFromLibrary(f.path));
+    return row;
+  }
+
+  function renderLibrary() {
+    renderToolbarState();
+    renderBreadcrumb();
+    libraryList.innerHTML = "";
+    const flat = isFlatMode();
+    const folders = flat ? [] : childFolders(libraryCwd);
+    const files = visibleFiles();
+    libraryView = files.map(f => f.path);
+
+    for (const fld of folders) {
+      const row = document.createElement("div");
+      row.className = "folder-item";
+      row.innerHTML = `<span class="glyph">📁</span><span class="name"></span><span class="count"></span>`;
+      row.querySelector(".name").textContent = fld.name;
+      row.querySelector(".count").textContent = fld.count;
+      row.addEventListener("click", () => { libraryCwd = fld.path; renderLibrary(); });
+      libraryList.appendChild(row);
+    }
+
+    if (!folders.length && !files.length) {
+      const empty = document.createElement("div");
+      empty.className = "library-empty";
+      empty.textContent = flat ? "No matches." : "No MIDI files here.";
+      libraryList.appendChild(empty);
+    } else {
+      for (const f of files) libraryList.appendChild(buildFileRow(f, flat));
+    }
+    updateSkipButtons();
+  }
+
+  // ── Favorites / ratings writes ──
+  // Optimistic local update + re-render, then persist; the server echoes the
+  // authoritative entry back (e.g. an incremented play_count) which we adopt.
+  async function setMeta(path, patch) {
+    const next = { ...(libraryMeta[path] || {}) };
+    if ("favorite" in patch) next.favorite = !!patch.favorite;
+    if ("rating" in patch) next.rating = Math.max(0, Math.min(5, patch.rating | 0));
+    if (patch.bump_play) {
+      next.play_count = (next.play_count || 0) + 1;
+      next.last_played = Date.now() / 1000;
+    }
+    libraryMeta[path] = next;
+    renderLibrary();
+    try {
+      const r = await fetch("/api/library-meta", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path, ...patch }),
+      });
+      if (r.ok) {
+        const j = await r.json();
+        if (j && j.entry) { libraryMeta[path] = j.entry; renderLibrary(); }
+      }
+    } catch {}
+  }
+
+  // ── Loading / saving ──
+  async function loadFromLibrary(path) {
     hideMessages();
     try {
-      const r = await fetch("/api/library/" + encodeURIComponent(name));
+      const r = await fetch(libUrl(path));
       if (!r.ok) {
         const err = await r.json().catch(() => ({ error: r.statusText }));
         throw new Error(err.error || ("HTTP " + r.status));
       }
       const buf = await r.arrayBuffer();
-      librarySelected = name;
-      for (const row of libraryList.querySelectorAll(".library-item")) {
-        row.classList.toggle("active", row.querySelector(".name")?.textContent === name);
-      }
-      loadFromMIDI(buf, name);
+      librarySelectedPath = path;
+      loadFromMIDI(buf, path.split("/").pop());
       // loadFromMIDI sets loadedFromLibrary=false by default; mark it after
       // so "Save current" knows this came from the library already.
       S.loadedFromLibrary = true;
       updateSaveToLibraryBtn();
+      renderLibrary(); // refresh the active-row highlight
+      return true;
     } catch (e) {
       showError("Library load error: " + e.message);
-    }
-  }
-
-  async function refreshLibrary() {
-    try {
-      const r = await fetch("/api/library");
-      if (!r.ok) throw new Error("HTTP " + r.status);
-      const data = await r.json();
-      libraryConfigured = !!data.configured;
-      if (!libraryConfigured) {
-        libraryPanel.style.display = "none";
-        updateSaveToLibraryBtn();
-        return;
-      }
-      libraryPanel.style.display = "";
-      renderLibrary(data.files || []);
-      updateSaveToLibraryBtn();
-    } catch (e) {
-      // Silent: the panel just stays hidden if the bridge can't be reached.
-      libraryConfigured = false;
-      libraryPanel.style.display = "none";
-      updateSaveToLibraryBtn();
+      return false;
     }
   }
 
   async function saveCurrentToLibrary() {
     if (!S.loadedMidiBuf || !S.loadedMidiName) return;
-    const name = S.loadedMidiName;
-    const url = "/api/library/" + encodeURIComponent(name);
+    // Save into the folder currently being browsed.
+    const relPath = (libraryCwd ? libraryCwd + "/" : "") + S.loadedMidiName;
+    const url = libUrl(relPath);
     hideMessages();
     librarySaveBtn.disabled = true;
     try {
@@ -2047,7 +2297,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         body: S.loadedMidiBuf,
       });
       if (r.status === 409) {
-        if (!confirm(`"${name}" already exists in the library. Overwrite?`)) {
+        if (!confirm(`"${relPath}" already exists in the library. Overwrite?`)) {
           return;
         }
         r = await fetch(url + "?overwrite=1", {
@@ -2062,13 +2312,43 @@ document.addEventListener("DOMContentLoaded", async () => {
       }
       const data = await r.json();
       S.loadedFromLibrary = true;
-      librarySelected = name;
-      showSuccess(`Saved "${name}" to library${data.overwritten ? " (overwritten)" : ""}.`);
+      librarySelectedPath = relPath;
+      showSuccess(`Saved "${relPath}" to library${data.overwritten ? " (overwritten)" : ""}.`);
       await refreshLibrary();
     } catch (e) {
       showError("Library save error: " + e.message);
     } finally {
       updateSaveToLibraryBtn();
+    }
+  }
+
+  async function refreshLibrary() {
+    try {
+      const r = await fetch("/api/library");
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      const data = await r.json();
+      libraryConfigured = !!data.configured;
+      if (!libraryConfigured) {
+        libraryPanel.style.display = "none";
+        updateSaveToLibraryBtn();
+        updateSkipButtons();
+        return;
+      }
+      libraryFiles = Array.isArray(data.files) ? data.files : [];
+      libraryMeta = (data.meta && typeof data.meta === "object") ? data.meta : {};
+      // If the folder we were in vanished (file deleted/renamed), drop to root.
+      if (libraryCwd && !libraryFiles.some(f => f.dir === libraryCwd || f.dir.startsWith(libraryCwd + "/"))) {
+        libraryCwd = "";
+      }
+      libraryPanel.style.display = "";
+      renderLibrary();
+      updateSaveToLibraryBtn();
+    } catch (e) {
+      // Silent: the panel just stays hidden if the bridge can't be reached.
+      libraryConfigured = false;
+      libraryPanel.style.display = "none";
+      updateSaveToLibraryBtn();
+      updateSkipButtons();
     }
   }
 
@@ -2083,12 +2363,79 @@ document.addEventListener("DOMContentLoaded", async () => {
     } else if (!libraryConfigured) {
       librarySaveBtn.title = "Library not configured";
     } else {
-      librarySaveBtn.title = `Copy "${S.loadedMidiName}" into the library folder`;
+      const where = libraryCwd ? `library/${libraryCwd}` : "the library folder";
+      librarySaveBtn.title = `Copy "${S.loadedMidiName}" into ${where}`;
     }
   };
 
+  // ── Shuffle / next / prev (the play queue is the current view) ──
+  // Deliberate silence inserted between one track ending/stopping and the next
+  // one starting. Doubles as the server-teardown safety margin (must comfortably
+  // exceed the time for a /api/stop to land before the next /api/play), so this
+  // is the single source of truth for "how long the gap between songs feels."
+  // Bump it up for a longer jukebox-style pause; drop it toward ~200 for snappy.
+  const INTER_SONG_GAP_MS = 700;
+  function updateSkipButtons() {
+    const has = libraryConfigured && libraryView.length > 0;
+    if (prevBtn) prevBtn.disabled = !has;
+    if (nextBtn) nextBtn.disabled = !has;
+  }
+  function pickIndex(curIdx, dir) {
+    const n = libraryView.length;
+    if (n === 0) return -1;
+    if (shuffle) {
+      if (n === 1) return 0;
+      let r;
+      do { r = Math.floor(Math.random() * n); } while (r === curIdx);
+      return r;
+    }
+    if (curIdx < 0) return dir > 0 ? 0 : n - 1;
+    return (curIdx + dir + n) % n; // wrap — jukebox "repeat all"
+  }
+  async function gotoTrack(path) {
+    const wasPlaying = S.playing;
+    if (wasPlaying) stopPlayback("user");
+    const ok = await loadFromLibrary(path);
+    if (!ok || !S.composition) return;
+    // Interrupting a playing track: pause for a deliberate beat of silence
+    // before the next one starts (also lets the just-issued stop land on the
+    // server before the next /api/play). Starting from stopped plays at once.
+    if (wasPlaying) setTimeout(play, INTER_SONG_GAP_MS); else play();
+  }
+  function skip(dir) {
+    if (!libraryView.length) return;
+    const curIdx = librarySelectedPath ? libraryView.indexOf(librarySelectedPath) : -1;
+    const idx = pickIndex(curIdx, dir);
+    if (idx >= 0) gotoTrack(libraryView[idx]);
+  }
+  window.libraryPlayNext = () => skip(1);
+  window.libraryPlayPrev = () => skip(-1);
+  // Called by stopPlayback() only when a track finished on its own.
+  window.libraryOnTrackEnded = function() {
+    if (!autoplay || !librarySelectedPath) return;
+    // Same deliberate gap as a manual skip so autoplay transitions feel
+    // identical (and the finished worker tears down before the next /api/play).
+    setTimeout(() => skip(1), INTER_SONG_GAP_MS);
+  };
+  // Called by play() on a successful start so play counts track real plays
+  // (not mere previews/clicks). Only library-sourced tracks count.
+  window.libraryNotePlayed = function() {
+    if (S.loadedFromLibrary && librarySelectedPath) setMeta(librarySelectedPath, { bump_play: true });
+  };
+
+  // ── Wiring ──
+  loadLibPrefs();
+  librarySortSel.value = librarySortVal;
+  librarySearchInput.addEventListener("input", () => { librarySearchStr = librarySearchInput.value; renderLibrary(); });
+  libraryShuffleBtn.addEventListener("click", () => { shuffle = !shuffle; saveLibPrefs(); renderToolbarState(); });
+  libraryAutoplayBtn.addEventListener("click", () => { autoplay = !autoplay; saveLibPrefs(); renderToolbarState(); });
+  libraryFavBtn.addEventListener("click", () => { libraryFavOnly = !libraryFavOnly; saveLibPrefs(); renderLibrary(); });
+  librarySortSel.addEventListener("change", () => { librarySortVal = librarySortSel.value; saveLibPrefs(); renderLibrary(); });
   libraryRefreshBtn.addEventListener("click", refreshLibrary);
   librarySaveBtn.addEventListener("click", saveCurrentToLibrary);
+  if (prevBtn) prevBtn.addEventListener("click", () => window.libraryPlayPrev());
+  if (nextBtn) nextBtn.addEventListener("click", () => window.libraryPlayNext());
+  renderToolbarState();
   refreshLibrary();
   updateSaveToLibraryBtn();
 

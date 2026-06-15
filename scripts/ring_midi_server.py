@@ -24,10 +24,16 @@ GET  /api/play                -> {"playing", "id", "scheduled", "cursor", "durat
                                  Anything stashed in metadata at play-time (name,
                                  master_current_ma, vel_floor, schedule_master_ma) is
                                  spread into the response.
-GET  /api/library             -> {"configured": bool, "files": [{"name", "size"}, ...]}
-GET  /api/library/<name>      -> raw .mid bytes from the configured --library-dir
-POST /api/library/<name>      -> writes raw .mid bytes to --library-dir; 409 on
-                                 collision unless ?overwrite=1
+GET  /api/library             -> {"configured": bool,
+                                 "files": [{"path","name","dir","size","mtime"}, ...],
+                                 "meta": {<path>: {favorite,rating,play_count,last_played}}}
+                                 Recurses into subfolders; "path"/"dir" are POSIX-relative.
+GET  /api/library/<path>      -> raw .mid bytes from --library-dir (subpaths allowed)
+POST /api/library/<path>      -> writes raw .mid bytes to --library-dir (creates parent
+                                 dirs); 409 on collision unless ?overwrite=1
+GET  /api/library-meta        -> {"meta": {<path>: {...}}}; favorites/ratings store
+POST /api/library-meta        -> {"path", "favorite"?, "rating"?, "bump_play"?}; merges
+                                 into <library-dir>/.midi_library.json
 POST /api/enumerate           -> re-enumerate; returns same shape as /api/status
 POST /api/home                -> {"addresses": [int]?}; homes them, returns ok/error
 POST /api/strike              -> {"address": int, "current_ma": int}; ACK + last-strike timing
@@ -74,7 +80,7 @@ import time
 import traceback
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import unquote, urlparse
 
 from ring_bus import (
@@ -988,9 +994,15 @@ class Player:
 class Handler(BaseHTTPRequestHandler):
     bridge: Bridge | None = None
     # Optional on-disk MIDI library. When set by --library-dir, /api/library
-    # lists .mid/.midi files in this folder (flat, no recursion) and
-    # /api/library/<name> serves the raw bytes.
+    # lists .mid/.midi files in this folder (recursing into subfolders) and
+    # /api/library/<path> serves the raw bytes.
     library_dir: Path | None = None
+    # Favorites / ratings store. Lives inside the library folder so it travels
+    # with the library and there's one per collection. Keyed by POSIX-relative
+    # path; entries are {favorite, rating, play_count, last_played}. Guarded by
+    # _meta_lock because ThreadingHTTPServer can serve concurrent requests.
+    LIBRARY_META_NAME = ".midi_library.json"
+    _meta_lock = threading.Lock()
     # Defaults used by /api/play when the request is pitch-style and doesn't
     # carry its own master_current_ma / vel_floor. Set from the
     # --motif-current-ma / --motif-vel-floor CLI flags in main().
@@ -1000,6 +1012,57 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         # Quieter than the default per-request stderr spam.
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
+
+    # ---- library helpers -------------------------------------------------
+
+    @staticmethod
+    def _resolve_library_path(name: str) -> Path | None:
+        """Map a request path component to a file inside library_dir, or None
+        if it's invalid or tries to escape the library. Accepts forward-slash
+        subpaths (e.g. 'ballads/clair.mid'); rejects absolute paths and any
+        '..' component. The resolved relative_to() check is the authoritative
+        escape guard."""
+        lib = Handler.library_dir
+        if lib is None or not name:
+            return None
+        rel = PurePosixPath(name)
+        if rel.is_absolute() or any(part == ".." for part in rel.parts):
+            return None
+        target = (lib / Path(*rel.parts)).resolve()
+        try:
+            target.relative_to(lib.resolve())
+        except ValueError:
+            return None
+        return target
+
+    @staticmethod
+    def _library_meta_path() -> Path | None:
+        lib = Handler.library_dir
+        return (lib / Handler.LIBRARY_META_NAME) if lib is not None else None
+
+    @staticmethod
+    def load_library_meta() -> dict:
+        """Return the favorites/ratings map, or {} if there's no file yet or it
+        can't be read. Tolerant by design — a corrupt file shouldn't take down
+        the listing."""
+        p = Handler._library_meta_path()
+        if p is None:
+            return {}
+        try:
+            obj = json.loads(p.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return {}
+        return obj if isinstance(obj, dict) else {}
+
+    @staticmethod
+    def save_library_meta(meta: dict) -> None:
+        """Atomically write the favorites/ratings map back into the library."""
+        p = Handler._library_meta_path()
+        if p is None:
+            return
+        tmp = p.with_suffix(p.suffix + ".tmp")
+        tmp.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+        tmp.replace(p)
 
     # ---- helpers ---------------------------------------------------------
 
@@ -1125,41 +1188,53 @@ class Handler(BaseHTTPRequestHandler):
                     self._json(200, {"configured": False, "files": []})
                     return
                 files = []
-                for p in sorted(lib.iterdir(), key=lambda x: x.name.lower()):
-                    if p.is_file() and p.suffix.lower() in (".mid", ".midi"):
-                        try:
-                            size = p.stat().st_size
-                        except OSError:
-                            continue
-                        files.append({"name": p.name, "size": size})
-                self._json(200, {"configured": True, "files": files})
+                # Recurse into subfolders. Skip dot-files/dot-dirs so the
+                # metadata file (and any hidden cruft) stays out of the list.
+                for p in sorted(lib.rglob("*"), key=lambda x: x.as_posix().lower()):
+                    if not p.is_file():
+                        continue
+                    if p.suffix.lower() not in (".mid", ".midi"):
+                        continue
+                    rel = p.relative_to(lib)
+                    if any(part.startswith(".") for part in rel.parts):
+                        continue
+                    try:
+                        st = p.stat()
+                    except OSError:
+                        continue
+                    rel_dir = rel.parent.as_posix()
+                    if rel_dir == ".":
+                        rel_dir = ""
+                    files.append({
+                        "path": rel.as_posix(),
+                        "name": p.name,
+                        "dir": rel_dir,
+                        "size": st.st_size,
+                        "mtime": st.st_mtime,
+                    })
+                self._json(200, {"configured": True, "files": files,
+                                 "meta": Handler.load_library_meta()})
             except Exception as exc:
                 traceback.print_exc()
                 self._json(500, {"error": str(exc)})
             return
 
+        if self.path == "/api/library-meta":
+            self._json(200, {"meta": Handler.load_library_meta()})
+            return
+
         if self.path.startswith("/api/library/"):
             try:
-                lib = Handler.library_dir
-                if lib is None:
+                if Handler.library_dir is None:
                     self._json(404, {"error": "No library configured"})
                     return
                 name = unquote(urlparse(self.path).path[len("/api/library/"):])
-                # Reject anything that tries to escape the library dir.
-                # Path.name strips directory parts; comparing to the raw
-                # request catches "../foo" and "sub/foo" before we touch
-                # the filesystem.
-                if not name or name != Path(name).name:
-                    self._json(400, {"error": "Invalid filename"})
-                    return
-                if Path(name).suffix.lower() not in (".mid", ".midi"):
-                    self._json(400, {"error": "Not a MIDI file"})
-                    return
-                target = (lib / name).resolve()
-                try:
-                    target.relative_to(lib.resolve())
-                except ValueError:
+                target = Handler._resolve_library_path(name)
+                if target is None:
                     self._json(400, {"error": "Invalid path"})
+                    return
+                if target.suffix.lower() not in (".mid", ".midi"):
+                    self._json(400, {"error": "Not a MIDI file"})
                     return
                 if not target.is_file():
                     self._json(404, {"error": "Not found"})
@@ -1377,27 +1452,51 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, {"results": results})
                 return
 
+            if self.path == "/api/library-meta":
+                if Handler.library_dir is None:
+                    self._json(404, {"error": "No library configured"})
+                    return
+                data = self._read_json()
+                path = str(data.get("path", ""))
+                # Only key metadata on paths that resolve to a real library
+                # file, so we don't accumulate junk entries.
+                target = Handler._resolve_library_path(path)
+                if target is None or not target.is_file():
+                    self._json(400, {"error": "Unknown library path"})
+                    return
+                # Normalize the key to the same POSIX-relative form the listing
+                # uses, regardless of how the client spelled it.
+                key = target.relative_to(Handler.library_dir.resolve()).as_posix()
+                with Handler._meta_lock:
+                    meta = Handler.load_library_meta()
+                    entry = dict(meta.get(key) or {})
+                    if "favorite" in data:
+                        entry["favorite"] = bool(data["favorite"])
+                    if "rating" in data:
+                        entry["rating"] = max(0, min(5, int(data["rating"])))
+                    if data.get("bump_play"):
+                        entry["play_count"] = int(entry.get("play_count", 0)) + 1
+                        entry["last_played"] = time.time()
+                    meta[key] = entry
+                    Handler.save_library_meta(meta)
+                self._json(200, {"ok": True, "path": key, "entry": entry})
+                return
+
             if self.path.startswith("/api/library/"):
                 from urllib.parse import parse_qs
-                lib = Handler.library_dir
-                if lib is None:
+                if Handler.library_dir is None:
                     self._json(404, {"error": "No library configured"})
                     return
                 parsed = urlparse(self.path)
                 name = unquote(parsed.path[len("/api/library/"):])
                 qs = parse_qs(parsed.query)
                 overwrite = (qs.get("overwrite", [""])[0] or "").lower() in ("1", "true", "yes")
-                if not name or name != Path(name).name:
-                    self._json(400, {"error": "Invalid filename"})
-                    return
-                if Path(name).suffix.lower() not in (".mid", ".midi"):
-                    self._json(400, {"error": "Not a MIDI file"})
-                    return
-                target = (lib / name).resolve()
-                try:
-                    target.relative_to(lib.resolve())
-                except ValueError:
+                target = Handler._resolve_library_path(name)
+                if target is None:
                     self._json(400, {"error": "Invalid path"})
+                    return
+                if target.suffix.lower() not in (".mid", ".midi"):
+                    self._json(400, {"error": "Not a MIDI file"})
                     return
                 existed = target.exists()
                 if existed and not overwrite:
@@ -1419,6 +1518,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not body.startswith(b"MThd"):
                     self._json(400, {"error": "Not a MIDI file (missing MThd header)"})
                     return
+                # Saving into a subfolder is allowed; create it if needed.
+                target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(body)
                 self._json(201, {"ok": True, "name": name, "size": len(body),
                                  "overwritten": existed})
@@ -1446,7 +1547,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--trace", action="store_true", help="Print raw ring TX/RX frames")
     ap.add_argument("--library-dir", default=None,
                     help="Folder of .mid/.midi files exposed at /api/library. "
-                         "Flat listing only — no recursion.")
+                         "Recurses into subfolders. Favorites/ratings are stored "
+                         "alongside them in .midi_library.json.")
     ap.add_argument("--motif-current-ma", type=int, default=800,
                     help="Default master current for pitch-style /api/play requests "
                          "(default: 800). The request body can override per call. "

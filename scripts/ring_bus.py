@@ -60,6 +60,7 @@ SUBCMD_QUERY_TIMING  = 0x16
 SUBCMD_DETECT_CSN_POLARITY = 0x17
 SUBCMD_SET_CSN_POLARITY    = 0x18
 SUBCMD_QUERY_STRIKE_TIMING = 0x19
+SUBCMD_STRIKE_EX     = 0x1A
 SUBCMD_MASK            = 0x3F
 SUBCMD_REPLY_FULL      = 0x00
 SUBCMD_REPLY_ACK       = 0x40
@@ -85,6 +86,14 @@ ACK_RESULT_PERSIST_FAILED   = 0x07
 STRIKE_PARAM_HOME_OFFSET    = 0x01
 STRIKE_PARAM_COAST_DISTANCE = 0x02
 STRIKE_PARAM_HOMING_DUTY    = 0x03
+STRIKE_PARAM_MUTE_BRAKE_MS  = 0x04
+STRIKE_PARAM_MUTE_PRESS_MA  = 0x05
+STRIKE_PARAM_MUTE_ENGAGE_OFFSET = 0x06
+
+# ── Strike articulation types (STRIKE_EX) ──────────────────────────────────
+
+STRIKE_TYPE_NORMAL = 0
+STRIKE_TYPE_DEAD   = 1
 
 STRIKE_TIMING_COAST_VALID     = 0x0001
 STRIKE_TIMING_REBOUND_VALID   = 0x0002
@@ -95,6 +104,7 @@ STRIKE_TIMING_REBOUND_TIMEOUT = 0x0020
 STRIKE_TIMING_VELOCITY_VALID  = 0x0040
 STRIKE_TIMING_RETRIGGER_READY_VALID = 0x0080
 STRIKE_TIMING_IMPACT_VALID    = 0x0100
+STRIKE_TIMING_DEAD            = 0x0200
 
 # ── Timing defaults ─────────────────────────────────────────────────────────
 
@@ -124,7 +134,7 @@ def crc16_ccitt(data: bytes, init: int = 0xFFFF) -> int:
 MOTOR_STATES  = {0: "IDLE", 1: "RUN", 2: "FAULT"}
 FAULT_CODES   = {0: "NONE", 1: "OVERCURRENT", 2: "HALL_INVALID"}
 CTRL_MODES    = {0: "DUTY", 1: "VELOCITY", 2: "POSITION", 3: "TORQUE"}
-STRIKE_STATES = {0: "IDLE", 1: "HOMING", 2: "DRIVING", 3: "COASTING", 4: "LEGACY_RETURNING", 5: "CATCHING"}
+STRIKE_STATES = {0: "IDLE", 1: "HOMING", 2: "DRIVING", 3: "COASTING", 4: "LEGACY_RETURNING", 5: "CATCHING", 6: "MUTING"}
 SUBCMD_NAMES  = {
     SUBCMD_SET_DUTY: "SET_DUTY",
     SUBCMD_SET_TORQUE: "SET_TORQUE",
@@ -151,6 +161,7 @@ SUBCMD_NAMES  = {
     SUBCMD_DETECT_CSN_POLARITY: "DETECT_CSN_POLARITY",
     SUBCMD_SET_CSN_POLARITY: "SET_CSN_POLARITY",
     SUBCMD_QUERY_STRIKE_TIMING: "QUERY_STRIKE_TIMING",
+    SUBCMD_STRIKE_EX: "STRIKE_EX",
 }
 ACK_RESULT_NAMES = {
     ACK_RESULT_OK: "OK",
@@ -939,6 +950,23 @@ class RingClientV2:
     def strike(self, address: int, current_ma: int, reply_mode: str = REPLY_MODE_FULL) -> AddressedReply:
         return self._addressed_command(address, SUBCMD_STRIKE, struct.pack(">h", current_ma), reply_mode)
 
+    def strike_ex(
+        self,
+        address: int,
+        current_ma: int,
+        strike_type: int = STRIKE_TYPE_NORMAL,
+        type_param: int = 0,
+        reply_mode: str = REPLY_MODE_FULL,
+    ) -> AddressedReply:
+        """Strike with explicit articulation. For STRIKE_TYPE_DEAD, type_param
+        is the total mute dwell in ms (0 = firmware default)."""
+        return self._addressed_command(
+            address,
+            SUBCMD_STRIKE_EX,
+            bytes([strike_type & 0xFF]) + struct.pack(">hH", current_ma, type_param),
+            reply_mode,
+        )
+
     def strike_home(self, address: int, reply_mode: str = REPLY_MODE_FULL) -> AddressedReply:
         return self._addressed_command(address, SUBCMD_STRIKE_HOME, reply_mode=reply_mode)
 
@@ -1418,9 +1446,13 @@ __all__ = [
     "STRIKE_PARAM_COAST_DISTANCE",
     "STRIKE_PARAM_HOME_OFFSET",
     "STRIKE_PARAM_HOMING_DUTY",
+    "STRIKE_PARAM_MUTE_BRAKE_MS",
+    "STRIKE_PARAM_MUTE_ENGAGE_OFFSET",
+    "STRIKE_PARAM_MUTE_PRESS_MA",
     "STRIKE_STATES",
     "STRIKE_TIMING_ACTIVE",
     "STRIKE_TIMING_COAST_VALID",
+    "STRIKE_TIMING_DEAD",
     "STRIKE_TIMING_IMPACT_VALID",
     "STRIKE_TIMING_REBOUND_TIMEOUT",
     "STRIKE_TIMING_REBOUND_VALID",
@@ -1457,8 +1489,11 @@ __all__ = [
     "SUBCMD_STOP",
     "SUBCMD_STRIKE",
     "SUBCMD_STRIKE_CANCEL",
+    "SUBCMD_STRIKE_EX",
     "SUBCMD_STRIKE_HOME",
     "SUBCMD_ZERO_POS",
+    "STRIKE_TYPE_DEAD",
+    "STRIKE_TYPE_NORMAL",
     "StrikeStatus",
     "StrikeTiming",
     "TimingStatus",

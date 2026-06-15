@@ -6,6 +6,12 @@
  *   2. COASTING  — phases floating, momentum carries mallet to drum
  *   3. CATCHING  — position servo captures the rebound back to home
  *
+ * Dead strikes (STRIKE_TYPE_DEAD) insert a MUTING state between COASTING
+ * and CATCHING: at detected impact the velocity loop brakes to setpoint 0
+ * (braking current self-scales to rebound energy), then a small torque
+ * presses the mallet into the surface for the commanded dwell to mute the
+ * note before the normal catch.
+ *
  * A new strike command received during an active cycle aborts the current
  * recovery path and immediately launches a fresh strike attempt.
  *
@@ -48,9 +54,17 @@ static int8_t         drum_dir;         /* +1/-1: sign of "toward drum" */
 static int32_t        home_offset;      /* counts above drum (always positive) */
 static int32_t        coast_distance;   /* counts from drum to cut power */
 static int32_t        homing_duty;      /* signed duty toward drum */
+static int32_t        mute_brake_ms;    /* dead strike: velocity-0 brake phase duration */
+static int32_t        mute_press_ma;    /* dead strike: contact-press current (0 = velocity hold) */
+static int32_t        mute_engage_offset; /* dead strike: brake trip point, counts before drum surface (negative = past it) */
 
 /* Runtime */
 static int32_t        coast_threshold;  /* absolute position of coast point */
+static uint8_t        active_type;      /* strike_type_t of the in-flight strike */
+static uint16_t       mute_total_ticks; /* total MUTING dwell for this strike */
+static uint16_t       mute_brake_ticks; /* brake-phase end within that dwell */
+static uint16_t       mute_counter;
+static uint8_t        mute_braking;     /* 1 = velocity-0 brake phase, 0 = press phase */
 static uint16_t       settle_counter;
 static uint16_t       stall_counter;
 static int32_t        stall_prev_pos;
@@ -115,6 +129,21 @@ static uint8_t retrigger_ready_now(int32_t pos, int32_t vel)
     return 1u;
 }
 
+static int32_t toward_drum_current(int32_t magnitude_ma)
+{
+    return (drum_dir < 0) ? -magnitude_ma : magnitude_ma;
+}
+
+static uint16_t ms_to_strike_ticks(uint32_t ms)
+{
+    uint32_t ticks = (ms * STRIKE_LOOP_HZ) / 1000u;
+
+    if (ticks > 0xFFFFu)
+        return 0xFFFFu;
+
+    return (uint16_t)ticks;
+}
+
 static uint16_t rpm_to_dps_clamped(int32_t rpm)
 {
     uint32_t dps;
@@ -169,6 +198,70 @@ static void start_catching(void)
     state = STRIKE_CATCHING;
 }
 
+static void snapshot_prev_compact(void);
+
+/* MUTING-state bookkeeping shared by all entry paths. The major timing
+ * fields (coast, impact, peak velocity) are in by now; rebound never
+ * becomes valid for a dead strike. */
+static void enter_muting(void)
+{
+    snapshot_prev_compact();
+    mute_counter = 0;
+    mute_braking = 1u;
+    state = STRIKE_MUTING;
+}
+
+/* Fallback mute entry (mallet stalled short of the brake trip point, or
+ * coast timeout): command the velocity-0 hold from the strike tick. The
+ * primary entry for a clean hit is the position-armed brake in motor.c —
+ * by the time the filtered-velocity zero-cross is visible here, the mallet
+ * has already begun rebounding. The mode switch clears any stale coast
+ * state and resets the loop PIDs for a clean brake start. */
+static void start_muting(void)
+{
+    motor_disarm_coast();
+
+    motor_set_velocity(0);
+    motor_set_mode(CTRL_VELOCITY);
+    motor_start();
+
+    enter_muting();
+}
+
+/* Primary mute entry: the motor layer tripped the velocity-0 brake on the
+ * raw encoder crossing of the contact point. The motor is already braking;
+ * we only record timing and follow the state machine. Coast/impact stamps
+ * are best-effort here (≤ one strike tick late) — the brake itself was not
+ * delayed by this tick's cadence. */
+static void on_brake_engaged(void)
+{
+    if ((timing_flags & STRIKE_TIMING_COAST_VALID) == 0u) {
+        trigger_to_coast_ms = elapsed_ms_since(active_start_tick);
+        timing_flags |= STRIKE_TIMING_COAST_VALID;
+    }
+    if ((timing_flags & STRIKE_TIMING_IMPACT_VALID) == 0u) {
+        trigger_to_impact_ms = elapsed_ms_since(active_start_tick);
+        timing_flags |= STRIKE_TIMING_IMPACT_VALID;
+    }
+
+    enter_muting();
+}
+
+/* Mute press phase: a small steady toward-drum current keeps the rubber
+ * tip seated against the surface with a defined force. mute_press_ma == 0
+ * means "stay in the velocity-0 hold" instead. */
+static void start_mute_press(void)
+{
+    mute_braking = 0u;
+
+    if (mute_press_ma <= 0)
+        return;
+
+    motor_set_current(toward_drum_current(mute_press_ma));
+    motor_set_mode(CTRL_TORQUE);
+    motor_start();
+}
+
 static void force_home_capture(void)
 {
     motor_stop();
@@ -220,7 +313,8 @@ static void snapshot_prev_compact(void)
     prev_compact.estimated_strike_velocity_dps = estimated_strike_velocity_dps;
 }
 
-static void begin_strike(int32_t current_ma, uint8_t retriggered)
+static void begin_strike(int32_t current_ma, uint8_t retriggered,
+                         uint8_t type, uint16_t mute_ms)
 {
     current_ma = orient_strike_current(current_ma);
 
@@ -234,6 +328,24 @@ static void begin_strike(int32_t current_ma, uint8_t retriggered)
     timing_flags = STRIKE_TIMING_ACTIVE;
     if (retriggered)
         timing_flags |= STRIKE_TIMING_RETRIGGERED;
+
+    active_type = type;
+    if (type == STRIKE_TYPE_DEAD) {
+        uint32_t hold_ms = (mute_ms == 0u) ? STRIKE_MUTE_HOLD_DEFAULT_MS
+                                           : (uint32_t)mute_ms;
+        if (hold_ms > STRIKE_MUTE_MAX_MS)
+            hold_ms = STRIKE_MUTE_MAX_MS;
+
+        mute_total_ticks = ms_to_strike_ticks(hold_ms);
+        if (mute_total_ticks == 0u)
+            mute_total_ticks = 1u;
+
+        mute_brake_ticks = ms_to_strike_ticks((uint32_t)mute_brake_ms);
+        if (mute_brake_ticks > mute_total_ticks)
+            mute_brake_ticks = mute_total_ticks;
+
+        timing_flags |= STRIKE_TIMING_DEAD;
+    }
 
     last_current_ma = (int16_t)current_ma;
     trigger_to_coast_ms = 0;
@@ -252,8 +364,17 @@ static void begin_strike(int32_t current_ma, uint8_t retriggered)
     /* motor_start() is a no-op if already running (position hold) */
     motor_start();
 
-    /* Arm coast detection on the encoder/velocity cadence so power cuts before impact. */
-    motor_arm_coast(coast_threshold, drum_dir);
+    /* Arm coast detection on the encoder/velocity cadence so power cuts
+     * before impact. Dead strikes arm the second stage too: the velocity-0
+     * brake trips on the raw position crossing of the contact point, while
+     * the ball is still compressing — waiting for the strike-tick velocity
+     * zero-cross lets the mallet rebound first (audible double hit). */
+    if (type == STRIKE_TYPE_DEAD) {
+        int32_t brake_threshold = drum_position - drum_dir * mute_engage_offset;
+        motor_arm_coast_then_brake(coast_threshold, brake_threshold, drum_dir);
+    } else {
+        motor_arm_coast(coast_threshold, drum_dir);
+    }
 
     state = STRIKE_DRIVING;
 }
@@ -271,6 +392,15 @@ void strike_init(void)
     home_offset    = STRIKE_HOME_OFFSET_DEFAULT;
     coast_distance = STRIKE_COAST_DISTANCE_DEFAULT;
     homing_duty    = STRIKE_HOMING_DUTY_DEFAULT;
+    mute_brake_ms  = STRIKE_MUTE_BRAKE_MS_DEFAULT;
+    mute_press_ma  = STRIKE_MUTE_PRESS_MA_DEFAULT;
+    mute_engage_offset = STRIKE_MUTE_ENGAGE_OFFSET_DEFAULT;
+
+    active_type      = STRIKE_TYPE_NORMAL;
+    mute_total_ticks = 0;
+    mute_brake_ticks = 0;
+    mute_counter     = 0;
+    mute_braking     = 0;
 
     timebase_ticks = 0;
     active_start_tick = 0;
@@ -320,9 +450,30 @@ void strike_set_homing_duty(int32_t duty)
     homing_duty = duty;
     irq_restore(irq_state);
 }
+void strike_set_mute_brake_ms(int32_t ms)
+{
+    uint32_t irq_state = irq_save();
+    mute_brake_ms = (ms < 0) ? 0 : ms;
+    irq_restore(irq_state);
+}
+void strike_set_mute_press_ma(int32_t ma)
+{
+    uint32_t irq_state = irq_save();
+    mute_press_ma = (ma < 0) ? 0 : ma;
+    irq_restore(irq_state);
+}
+void strike_set_mute_engage_offset(int32_t counts)
+{
+    uint32_t irq_state = irq_save();
+    mute_engage_offset = counts;
+    irq_restore(irq_state);
+}
 int32_t strike_get_home_offset(void)           { return home_offset; }
 int32_t strike_get_coast_distance(void)        { return coast_distance; }
 int32_t strike_get_homing_duty(void)           { return homing_duty; }
+int32_t strike_get_mute_brake_ms(void)         { return mute_brake_ms; }
+int32_t strike_get_mute_press_ma(void)         { return mute_press_ma; }
+int32_t strike_get_mute_engage_offset(void)    { return mute_engage_offset; }
 
 /* ── Commands ────────────────────────────────────────────────────────── */
 
@@ -399,11 +550,21 @@ void strike_home(void)
 
 strike_trigger_result_t strike_trigger(int32_t current_ma)
 {
+    return strike_trigger_ex(current_ma, STRIKE_TYPE_NORMAL, 0u);
+}
+
+strike_trigger_result_t strike_trigger_ex(int32_t current_ma, uint8_t type, uint16_t mute_ms)
+{
     uint32_t irq_state = irq_save();
     int32_t pos;
     int32_t vel;
     uint8_t retriggered;
 
+    if (type > STRIKE_TYPE_DEAD)
+    {
+        irq_restore(irq_state);
+        return STRIKE_TRIGGER_REJECT_BAD_TYPE;
+    }
     if (!homed || state == STRIKE_HOMING)
     {
         irq_restore(irq_state);
@@ -441,7 +602,7 @@ strike_trigger_result_t strike_trigger(int32_t current_ma)
     if (retriggered)
         motor_stop();
 
-    begin_strike(current_ma, retriggered);
+    begin_strike(current_ma, retriggered, type, mute_ms);
     irq_restore(irq_state);
     return retriggered ? STRIKE_TRIGGER_RETRIGGERED : STRIKE_TRIGGER_ACCEPTED;
 }
@@ -590,6 +751,19 @@ void strike_tick(void)
          * threshold (e.g. if coast is set wide). Catch it here too. */
         maybe_record_impact(toward_drum_rpm);
 
+        if (active_type == STRIKE_TYPE_DEAD) {
+            /* Coast and brake can both trip between strike ticks; the
+             * armed brake in motor.c is the primary entry. */
+            if (motor_is_brake_engaged()) {
+                on_brake_engaged();
+                break;
+            }
+            if ((timing_flags & STRIKE_TIMING_IMPACT_VALID) != 0u) {
+                start_muting();
+                break;
+            }
+        }
+
         /* Coast is triggered by the faster encoder/velocity cadence
          * (motor_arm_coast). We just detect the transition here. */
         if (motor_is_coasting()) {
@@ -613,6 +787,23 @@ void strike_tick(void)
         maybe_record_impact(toward_drum_rpm);
 
         coast_timeout++;
+
+        /* Dead strike: the position-armed brake in motor.c is the primary
+         * entry — it pins the mallet while the ball is still compressing.
+         * The filtered-velocity zero-cross only covers a mallet that stalls
+         * short of the brake trip point; the timeout path still presses
+         * gently into the surface, which doubles as a damp. */
+        if (active_type == STRIKE_TYPE_DEAD) {
+            if (motor_is_brake_engaged()) {
+                on_brake_engaged();
+            } else if ((timing_flags & STRIKE_TIMING_IMPACT_VALID) != 0u) {
+                start_muting();
+            } else if (coast_timeout >= STRIKE_COAST_TIMEOUT_TICKS) {
+                timing_flags |= STRIKE_TIMING_REBOUND_TIMEOUT;
+                start_muting();
+            }
+            break;
+        }
 
         /* Rebound: velocity reversed away from drum past threshold */
         {
@@ -639,6 +830,17 @@ void strike_tick(void)
                 start_catching();
             }
         }
+        break;
+
+    /* ── Muting: dead strike holds the mallet against the surface ────── */
+    case STRIKE_MUTING:
+        mute_counter++;
+
+        if (mute_braking != 0u && mute_counter >= mute_brake_ticks)
+            start_mute_press();
+
+        if (mute_counter >= mute_total_ticks)
+            start_catching();
         break;
 
     /* ── Catching: position hold at home ─────────────────────────────── */

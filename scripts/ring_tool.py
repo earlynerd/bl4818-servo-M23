@@ -160,6 +160,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("strike", help="Trigger a strike")
     sp.add_argument("address", type=int)
     sp.add_argument("current_ma", type=int, help="Strike current magnitude in mA; firmware orients it toward the drum")
+    sp.add_argument("--dead", action="store_true",
+                    help="Dead strike: hold the mallet against the surface after impact to mute the note")
+    sp.add_argument("--mute-ms", type=int, default=0,
+                    help="Dead strike total contact dwell in ms (0 = firmware default)")
 
     sp = sub.add_parser("strike-home", help="Run strike homing sequence")
     sp.add_argument("address", type=int)
@@ -172,7 +176,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("set-strike-param", help="Set strike parameter")
     sp.add_argument("address", type=int)
-    sp.add_argument("param", choices=["home-offset", "coast-distance", "homing-duty"])
+    sp.add_argument("param", choices=["home-offset", "coast-distance", "homing-duty",
+                                      "mute-brake-ms", "mute-press-ma", "mute-engage-offset"])
     sp.add_argument("value", type=int)
 
     sp = sub.add_parser("measure-strike-timing", help="Sweep strike timing versus strike current or home-offset")
@@ -450,7 +455,11 @@ def main() -> int:
             print(format_status(retry_after_enumerate(lambda: client.set_current(args.address, args.milliamps))))
 
         elif args.command == "strike":
-            print(format_status(retry_after_enumerate(lambda: client.strike(args.address, args.current_ma))))
+            if args.dead or args.mute_ms:
+                print(format_status(retry_after_enumerate(lambda: client.strike_ex(
+                    args.address, args.current_ma, STRIKE_TYPE_DEAD, args.mute_ms))))
+            else:
+                print(format_status(retry_after_enumerate(lambda: client.strike(args.address, args.current_ma))))
 
         elif args.command == "strike-home":
             print(format_status(retry_after_enumerate(lambda: client.strike_home(args.address))))
@@ -482,6 +491,9 @@ def main() -> int:
                 "home-offset": STRIKE_PARAM_HOME_OFFSET,
                 "coast-distance": STRIKE_PARAM_COAST_DISTANCE,
                 "homing-duty": STRIKE_PARAM_HOMING_DUTY,
+                "mute-brake-ms": STRIKE_PARAM_MUTE_BRAKE_MS,
+                "mute-press-ma": STRIKE_PARAM_MUTE_PRESS_MA,
+                "mute-engage-offset": STRIKE_PARAM_MUTE_ENGAGE_OFFSET,
             }
             print(format_status(retry_after_enumerate(
                 lambda: client.set_strike_param(args.address, param_map[args.param], args.value)

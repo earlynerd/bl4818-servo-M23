@@ -69,6 +69,7 @@
 #define SUBCMD_DETECT_CSN_POLARITY 0x17u
 #define SUBCMD_SET_CSN_POLARITY    0x18u
 #define SUBCMD_QUERY_STRIKE_TIMING 0x19u  /* compact strike-timing-only reply */
+#define SUBCMD_STRIKE_EX        0x1Au  /* strike with articulation type + type-specific param */
 #define SUBCMD_MASK             0x3Fu
 #define SUBCMD_REPLY_MASK       0xC0u
 #define SUBCMD_REPLY_FULL       0x00u
@@ -343,6 +344,9 @@ static void send_status_reply(void)
 #define STRIKE_PARAM_HOME_OFFSET     0x01u
 #define STRIKE_PARAM_COAST_DISTANCE  0x02u
 #define STRIKE_PARAM_HOMING_DUTY     0x03u
+#define STRIKE_PARAM_MUTE_BRAKE_MS   0x04u
+#define STRIKE_PARAM_MUTE_PRESS_MA   0x05u
+#define STRIKE_PARAM_MUTE_ENGAGE_OFFSET 0x06u
 
 static void send_strike_status_reply(void)
 {
@@ -885,6 +889,19 @@ static void handle_addressed_cmd(uint8_t cmd_type, const uint8_t *payload, uint8
         }
         send_addressed_reply(reply_mode, subcmd, ack_result, ack_detail, FULL_REPLY_STATUS);
         break;
+    case SUBCMD_STRIKE_EX:
+        ack_result = ACK_RESULT_INVALID_ARGUMENT;
+        ack_detail = strike_get_sequence();
+        if (len >= 7u) {
+            uint8_t strike_type = payload[2];
+            int16_t current_ma = (int16_t)(((uint16_t)payload[3] << 8) | payload[4]);
+            uint16_t type_param = ((uint16_t)payload[5] << 8) | payload[6];
+            ack_result = ack_result_from_strike_trigger(
+                strike_trigger_ex((int32_t)current_ma, strike_type, type_param));
+            ack_detail = strike_get_sequence();
+        }
+        send_addressed_reply(reply_mode, subcmd, ack_result, ack_detail, FULL_REPLY_STATUS);
+        break;
     case SUBCMD_STRIKE_HOME:
         strike_home();
         send_addressed_reply(reply_mode, subcmd, ACK_RESULT_OK, strike_get_sequence(), FULL_REPLY_STATUS);
@@ -909,6 +926,22 @@ static void handle_addressed_cmd(uint8_t cmd_type, const uint8_t *payload, uint8
                 break;
             case STRIKE_PARAM_HOMING_DUTY:
                 strike_set_homing_duty((int32_t)value);
+                ack_result = ACK_RESULT_OK;
+                break;
+            case STRIKE_PARAM_MUTE_BRAKE_MS:
+                if (value >= 0) {
+                    strike_set_mute_brake_ms((int32_t)value);
+                    ack_result = ACK_RESULT_OK;
+                }
+                break;
+            case STRIKE_PARAM_MUTE_PRESS_MA:
+                if (value >= 0) {
+                    strike_set_mute_press_ma((int32_t)value);
+                    ack_result = ACK_RESULT_OK;
+                }
+                break;
+            case STRIKE_PARAM_MUTE_ENGAGE_OFFSET:
+                strike_set_mute_engage_offset((int32_t)value);
                 ack_result = ACK_RESULT_OK;
                 break;
             default:

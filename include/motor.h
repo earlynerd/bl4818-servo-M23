@@ -63,8 +63,12 @@ void motor_start(void);
 void motor_stop(void);
 void motor_coast(void);        /* Float phases, stay MOTOR_RUN (for strike coast) */
 void motor_arm_coast(int32_t threshold, int8_t direction);  /* Auto-coast at position on encoder sample */
+/* Two-stage: coast at coast_threshold, then velocity-0 brake at brake_threshold
+ * (dead strikes). Both trip on raw encoder position at the encoder cadence. */
+void motor_arm_coast_then_brake(int32_t coast_threshold, int32_t brake_threshold, int8_t direction);
 void motor_disarm_coast(void);
 uint8_t motor_is_coasting(void);
+uint8_t motor_is_brake_engaged(void);  /* latched when the brake stage tripped; cleared on arm/disarm */
 void motor_clear_fault(void);
 
 void motor_handle_hall_transition(uint8_t hall_result); /* IRQ-side hall decode -> commutation/fault handling */

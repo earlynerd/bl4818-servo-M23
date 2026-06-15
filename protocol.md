@@ -93,6 +93,58 @@ sub-command ID; the top 2 bits select reply policy.
 | 0x13 | CLEAR_SETTINGS | -- | 0 |
 | 0x16 | QUERY_TIMING | -- | 0 |
 | 0x19 | QUERY_STRIKE_TIMING | -- | 0 |
+| 0x1A | STRIKE_EX | `[type] [current_hi] [current_lo] [param_hi] [param_lo]` | 5 |
+
+### STRIKE_EX Articulation Types
+
+`STRIKE_EX` is `STRIKE` with an explicit articulation type and a type-specific
+parameter. `type = 0x00` (NORMAL) behaves exactly like `STRIKE`; `param` is
+ignored. Unknown types are rejected with `INVALID_ARGUMENT`.
+
+| Type | Name | `param` meaning |
+|------|------|-----------------|
+| 0x00 | NORMAL | ignored |
+| 0x01 | DEAD | total mute dwell in ms (0 = firmware default, currently 150; clamped to 1000) |
+
+A dead strike drives and coasts identically to a normal strike at the same
+current, so the attack is unchanged. The device arms a second position
+trigger at the learned drum surface (offset by `MUTE_ENGAGE_OFFSET`): on the
+raw encoder crossing of that point — checked at the encoder sampling
+cadence, with no velocity-filter or strike-tick lag — it enters a MUTING
+state instead of catching the rebound: first a velocity-0 brake phase (the
+velocity servo fights the rebound with current proportional to rebound
+speed, so braking self-scales to strike energy and engages while the ball
+tip is still compressing), then a small steady toward-drum current presses
+the mallet into the surface for the remainder of the dwell, muting the
+note. The mallet then returns home through the normal CATCHING path. A
+mallet that stalls short of the trigger point falls back to the
+filtered-velocity zero-cross for mute entry.
+
+Dead strikes report `strike_state = 6` (MUTING) while in contact and set
+timing flag `0x0200` in the 16-bit `timing_flags`. The rebound timing field
+never becomes valid for a dead strike (the rebound is deliberately
+suppressed); `t_impact`, `t_coast`, and the velocity estimate are reported
+as usual. If impact is never detected before the coast timeout, the device
+still enters MUTING (gentle press into the surface) and sets the
+rebound-timeout flag `0x0020`.
+
+A `STRIKE` or `STRIKE_EX` received during MUTING is rejected with
+`REJECT_NOT_READY` (the mallet is at the surface, not at home);
+`STRIKE_CANCEL` aborts the mute early and returns the mallet home.
+
+### Strike Parameter IDs (SET_STRIKE_PARAM)
+
+| ID | Name | Units | Notes |
+|----|------|-------|-------|
+| 0x01 | HOME_OFFSET | encoder counts | parked height above drum |
+| 0x02 | COAST_DISTANCE | encoder counts | power-cut distance from drum |
+| 0x03 | HOMING_DUTY | signed duty | sign selects toward-drum direction |
+| 0x04 | MUTE_BRAKE_MS | ms | dead strike velocity-0 brake phase (default 30); value must be >= 0 |
+| 0x05 | MUTE_PRESS_MA | mA | dead strike contact-press current (default 250); 0 = hold velocity-0 for the whole dwell; value must be >= 0 |
+| 0x06 | MUTE_ENGAGE_OFFSET | encoder counts (signed) | dead strike brake trip point, this far before the learned drum surface (default 0 = at the surface; negative = past it, requiring compression travel) |
+
+`MUTE_BRAKE_MS`, `MUTE_PRESS_MA`, and `MUTE_ENGAGE_OFFSET` are not yet
+persisted by `SAVE_SETTINGS`; they reset to defaults at boot.
 
 ### Addressed Reply Modes
 
@@ -214,6 +266,7 @@ and the byte at offset 32 (high byte). Bits:
 - `0x0040` strike velocity estimate valid
 - `0x0080` trigger-to-retrigger-ready time valid
 - `0x0100` trigger-to-impact time valid
+- `0x0200` strike was a dead strike (`STRIKE_EX` type 0x01); rebound fields never become valid
 
 Timing fields are reported in milliseconds for the most recently accepted
 strike. `t_impact` is the firmware's measurement of mallet-velocity zero-cross

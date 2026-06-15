@@ -58,6 +58,9 @@ static uint8_t       coasting;           /* 1 = phases floating, skip duty dispa
 static int32_t       coast_trip_pos;     /* auto-coast position threshold */
 static int8_t        coast_trip_dir;     /* +1: coast when pos >= trip, -1: when <= */
 static uint8_t       coast_armed;        /* 1 = watching for coast trigger on encoder samples */
+static int32_t       brake_trip_pos;     /* dead strike: velocity-0 brake position threshold */
+static uint8_t       brake_stage;        /* 0 = none, 1 = brake follows coast, 2 = brake armed */
+static uint8_t       brake_engaged;      /* latched when brake stage tripped */
 static pid_t         vel_pid;
 static pid_t         pos_pid;
 static pid_t         cur_pid;
@@ -194,6 +197,8 @@ static void enter_fault(fault_code_t code)
     reset_scheduler_state();
     coasting = 0;
     coast_armed = 0;
+    brake_stage = 0;
+    brake_engaged = 0;
     reset_current_protection_state();
     state = MOTOR_FAULT;
     fault = code;
@@ -225,6 +230,8 @@ void motor_init(void)
     last_applied_duty = 0;
     coasting = 0;
     coast_armed = 0;
+    brake_stage = 0;
+    brake_engaged = 0;
     current_setpoint = 0;
     last_enc_pos_seen = 0;
     enc_stall_samples = 0u;
@@ -353,6 +360,7 @@ void motor_shift_position_reference(int32_t delta)
     target_position -= delta;
     pos_pid.prev_meas -= delta;
     coast_trip_pos -= delta;
+    brake_trip_pos -= delta;
 
     /* encoder_position moves to encoder_position + delta when re-zeroed */
     prev_enc_position += delta;
@@ -500,6 +508,8 @@ void motor_stop(void)
     reset_scheduler_state();
     coasting = 0;
     coast_armed = 0;
+    brake_stage = 0;
+    brake_engaged = 0;
     reset_current_protection_state();
     state = MOTOR_IDLE;
     irq_restore(irq_state);
@@ -525,6 +535,20 @@ void motor_arm_coast(int32_t threshold, int8_t direction)
     uint32_t irq_state = irq_save();
     coast_trip_pos = threshold;
     coast_trip_dir = direction;
+    brake_stage = 0;
+    brake_engaged = 0;
+    coast_armed = 1;
+    irq_restore(irq_state);
+}
+
+void motor_arm_coast_then_brake(int32_t coast_threshold, int32_t brake_threshold, int8_t direction)
+{
+    uint32_t irq_state = irq_save();
+    coast_trip_pos = coast_threshold;
+    brake_trip_pos = brake_threshold;
+    coast_trip_dir = direction;
+    brake_stage = 1;
+    brake_engaged = 0;
     coast_armed = 1;
     irq_restore(irq_state);
 }
@@ -533,7 +557,14 @@ void motor_disarm_coast(void)
 {
     uint32_t irq_state = irq_save();
     coast_armed = 0;
+    brake_stage = 0;
+    brake_engaged = 0;
     irq_restore(irq_state);
+}
+
+uint8_t motor_is_brake_engaged(void)
+{
+    return brake_engaged;
 }
 
 uint8_t motor_is_coasting(void)
@@ -556,6 +587,8 @@ void motor_clear_fault(void)
     pwm_disable();
     coasting = 0;
     coast_armed = 0;
+    brake_stage = 0;
+    brake_engaged = 0;
     reset_current_protection_state();
     state = MOTOR_IDLE;
     irq_restore(irq_state);
@@ -736,8 +769,26 @@ uint16_t motor_tick_control(void)
                 ? (pos >= coast_trip_pos)
                 : (pos <= coast_trip_pos);
             if (crossed) {
-                motor_coast();
-                coast_armed = 0;
+                if (brake_stage == 2u) {
+                    /* Dead-strike contact point: engage the velocity-0 hold
+                     * on the raw position crossing. Trips here, not in the
+                     * strike tick, because the filtered-velocity zero-cross
+                     * lags real impact enough for the mallet to rebound. */
+                    target_velocity = 0;
+                    motor_set_mode(CTRL_VELOCITY);
+                    brake_stage = 0;
+                    brake_engaged = 1;
+                    coast_armed = 0;
+                } else {
+                    motor_coast();
+                    if (brake_stage == 1u) {
+                        /* stay armed; re-aim at the brake point */
+                        coast_trip_pos = brake_trip_pos;
+                        brake_stage = 2;
+                    } else {
+                        coast_armed = 0;
+                    }
+                }
             }
         }
     }

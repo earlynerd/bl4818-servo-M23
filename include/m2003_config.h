@@ -158,6 +158,15 @@
 #define STRIKE_COAST_TIMEOUT_MS         500
 #define STRIKE_REBOUND_THRESHOLD        5       /* RPM away from drum to confirm rebound */
 #define STRIKE_IMPACT_VEL_THRESHOLD     0       /* RPM toward drum: at/below = impact (velocity zero-cross during coast) */
+
+/* Dead-strike mute phase: at impact the velocity loop brakes the rebound
+ * (setpoint 0, self-scales to rebound energy), then a small torque presses
+ * the mallet into the surface for the rest of the commanded dwell. */
+#define STRIKE_MUTE_ENGAGE_OFFSET_DEFAULT 0     /* counts before drum surface where the brake trips (negative = past it) */
+#define STRIKE_MUTE_BRAKE_MS_DEFAULT    30      /* velocity-0 rebound-brake phase duration */
+#define STRIKE_MUTE_PRESS_MA_DEFAULT    250     /* contact-press current after brake (0 = stay in velocity hold) */
+#define STRIKE_MUTE_HOLD_DEFAULT_MS     150     /* total mute dwell when command param is 0 */
+#define STRIKE_MUTE_MAX_MS              1000    /* dwell ceiling (stalled-current heating guard) */
 #define STRIKE_SETTLE_TICKS HZ_TICKS_FROM_MS(STRIKE_LOOP_HZ, STRIKE_SETTLE_TIME_MS)
 #define STRIKE_HOMING_STALL_TICKS HZ_TICKS_FROM_MS(STRIKE_LOOP_HZ, STRIKE_HOMING_STALL_TIME_MS)
 #define STRIKE_COAST_TIMEOUT_TICKS HZ_TICKS_FROM_MS(STRIKE_LOOP_HZ, STRIKE_COAST_TIMEOUT_MS)

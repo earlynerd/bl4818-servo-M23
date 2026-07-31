@@ -14,6 +14,17 @@ than a turn-key kit.
 
 ![Ten brushless servo actuators installed around a tongue drum](docs/images/actuator/instrument_with_10_actuators.jpg)
 
+## What the actuators look like
+
+Each self-contained actuator packages the modified BL4818 motor controller,
+absolute encoder, power/data interface, and mallet mechanism inside the printed
+shell. RX and TX connectors allow power and serial data to continue through the
+actuator chain, while the recessed SWD port provides programming access.
+
+| Connector and programming end | Completed actuator bodies and mallets |
+| --- | --- |
+| ![Close-up of an assembled actuator showing RX, TX, and SWD openings](docs/images/actuator/closeup_with_connectors.jpg) | ![Nine completed actuator bodies and mallets viewed from above](docs/images/actuator/9_actuators_in_a_row_topview.jpg) |
+
 ## System overview
 
 ```mermaid

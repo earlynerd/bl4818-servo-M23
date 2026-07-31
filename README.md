@@ -13,6 +13,14 @@ should currently be treated as a proven project under documentation rather
 than a turn-key kit.
 
 
+## Watch and listen
+
+This project makes much more sense with sound. Select the image or the link
+below to hear ten actuators perform on a handpan-style tongue drum.
+
+**[▶ Play the 56-second performance video with sound](docs/video/handpan_video_h264.mp4)**
+
+
 ![Nine completed actuator bodies and mallets viewed from above](docs/images/actuator/9_actuators_in_a_row_topview.jpg) 
 
 ![Close-up of an assembled actuator showing RX, TX, and SWD openings](docs/images/actuator/closeup_with_connectors.jpg) 
@@ -130,6 +138,7 @@ Run `py scripts/ring_tool.py --help` for the complete command list.
 
 - [Replication guide](docs/replication-guide.md): staged path from hardware to a playing ring.
 - [Hardware guide](docs/hardware.md): current BL4818 modification and actuator assembly architecture.
+- [Performance video](docs/video/handpan_video_h264.mp4): ten actuators playing with sound.
 - [Firmware guide](docs/firmware.md): architecture, build, flash, and module boundaries.
 - [Host software guide](docs/host-software.md): server, browser players, and bench tools.
 - [Replication status](docs/replication-status.md): what is reproducible now and what still needs source material.

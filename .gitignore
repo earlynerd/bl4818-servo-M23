@@ -18,6 +18,8 @@ build/
 .vscode/
 .idea/
 __pycache__
+.venv/
+venv/
 .pio/
 *.gbr
 *.drl
@@ -26,6 +28,23 @@ __pycache__
 *.lck
 pcb/interface/interface-backups/
 *_autosave*
+
+# KiCad editor state, caches, and automatic backups. Source design files
+# (*.kicad_sch, *.kicad_pcb, and *.kicad_pro) remain tracked.
+*.kicad_prl
+**/*-backups/
+**/fp-info-cache
+**/.history/
+~$*
+
+# Host-side runtime state. The MIDI player creates mapping.json after the
+# actuator-to-note mapping is configured in the browser.
+mapping.json
+**/.midi_library.json
+
+# OS metadata
+.DS_Store
+Thumbs.db
 
 # ring_welcome.py runtime files: the roster (may hold private MACs) and the
 # per-day "already greeted" state. The example config is committed.

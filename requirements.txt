@@ -1,0 +1,8 @@
+# Core ring-bus and MIDI-server dependency
+pyserial>=3.5
+
+# Used by the optional tuning and strike-timing plot commands
+matplotlib>=3.7
+
+# Used by scripts/ring_midi_drummer.py to parse General MIDI drum files
+mido>=1.3

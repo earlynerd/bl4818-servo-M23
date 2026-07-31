@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__kicad__check_kicad_ui",
+      "mcp__kicad__get_component_properties",
+      "mcp__kicad__get_project_info",
+      "mcp__kicad__get_board_extents"
+    ]
+  }
+}

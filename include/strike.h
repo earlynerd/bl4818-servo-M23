@@ -44,6 +44,13 @@ typedef enum {
     STRIKE_TRIGGER_REJECT_BAD_TYPE,
 } strike_trigger_result_t;
 
+typedef enum {
+    STRIKE_HOME_STARTED = 0,
+    STRIKE_HOME_REJECT_BUSY,
+    STRIKE_HOME_REJECT_FAULT,
+    STRIKE_HOME_REJECT_DISABLED,
+} strike_home_result_t;
+
 /* Validity / state flags packed into a uint16. The low byte (0x01..0x80)
  * keeps the legacy bit assignments so the on-wire low-byte parsing is
  * unchanged for hosts that haven't been updated yet. */
@@ -96,7 +103,8 @@ strike_trigger_result_t strike_trigger(int32_t current_ma);  /* fire strike with
 /* fire strike with explicit articulation; mute_ms = total contact dwell for
  * STRIKE_TYPE_DEAD (0 = STRIKE_MUTE_HOLD_DEFAULT_MS), ignored for NORMAL */
 strike_trigger_result_t strike_trigger_ex(int32_t current_ma, uint8_t type, uint16_t mute_ms);
-void strike_home(void);             /* run homing sequence */
+strike_home_result_t strike_home(void); /* start homing, with truthful acceptance result */
+void strike_stop(void);             /* disable motor and require re-home before striking */
 void strike_cancel(void);           /* abort sequence, return to idle */
 
 /* Configuration (encoder counts) */

@@ -134,7 +134,11 @@ don't need to do anything to opt in — just send `t_ms` values that
 reflect when you want the *impact* to happen, and the bridge handles
 the offset.
 
-Beats stay flush even for chords (multiple events at the same `t_ms`).
+Beats stay flush even for chords (multiple events at the same `t_ms`). Events
+whose compensated trigger deadlines fall within 1 ms are emitted as one
+addressed command train, farthest ring address first, without waiting between
+commands. The bridge collects the compact ACKs only after the whole train is
+written, removing per-note host round trips without adding a broadcast command.
 The EMA needs a handful of strikes to converge on a slot if the bridge
 has just started; the first few strikes use a 50 ms default.
 
@@ -142,7 +146,9 @@ has just started; the first few strikes use a 50 ms default.
 
 There is exactly one motif slot. Posting a new motif preempts whatever
 was playing — the previous worker's stop event is set, the worker is
-joined (~2 s timeout), and the new motif starts. `POST /api/cancel`
+joined (2 s timeout), and the new motif starts only after that worker exits.
+If it does not exit, the server preserves its identity and returns HTTP 409
+instead of allowing two playback workers to overlap. `POST /api/cancel`
 also stops any running motif.
 
 ---
@@ -306,6 +312,10 @@ play-time (`name`, `master_current_ma`, `vel_floor` from pitch-style;
   "remaining_ms": 287,
   "master_scale": 1.0,
   "muted": [],
+  "dispatch_stats": {
+    "attempted": 2, "accepted": 2, "rejected": 0,
+    "transport_failed": 0, "muted": 0, "bursts": 1, "reasons": {}
+  },
   "name": "ci-passed",
   "master_current_ma": 1000,
   "vel_floor": 0.5
@@ -325,6 +335,11 @@ play-time (`name`, `master_current_ma`, `vel_floor` from pitch-style;
   "remaining_ms": null,
   "master_scale": 1.0,
   "muted": [],
+  "dispatch_stats": {
+    "attempted": 3, "accepted": 2, "rejected": 1,
+    "transport_failed": 0, "muted": 0, "bursts": 1,
+    "reasons": {"REJECT_NOT_READY": 1}
+  },
   "master_current_ma": null,
   "vel_floor": null
 }
@@ -334,6 +349,9 @@ play-time (`name`, `master_current_ma`, `vel_floor` from pitch-style;
   `cursor == scheduled` once playback finishes.
 - `master_scale` and `muted` reflect any live tweaks from
   `/api/play/update`. They reset on each `/api/play`.
+- `dispatch_stats` is retained after the worker finishes so the final idle
+  poll can report accepted firmware ACKs, device rejections, missing/failed
+  transport replies, muted events, and chord-burst count.
 - `elapsed_ms` and `remaining_ms` are computed from the server's
   monotonic clock at the time of the request. They're clamped so that
   `elapsed_ms + remaining_ms == duration_ms` once the schedule is
@@ -463,13 +481,15 @@ or removing devices.
 
 ### `POST /api/home`
 
-Send a homing command to each addressed slot. Fire-and-forget — the
-device homes asynchronously; poll `/api/status` to see the `homed` flag
-flip.
+Send a homing command to each addressed slot. The command ACK reports whether
+homing actually started; motion remains asynchronous, so poll `/api/status`
+to see the `homed` flag flip.
 
 **Request body:** `{"addresses": [0, 1, 2]?}` (omit to home all)
 
-**Response (200):** `{"ok": true, "addresses": [0, 1, 2]}`
+**Response (200):** `{"ok": true, "addresses": [0, 1, 2], "results": [<ack>, ...]}`
+
+`ok` is false if any address rejects the command or has a transport error.
 
 ### `POST /api/strike`
 
@@ -521,9 +541,10 @@ Valid `param` values: `"home_offset"`, `"coast_distance"`, `"homing_duty"`.
 
 ### `POST /api/stop`
 
-Send `motor_stop` to each addressed slot — disables PWM, motor goes
-idle. Different from `/api/cancel`, which is a panic stop of in-flight
-strike commands.
+Send coordinated `STOP` to each addressed slot — disables PWM, aborts any
+active strike/homing state, and clears the runtime `homed` flag. Re-home the
+slot before striking again. Different from `/api/cancel`, which asks an active
+strike sequence to return through its normal cancel path.
 
 **Request body:** `{"addresses": [0, 1]?}` (omit for all)
 

@@ -19,7 +19,8 @@ GET  /api/mapping             -> {"mapping": [int|null, ...] | null}; persisted 
 GET  /api/pitches             -> {"pitches": [{"pitch","name","slot","homed"}, ...]};
                                  currently mapped pitches, sorted ascending
 GET  /api/play                -> {"playing", "id", "scheduled", "cursor", "duration_ms",
-                                  "elapsed_ms", "remaining_ms", "master_scale", "muted", ...};
+                                  "elapsed_ms", "remaining_ms", "master_scale", "muted",
+                                  "dispatch_stats", ...};
                                  snapshot of the running playback (whatever started it).
                                  Anything stashed in metadata at play-time (name,
                                  master_current_ma, vel_floor, schedule_master_ma) is
@@ -40,7 +41,7 @@ POST /api/strike              -> {"address": int, "current_ma": int}; ACK + last
 POST /api/strikes             -> {"strikes": [{"address","current_ma"}, ...]}; batch
 POST /api/strike-param        -> {"address": int, "param": str, "value": int}; ACK
 POST /api/cancel              -> cancels all active strikes (panic stop, also stops playback)
-POST /api/stop                -> {"addresses": [int]?}; motor_stop on each (disables PWM)
+POST /api/stop                -> {"addresses": [int]?}; coordinated stop; re-home required
 POST /api/save-settings       -> {"addresses": [int]?}; persists strike params to NVM
 POST /api/mapping             -> {"mapping": [int|null, ...]}; persists slot->pitch map to disk
 POST /api/play                -> Start scheduled playback. Accepts two event shapes:
@@ -54,7 +55,7 @@ POST /api/play                -> Start scheduled playback. Accepts two event sha
                                  In (b) the server resolves pitch->address via the persisted
                                  mapping and computes current = master * (floor + (1-floor)*v/127).
                                  Pitches not in /api/mapping are returned in "skipped".
-                                 Preempts any in-flight playback.
+                                 Preempts any in-flight playback when its worker exits cleanly.
 POST /api/play/stop           -> stop in-flight playback (does NOT disable motors).
 POST /api/play/update         -> {"master_scale": float?, "master_ma": int?,
                                   "schedule_master_ma": int?, "muted": [int]?};
@@ -134,11 +135,11 @@ class LatencyTracker:
     def __init__(self) -> None:
         self._per_slot: dict[int, dict[int, float]] = {}
         self._global: dict[int, float] = {}
-        # Tracks the strike current most recently SENT to each slot. The
+        # Tracks the current of the most recently ACCEPTED strike per slot. The
         # firmware reports timing for the *previous* completed strike on
         # each ACK, so we attribute incoming metrics to the bucket of the
-        # prior strike, not the one whose ACK delivered them.
-        self._last_sent_current: dict[int, int] = {}
+        # prior accepted strike, not the command whose ACK delivered them.
+        self._last_accepted_current: dict[int, int] = {}
         self._lock = threading.Lock()
 
     @classmethod
@@ -148,14 +149,18 @@ class LatencyTracker:
         idx = current_ma // cls.BUCKET_WIDTH_MA
         return max(0, min(cls.BUCKET_COUNT - 1, int(idx)))
 
-    def record_sent(self, slot: int, current_ma: int) -> int | None:
-        """Mark that a strike at `current_ma` was just sent to `slot`. Returns
-        the previous current value (or None if this is the first strike on
-        the slot since the bridge started)."""
+    def last_accepted_current(self, slot: int) -> int | None:
         with self._lock:
-            prev = self._last_sent_current.get(slot)
-            self._last_sent_current[slot] = current_ma
-            return prev
+            return self._last_accepted_current.get(slot)
+
+    def record_accepted(self, slot: int, current_ma: int) -> None:
+        with self._lock:
+            self._last_accepted_current[slot] = current_ma
+
+    def forget_accepted(self, slot: int) -> None:
+        """Drop attribution state after an ambiguous transport failure."""
+        with self._lock:
+            self._last_accepted_current.pop(slot, None)
 
     def update(self, slot: int, current_ma: int, impact_ms: float) -> None:
         if impact_ms is None:
@@ -384,9 +389,9 @@ class Bridge:
         # Stamps below let the browser decompose total beat error into
         # scheduler jitter / network / lock / serial-RTT / impact.
         t_recv = time.monotonic()
-        prev_current = self.latency.record_sent(address, current_ma)
         with self.lock:
             t_lock = time.monotonic()
+            prev_current = self.latency.last_accepted_current(address)
             try:
                 reply = self.client.strike(
                     address, current_ma, reply_mode=REPLY_MODE_ACK_TIMED
@@ -395,11 +400,14 @@ class Bridge:
                 # A dropped/mangled strike reply is exactly the bus trouble the
                 # health panel exists to surface — record it before propagating
                 # (the playback worker catches and skips, /api/strike → 500).
+                self.latency.forget_accepted(address)
                 self._record_bus_exc(address, exc)
                 raise
             t_post_ack = time.monotonic()
+            result = self._ack_to_dict(address, reply, cache_metrics=True)
+            if result.get("accepted"):
+                self.latency.record_accepted(address, current_ma)
         self.health.record_ok(address, (t_post_ack - t_lock) * 1_000_000)
-        result = self._ack_to_dict(address, reply, cache_metrics=True)
         self._fold_metrics_into_ema(address, prev_current, result.get("metrics"))
         result["server_timing_us"] = {
             "lock_wait": int((t_lock - t_recv) * 1_000_000),
@@ -408,6 +416,56 @@ class Bridge:
         }
         return result
 
+    def strike_burst(self, items: list[dict]) -> list[dict]:
+        """Fire a same-deadline chord in one far-to-near serial burst.
+
+        RingClient writes every addressed command before collecting any ACK,
+        so host round trips do not accumulate between chord notes. Plain ACKs
+        keep rejection visibility while compact timing remains on the normal
+        single-strike path.
+        """
+        if not items:
+            return []
+        t_recv = time.monotonic()
+        pairs = [(int(item["address"]), int(item["current_ma"])) for item in items]
+        with self.lock:
+            t_lock = time.monotonic()
+            try:
+                acks = self.client.strike_burst(pairs, reply_mode=REPLY_MODE_ACK)
+            except Exception as exc:
+                for address, _ in pairs:
+                    self.latency.forget_accepted(address)
+                    self._record_bus_exc(address, exc)
+                raise
+            t_post_ack = time.monotonic()
+            raw_results = [
+                self._ack_to_dict(address, ack)
+                for (address, _), ack in zip(pairs, acks)
+            ]
+            for (address, current_ma), result in zip(pairs, raw_results):
+                if result.get("accepted"):
+                    self.latency.record_accepted(address, current_ma)
+
+        burst_us = int((t_post_ack - t_lock) * 1_000_000)
+        amortized_us = burst_us // max(1, len(items))
+        results: list[dict] = []
+        for (address, _), ack, result in zip(pairs, acks, raw_results):
+            if ack is None:
+                exc = RingTimeout(f"missing burst ACK for address {address}")
+                self.latency.forget_accepted(address)
+                self._record_bus_exc(address, exc)
+            else:
+                self.health.record_ok(address, amortized_us)
+            result["server_timing_us"] = {
+                "lock_wait": int((t_lock - t_recv) * 1_000_000),
+                "serial_rtt": amortized_us,
+                "burst_total": burst_us,
+                "burst_size": len(items),
+                "handler_total": int((time.monotonic() - t_recv) * 1_000_000),
+            }
+            results.append(result)
+        return results
+
     def strikes(self, items: list[dict]) -> list[dict]:
         results: list[dict] = []
         prev_currents: list[int | None] = []
@@ -415,11 +473,18 @@ class Bridge:
             for item in items:
                 addr = int(item["address"])
                 cur = int(item["current_ma"])
-                prev_currents.append(self.latency.record_sent(addr, cur))
-                reply = self.client.strike(
-                    addr, cur, reply_mode=REPLY_MODE_ACK_TIMED
-                )
-                results.append(self._ack_to_dict(addr, reply, cache_metrics=True))
+                prev_currents.append(self.latency.last_accepted_current(addr))
+                try:
+                    reply = self.client.strike(
+                        addr, cur, reply_mode=REPLY_MODE_ACK_TIMED
+                    )
+                except Exception:
+                    self.latency.forget_accepted(addr)
+                    raise
+                result = self._ack_to_dict(addr, reply, cache_metrics=True)
+                results.append(result)
+                if result.get("accepted"):
+                    self.latency.record_accepted(addr, cur)
         for item, result, prev in zip(items, results, prev_currents):
             self._fold_metrics_into_ema(int(item["address"]), prev, result.get("metrics"))
         return results
@@ -455,23 +520,28 @@ class Bridge:
             )
         return self._ack_to_dict(address, reply)
 
-    def home(self, addresses: list[int], timeout_ms: int = 8000) -> None:
-        """Fire-and-forget homing per address — mirrors ring_tool's
-        strike-home behavior. Sends each command with the default
-        REPLY_MODE_FULL and on RingTimeout re-enumerates and tries once
-        more (same shape as ring_tool's retry_after_enumerate). No host-side
-        polling: the device homes asynchronously, and callers that need to
-        know when each slot has settled can poll /api/status — the
-        `homed` field flips to true per slot once the device finishes."""
+    def home(self, addresses: list[int], timeout_ms: int = 8000) -> list[dict]:
+        """Start homing and return each device's truthful acceptance ACK.
+
+        Motion remains asynchronous; callers poll /api/status for completion.
+        A timeout still gets one enumerate-and-retry attempt, matching the
+        bench tool, without hiding BUSY/FAULT/DISABLED firmware rejections.
+        """
         del timeout_ms  # retained for API compat; no longer relevant
+        results: list[dict] = []
         with self.lock:
             for addr in addresses:
-                self._strike_home_with_retry(int(addr))
+                a = int(addr)
+                try:
+                    reply = self._strike_home_with_retry(a)
+                    results.append(self._ack_to_dict(a, reply))
+                except Exception as exc:
+                    results.append({"address": a, "accepted": False, "error": str(exc)})
+        return results
 
-    def _strike_home_with_retry(self, addr: int) -> None:
+    def _strike_home_with_retry(self, addr: int):
         try:
-            self.client.strike_home(addr)
-            return
+            return self.client.strike_home(addr, reply_mode=REPLY_MODE_ACK)
         except RingTimeout as first_exc:
             # Single retry path — match ring_tool: re-enumerate, then try
             # the command once more. Re-enumeration is a quick re-sync
@@ -481,7 +551,7 @@ class Bridge:
                 self.count = self.client.enumerate()
             except RingError:
                 raise first_exc
-            self.client.strike_home(addr)
+            return self.client.strike_home(addr, reply_mode=REPLY_MODE_ACK)
 
     def cancel_all(self) -> None:
         # Stop the playback worker first so it can't fire a new strike
@@ -526,9 +596,9 @@ class Bridge:
         return out
 
     def stop(self, addresses: list[int]) -> list[dict]:
-        """Send SUBCMD_STOP to each address — disables PWM and drops target
-        velocity/current/duty to zero, motor goes to MOTOR_IDLE. Returns a
-        per-slot ack list so the UI can surface partial failures."""
+        """Send SUBCMD_STOP to each address — disables PWM, aborts any strike
+        state, and invalidates homing until STRIKE_HOME completes again.
+        Returns a per-slot ack list so the UI can surface partial failures."""
         results: list[dict] = []
         with self.lock:
             for addr in addresses:
@@ -722,6 +792,8 @@ class Player:
     consumers without the engine knowing what those mean.
     """
 
+    BURST_WINDOW_MS = 1.0
+
     def __init__(self, bridge: Bridge) -> None:
         self.bridge = bridge
         # _play_lock serializes whole play()/cancel() calls so two POSTs
@@ -741,6 +813,7 @@ class Player:
         self._duration_ms = 0
         self._id: str | None = None
         self._metadata: dict = {}
+        self._dispatch_stats = self._new_dispatch_stats()
         # Per-slot residual stats (actual trigger_to_impact_ms minus what the
         # EMA predicted at strike time). Browser shows these in its popup
         # during server-dispatched playback, since strikeAsync — which used
@@ -763,6 +836,18 @@ class Player:
     @staticmethod
     def _new_stats_bag() -> dict:
         return {"last": 0.0, "sum": 0.0, "sumSq": 0.0, "n": 0, "maxAbs": 0.0}
+
+    @staticmethod
+    def _new_dispatch_stats() -> dict:
+        return {
+            "attempted": 0,
+            "accepted": 0,
+            "rejected": 0,
+            "transport_failed": 0,
+            "muted": 0,
+            "bursts": 0,
+            "reasons": {},
+        }
 
     @staticmethod
     def _fold_stat(bag: dict, value: float) -> None:
@@ -791,6 +876,10 @@ class Player:
             running = thread is not None and thread.is_alive()
             residual = {str(k): dict(v) for k, v in self.residual_stats.items()}
             timing = {k: dict(v) for k, v in self.timing_stats.items()}
+            dispatch = {
+                **self._dispatch_stats,
+                "reasons": dict(self._dispatch_stats["reasons"]),
+            }
             if not running:
                 # Keep the documented motif keys (name/master_current_ma/
                 # vel_floor) present-but-null so chime_demo and friends see
@@ -810,6 +899,7 @@ class Player:
                     "vel_floor": None,
                     "residual_stats": residual,
                     "timing_stats": timing,
+                    "dispatch_stats": dispatch,
                 }
             elapsed_ms = int((time.monotonic() - self._started_monotonic) * 1000)
             elapsed_ms = max(0, min(self._duration_ms, elapsed_ms))
@@ -825,6 +915,7 @@ class Player:
                 "muted": sorted(self._muted),
                 "residual_stats": residual,
                 "timing_stats": timing,
+                "dispatch_stats": dispatch,
                 **self._metadata,
             }
 
@@ -849,6 +940,11 @@ class Player:
                 raise ValueError(f"bad player event {ev!r}: {exc}") from exc
             if t_ms < 0:
                 raise ValueError(f"player event t_ms must be >= 0, got {t_ms}")
+            if addr < 0 or addr >= self.bridge.count:
+                raise ValueError(
+                    f"player event address {addr} out of range "
+                    f"(enumerated {self.bridge.count})"
+                )
             resolved.append({
                 "t_ms": t_ms,
                 "address": addr,
@@ -871,6 +967,7 @@ class Player:
                 self._duration_ms = duration_ms
                 self._id = play_id
                 self._metadata = dict(metadata)
+                self._dispatch_stats = self._new_dispatch_stats()
                 self._started_monotonic = time.monotonic()
                 self._thread = threading.Thread(
                     target=self._run,
@@ -916,6 +1013,8 @@ class Player:
             # 2s is generous: the worker only blocks on serial round-trips
             # (~1-2 ms each) and on its own stop_event.wait().
             thread.join(timeout=2.0)
+        if thread is not None and thread.is_alive():
+            raise RuntimeError("previous playback worker did not stop within 2 seconds")
         with self._control_lock:
             # Clear identity only if the thread we just joined is still the
             # recorded one (a new play() could have raced in here and
@@ -924,69 +1023,144 @@ class Player:
                 self._thread = None
                 self._id = None
 
+    def _is_current_play(self, stop: threading.Event, play_id: str) -> bool:
+        with self._control_lock:
+            return (
+                not stop.is_set()
+                and self._id == play_id
+                and self._thread is threading.current_thread()
+            )
+
+    def _note_dispatch_result(self, result: dict | None, *, transport_error: bool = False) -> None:
+        with self._control_lock:
+            self._dispatch_stats["attempted"] += 1
+            if transport_error or not result or result.get("result_name") == "NO-ACK":
+                self._dispatch_stats["transport_failed"] += 1
+                reason = "TRANSPORT"
+            elif result.get("accepted"):
+                self._dispatch_stats["accepted"] += 1
+                return
+            else:
+                self._dispatch_stats["rejected"] += 1
+                reason = str(result.get("result_name") or "REJECTED")
+            reasons = self._dispatch_stats["reasons"]
+            reasons[reason] = int(reasons.get(reason, 0)) + 1
+
+    def _fold_dispatch_metrics(self, address: int, result: dict,
+                               previous_prediction_ms: float | None) -> None:
+        st = result.get("server_timing_us") or {}
+        metrics = result.get("metrics") or {}
+        impact = metrics.get("trigger_to_impact_ms")
+        with self._control_lock:
+            if "lock_wait" in st:
+                self._fold_stat(self.timing_stats["lock_wait_ms"],
+                                st["lock_wait"] / 1000.0)
+            if "serial_rtt" in st:
+                self._fold_stat(self.timing_stats["serial_rtt_ms"],
+                                st["serial_rtt"] / 1000.0)
+            if impact is not None and previous_prediction_ms is not None:
+                bag = self.residual_stats.setdefault(address, self._new_stats_bag())
+                self._fold_stat(bag, float(impact) - previous_prediction_ms)
+
     def _run(self, events: list[dict], stop: threading.Event, play_id: str) -> None:
         t0 = self._started_monotonic
-        for i, ev in enumerate(events):
-            # Snapshot live state for this iteration. master_scale and muted
-            # take effect on the next strike after the slider/UI changes.
-            # Don't hold _control_lock across the wait — update() needs it.
+        dispatch_events: list[dict] = []
+        for ev in events:
+            planned_comp_ms = self.bridge.latency.compensation_ms(
+                ev["address"], ev["nominal_current_ma"]
+            )
+            dispatch_events.append({
+                **ev,
+                "trigger_ms": ev["t_ms"] - planned_comp_ms,
+            })
+        dispatch_events.sort(
+            key=lambda ev: (ev["trigger_ms"], ev["t_ms"], -ev["address"])
+        )
+
+        cursor = 0
+        while cursor < len(dispatch_events):
+            first = dispatch_events[cursor]
+            group = [first]
+            used_addresses = {first["address"]}
+            next_cursor = cursor + 1
+            while next_cursor < len(dispatch_events):
+                candidate = dispatch_events[next_cursor]
+                if candidate["trigger_ms"] - first["trigger_ms"] > self.BURST_WINDOW_MS:
+                    break
+                if candidate["address"] in used_addresses:
+                    break
+                group.append(candidate)
+                used_addresses.add(candidate["address"])
+                next_cursor += 1
+
+            target = t0 + first["trigger_ms"] / 1000.0
+            remaining = target - time.monotonic()
+            if remaining > 0 and stop.wait(remaining):
+                return
+            if not self._is_current_play(stop, play_id):
+                return
+
+            # Snapshot live state once for the whole chord. The trigger order
+            # was planned from schedule-start currents; live scaling still
+            # changes force on the next dispatched group without reordering it.
             with self._control_lock:
                 scale = self._master_scale
-                muted = self._muted
-                self._cursor = i
+                muted = set(self._muted)
+                self._cursor = next_cursor
 
-            addr = ev["address"]
-            nominal = ev["nominal_current_ma"]
-            live_ma = max(
-                STRIKE_MA_MIN,
-                min(STRIKE_MA_MAX, int(round(nominal * scale))),
-            )
-            # Comp uses the post-scale current so we look up the right bucket.
-            comp_ms = self.bridge.latency.compensation_ms(addr, live_ma)
-            target = t0 + (ev["t_ms"] - comp_ms) / 1000.0
-            remaining = target - time.monotonic()
-            if remaining > 0:
-                # Event.wait returns True when set, False on timeout. Either
-                # way we re-check stop before striking — a wait that fell
-                # through to timeout might still race with a concurrent stop.
-                if stop.wait(remaining):
-                    return
-            if stop.is_set():
+            active: list[dict] = []
+            previous_predictions: dict[int, float | None] = {}
+            current_predictions: dict[int, float] = {}
+            for ev in group:
+                addr = ev["address"]
+                live_ma = max(
+                    STRIKE_MA_MIN,
+                    min(STRIKE_MA_MAX,
+                        int(round(ev["nominal_current_ma"] * scale))),
+                )
+                if addr in muted or live_ma <= 0:
+                    self._last_prediction_ms.pop(addr, None)
+                    with self._control_lock:
+                        self._dispatch_stats["muted"] += 1
+                    continue
+                previous_predictions[addr] = self._last_prediction_ms.get(addr)
+                current_predictions[addr] = self.bridge.latency.compensation_ms(
+                    addr, live_ma
+                )
+                active.append({"address": addr, "current_ma": live_ma})
+
+            if not active:
+                cursor = next_cursor
+                continue
+            if not self._is_current_play(stop, play_id):
                 return
-            if addr in muted or live_ma <= 0:
-                # Muted strikes don't reach the bus, so no metric comes
-                # back — wipe the stashed prediction so a future strike on
-                # this slot doesn't get attributed across a gap.
-                self._last_prediction_ms.pop(addr, None)
-                continue
-            # Stash our prediction BEFORE striking. The ACK we're about to
-            # get carries the metric for the previous strike on this addr,
-            # which we'll attribute to the prediction we stashed for THAT
-            # one (held in prev_prediction).
-            prev_prediction = self._last_prediction_ms.get(addr)
-            self._last_prediction_ms[addr] = comp_ms
+
             try:
-                result = self.bridge.strike(addr, live_ma)
+                if len(active) > 1:
+                    with self._control_lock:
+                        self._dispatch_stats["bursts"] += 1
+                    results = self.bridge.strike_burst(active)
+                else:
+                    item = active[0]
+                    results = [self.bridge.strike(item["address"], item["current_ma"])]
             except Exception:
-                # One bad strike shouldn't tank the whole playback.
                 traceback.print_exc()
+                for item in active:
+                    self._last_prediction_ms.pop(item["address"], None)
+                    self._note_dispatch_result(None, transport_error=True)
+                cursor = next_cursor
                 continue
-            # Fold server-side timing components.
-            st = result.get("server_timing_us") or {}
-            metrics = result.get("metrics") or {}
-            impact = metrics.get("trigger_to_impact_ms")
-            with self._control_lock:
-                if "lock_wait" in st:
-                    self._fold_stat(self.timing_stats["lock_wait_ms"],
-                                    st["lock_wait"] / 1000.0)
-                if "serial_rtt" in st:
-                    self._fold_stat(self.timing_stats["serial_rtt_ms"],
-                                    st["serial_rtt"] / 1000.0)
-                if impact is not None and prev_prediction is not None:
-                    bag = self.residual_stats.setdefault(
-                        addr, self._new_stats_bag()
-                    )
-                    self._fold_stat(bag, float(impact) - prev_prediction)
+
+            for item, result in zip(active, results):
+                addr = item["address"]
+                self._note_dispatch_result(result)
+                self._fold_dispatch_metrics(addr, result, previous_predictions.get(addr))
+                if result.get("accepted"):
+                    self._last_prediction_ms[addr] = current_predictions[addr]
+                elif result.get("result_name") == "NO-ACK":
+                    self._last_prediction_ms.pop(addr, None)
+            cursor = next_cursor
+
         with self._control_lock:
             self._cursor = len(events)
 
@@ -1267,8 +1441,14 @@ class Handler(BaseHTTPRequestHandler):
                 if not addrs:
                     addrs = list(range(count))
                 addrs = [int(a) for a in addrs]
-                self.bridge.home(addrs, timeout_ms=int(data.get("timeout_ms", 8000)))
-                self._json(200, {"ok": True, "addresses": addrs})
+                results = self.bridge.home(
+                    addrs, timeout_ms=int(data.get("timeout_ms", 8000))
+                )
+                self._json(200, {
+                    "ok": all(result.get("accepted") for result in results),
+                    "addresses": addrs,
+                    "results": results,
+                })
                 return
 
             if self.path == "/api/strike":
@@ -1300,7 +1480,11 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             if self.path == "/api/cancel":
-                self.bridge.cancel_all()
+                try:
+                    self.bridge.cancel_all()
+                except RuntimeError as exc:
+                    self._json(409, {"error": str(exc)})
+                    return
                 self._json(200, {"ok": True})
                 return
 
@@ -1405,11 +1589,18 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError as exc:
                     self._json(400, {"error": str(exc)})
                     return
+                except RuntimeError as exc:
+                    self._json(409, {"error": str(exc)})
+                    return
                 self._json(200, {"ok": True, **result})
                 return
 
             if self.path == "/api/play/stop":
-                self.bridge.player.cancel()
+                try:
+                    self.bridge.player.cancel()
+                except RuntimeError as exc:
+                    self._json(409, {"error": str(exc)})
+                    return
                 self._json(200, {"ok": True})
                 return
 

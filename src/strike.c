@@ -514,19 +514,24 @@ void strike_restore_calibration(int32_t drum_pos, int32_t home_pos)
     irq_restore(irq_state);
 }
 
-void strike_home(void)
+strike_home_result_t strike_home(void)
 {
     uint32_t irq_state = irq_save();
 
     if (state != STRIKE_IDLE)
     {
         irq_restore(irq_state);
-        return;
+        return STRIKE_HOME_REJECT_BUSY;
+    }
+    if (motor_get_state() == MOTOR_FAULT)
+    {
+        irq_restore(irq_state);
+        return STRIKE_HOME_REJECT_FAULT;
     }
     if (homing_duty == 0)
     {
         irq_restore(irq_state);
-        return;
+        return STRIKE_HOME_REJECT_DISABLED;
     }
 
     drum_dir = (homing_duty > 0) ? 1 : -1;
@@ -546,6 +551,7 @@ void strike_home(void)
     home_phase = HOME_SEEK_DRUM;
 
     irq_restore(irq_state);
+    return STRIKE_HOME_STARTED;
 }
 
 strike_trigger_result_t strike_trigger(int32_t current_ma)
@@ -625,6 +631,19 @@ void strike_cancel(void)
         motor_stop();
         state = STRIKE_IDLE;
     }
+    timing_flags &= (uint16_t)~STRIKE_TIMING_ACTIVE;
+
+    irq_restore(irq_state);
+}
+
+void strike_stop(void)
+{
+    uint32_t irq_state = irq_save();
+
+    motor_disarm_coast();
+    motor_stop();
+    state = STRIKE_IDLE;
+    homed = 0;
     timing_flags &= (uint16_t)~STRIKE_TIMING_ACTIVE;
 
     irq_restore(irq_state);

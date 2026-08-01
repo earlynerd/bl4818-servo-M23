@@ -1370,16 +1370,16 @@ function isEditableTarget(t) {
 }
 
 // ─── MIDI parsing ────────────────────────────────────────────
-// Returns absolute-time note-ons in milliseconds. Tempo map aware
-// (single-track tempo events are honored; multi-track tempo handled
-// per-track in playback order — fine for Format-1 files where tempo
-// lives on track 0).
+// Returns absolute-time note-ons in milliseconds. Tempo-map aware across
+// Format-0 and Format-1 tracks; Format 2 has independent timelines and is
+// rejected below.
 function parseMidiFile(buf) {
   const d = new DataView(buf);
   if (d.getUint32(0) !== 0x4d546864) throw new Error("Not a MIDI file");
   const format = d.getUint16(8);
   const ntrks = d.getUint16(10);
   const tpb = d.getUint16(12);
+  if (format > 1) throw new Error(`MIDI Format ${format} is not supported`);
   if (tpb & 0x8000) throw new Error("SMPTE timing not supported");
 
   // First pass: collect tempo map from any track that has tempo meta events.
@@ -1556,13 +1556,17 @@ function pitchIsFallback(pitch) {
 // mallet can only swing once. We keep the highest-velocity event in each
 // cluster and tag the others as suppressed.
 const DEDUP_WINDOW_MS = 5;
-function buildSchedule(events) {
+function buildSchedule(events, tempoScale = 1.0) {
   const out = events.map(e => ({ ...e, slot: pitchToSlot(e.pitch), suppressed: false }));
+  // event.timeMs is in the file's original time domain; playback divides it
+  // by tempoScale. Convert the real-time collision window back into that
+  // original domain before comparing notes.
+  const sourceWindowMs = DEDUP_WINDOW_MS * Math.max(0.01, tempoScale);
   const winnerBySlot = {};
   for (const e of out) {
     if (e.slot < 0) continue;
     const w = winnerBySlot[e.slot];
-    if (w && (e.timeMs - w.timeMs) <= DEDUP_WINDOW_MS) {
+    if (w && (e.timeMs - w.timeMs) <= sourceWindowMs) {
       if (e.vel > w.vel) { w.suppressed = true; winnerBySlot[e.slot] = e; }
       else { e.suppressed = true; }
     } else {
@@ -1582,7 +1586,7 @@ function showComposition() {
 
   // Build the post-routing, post-dedup schedule. Counts and visualization
   // both work off this so the user sees exactly what will fire.
-  c.scheduled = buildSchedule(c.events);
+  c.scheduled = buildSchedule(c.events, getTempoScale());
   let mapped = 0, rerouted = 0, dropped = 0, merged = 0;
   const counts = new Map();
   for (const e of c.scheduled) {
@@ -1871,6 +1875,20 @@ function startPlayPolling() {
       // attention, drop our UI to idle. The teardown setTimeout in play()
       // will still fire later but stopPlayback is idempotent.
       if (!j.playing && S.playing) {
+        const ds = j.dispatch_stats || {};
+        const rejected = Number(ds.rejected || 0);
+        const transport = Number(ds.transport_failed || 0);
+        const accepted = Number(ds.accepted || 0);
+        if (rejected || transport) {
+          const reasons = Object.entries(ds.reasons || {})
+            .map(([name, count]) => `${name}=${count}`).join(", ");
+          const summary = `playback: accepted=${accepted}, rejected=${rejected}, ` +
+            `transport=${transport}${reasons ? ` (${reasons})` : ""}`;
+          log(summary);
+          showError(summary);
+        } else {
+          log(`playback: accepted=${accepted}, bursts=${Number(ds.bursts || 0)}`);
+        }
         stopPlayback("ended");
         return;
       }
@@ -1894,7 +1912,7 @@ async function play() {
   const c = S.composition;
   const cur = getCurrentMa();
   const scale = getTempoScale();
-  const sched = c.scheduled || buildSchedule(c.events);
+  const sched = buildSchedule(c.events, scale);
 
   // Build canonical events for the server. Trim and velFloor are baked in
   // here via effectiveCurrentForSlot — they're frozen for this playback.
@@ -2547,7 +2565,15 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.getElementById("homeBtn").addEventListener("click", async () => {
     log("home all…");
     try {
-      await api("POST", "/api/home", {});
+      const reply = await api("POST", "/api/home", {});
+      const rejected = (reply.results || []).filter(result => !result.accepted);
+      if (rejected.length) {
+        const why = rejected.map(result =>
+          `${result.address}:${result.result_name || result.error || "rejected"}`
+        ).join(", ");
+        log(`home rejected: ${why}`);
+        throw new Error(`not started on ${why}`);
+      }
       // The bridge returns once each strike-home command has been
       // acknowledged; the actual homing motion takes another second or
       // so per device. Show "homing…" then poll status until each slot
@@ -2658,8 +2684,12 @@ document.addEventListener("DOMContentLoaded", async () => {
     status.textContent = `homing addr ${slot}…`;
     status.style.color = "var(--text-muted)";
     try {
-      await api("POST", "/api/home", { addresses: [slot] });
-      // /api/home is fire-and-forget on the bridge now (matches ring_tool).
+      const reply = await api("POST", "/api/home", { addresses: [slot] });
+      const result = (reply.results || [])[0];
+      if (result && !result.accepted) {
+        throw new Error(result.result_name || result.error || "rejected");
+      }
+      // The command ACK only reports that homing started successfully.
       // Poll status until the device reports homed=true or we give up.
       const ok = await pollStatusUntil(() => !!S.homed[slot]);
       if (ok) {

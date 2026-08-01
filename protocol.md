@@ -16,12 +16,12 @@ Up to 16 devices, single master, 250 kbaud UART.
 ```
 
 - **Preamble** (2 bytes): `0xA5 0x5A` -- sync marker, not included in CRC
-- **LEN** (1 byte): number of payload bytes (max 34)
+- **LEN** (1 byte): number of payload bytes (max 64)
 - **Payload** (LEN bytes): type byte followed by command-specific data
 - **CRC-16/CCITT** (2 bytes): over LEN + payload, polynomial 0x1021, init 0xFFFF, big-endian
 
 Minimum packet: 6 bytes (preamble + LEN + 1-byte payload + CRC16).
-Maximum packet: 39 bytes (preamble + LEN + 34-byte payload + CRC16).
+Maximum packet: 69 bytes (preamble + LEN + 64-byte payload + CRC16).
 
 ## Forwarding Modes
 
@@ -62,7 +62,7 @@ The first payload byte is the command type.
 | 0x03 | SET_ADDRESS | `[counter]` | 2 | master -> ring (S&F) |
 | 0x10 | BROADCAST_DUTY | `[duty_hi duty_lo] x N` | 1 + 2*N | master -> ring |
 | 0x20+addr | ADDRESSED_CMD | `[subcmd_flags] [data...]` | 2..8 | master -> ring |
-| 0x40+addr | STATUS_REPLY | query-dependent status payload | 13, 17, 32, 35, 49, or 57 | device -> master |
+| 0x40+addr | STATUS_REPLY | query-dependent status payload | 13, 17, 32, 33, 35, 49, 53, 57, or 64 | device -> master |
 | 0x50+addr | ACK_REPLY | `[subcmd] [result] [detail_hi] [detail_lo]` (bare) or +12 timing bytes (timed) | 5 or 17 | device -> master |
 
 ### Addressed Sub-Commands
@@ -94,6 +94,13 @@ sub-command ID; the top 2 bits select reply policy.
 | 0x16 | QUERY_TIMING | -- | 0 |
 | 0x19 | QUERY_STRIKE_TIMING | -- | 0 |
 | 0x1A | STRIKE_EX | `[type] [current_hi] [current_lo] [param_hi] [param_lo]` | 5 |
+
+`STOP` immediately disables motor drive, aborts any active strike/homing
+sequence, and clears the learned-homed runtime flag. A successful `STRIKE_HOME`
+is therefore required before the next strike. With ACK reply mode,
+`STRIKE_HOME` returns `REJECT_NOT_READY` while another sequence is active,
+`REJECT_FAULT` on motor fault, and `INVALID_ARGUMENT` when homing is disabled
+(`homing_duty == 0`). `OK` means homing started, not that it has finished.
 
 ### STRIKE_EX Articulation Types
 
@@ -315,7 +322,8 @@ COASTING, or CATCHING, firmware only accepts it once
 aborted and a new strike attempt starts immediately, and the `ACK_REPLY`
 reports `OK_RETRIGGERED`.
 
-`QUERY_TIMING` replies with the same type `0x40 + addr` and 57 payload bytes:
+`QUERY_TIMING` replies with the same type `0x40 + addr` and 64 payload bytes
+(older firmware revisions may stop after the 49-, 53-, or 57-byte prefix):
 
 ```
 [type]
@@ -336,6 +344,9 @@ reports `OK_RETRIGGERED`.
 [uptime_b3] [uptime_b2] [uptime_b1] [uptime_b0]
 [uart_rx_overflow_b3] [uart_rx_overflow_b2] [uart_rx_overflow_b1] [uart_rx_overflow_b0]
 [adc_overrun_b3] [adc_overrun_b2] [adc_overrun_b1] [adc_overrun_b0]
+[proto_dbg_seq]
+[proto_dbg_cmd_type] [proto_dbg_len] [proto_dbg_raw_subcmd]
+[proto_dbg_reply_initial] [proto_dbg_reply_final] [proto_dbg_reply_branch]
 ```
 
 All timing fields are in microseconds except `uptime`, which is milliseconds
@@ -353,6 +364,9 @@ setting, or UART ISR latency is on the edge of what the link can sustain.
 `adc_overrun` counts every ADC conversion whose previous sample had not yet
 been consumed when it landed; nonzero means ADC ISR latency is starving the
 pipeline and current/voltage samples are being silently dropped.
+The final seven `proto_dbg_*` bytes describe the most recent addressed command
+and reply branch; `QUERY_TIMING` itself deliberately does not overwrite this
+snapshot.
 
 ## Persistent Settings
 

@@ -486,8 +486,12 @@ function renderControlPanel() {
 function parseMidiFile(buf) {
   const d = new DataView(buf);
   if (d.getUint32(0) !== 0x4d546864) throw new Error("Not a MIDI file");
+  const format = d.getUint16(8);
   const tpb = d.getUint16(12);
+  if (format > 1) throw new Error(`MIDI Format ${format} is not supported`);
+  if (tpb & 0x8000) throw new Error("SMPTE timing is not supported");
   let tempo = 500000; // default 120 BPM
+  let tempoSeen = false;
 
   // Find all tracks
   const notes = [];
@@ -522,7 +526,15 @@ function parseMidiFile(buf) {
         let len = 0;
         while (pos < end) { const b = d.getUint8(pos++); len = (len << 7) | (b & 0x7f); if (!(b & 0x80)) break; }
         if (type === 0x51 && len === 3) {
-          tempo = (d.getUint8(pos) << 16) | (d.getUint8(pos+1) << 8) | d.getUint8(pos+2);
+          const nextTempo = (d.getUint8(pos) << 16) | (d.getUint8(pos+1) << 8) | d.getUint8(pos+2);
+          // This lightweight player has one global BPM control. A tempo event
+          // after tick zero is a real map change from the MIDI default/current
+          // tempo even when it is the first tempo meta event in the file.
+          if ((tick > 0 || tempoSeen) && nextTempo !== tempo) {
+            throw new Error("Tempo-change MIDI files require the main MIDI player");
+          }
+          tempo = nextTempo;
+          tempoSeen = true;
         }
         pos += len;
         continue;

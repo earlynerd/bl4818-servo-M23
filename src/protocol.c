@@ -26,6 +26,7 @@
 #define PREAMBLE_1              0x5Au
 #define MAX_PAYLOAD             64u
 #define FRAME_BUF_SIZE          (1u + MAX_PAYLOAD + 2u) /* LEN + payload + CRC */
+#define FRAME_REPLAY_SIZE       (FRAME_BUF_SIZE + 1u) /* bad frame after first A5 */
 #define ADDR_UNASSIGNED         0xFFu
 #define MAX_DEVICES             16u
 #define FRAME_TIMEOUT_TICKS     HZ_TICKS_FROM_MS(PROTOCOL_TICK_HZ, PROTOCOL_FRAME_TIMEOUT_MS)
@@ -110,6 +111,10 @@ static uint8_t frame_pos;
 static uint8_t frame_expected;
 static rx_phase_t rx_phase;
 static uint8_t rx_timeout;
+static uint8_t replay_buf[FRAME_REPLAY_SIZE];
+static uint8_t replay_scratch[FRAME_REPLAY_SIZE];
+static uint8_t replay_pos;
+static uint8_t replay_len;
 
 /* Last addressed command diagnostic.  QUERY_TIMING deliberately does not
  * overwrite this snapshot, so the host can send a suspect command and then
@@ -170,13 +175,41 @@ static void reset_receiver(void)
     rx_timeout = 0;
 }
 
+static void clear_replay(void)
+{
+    replay_pos = 0u;
+    replay_len = 0u;
+}
+
+/* Reconsider a rejected frame starting one byte after its candidate A5.
+ * This is the standard single-byte-slip recovery rule: an A5 5A sequence
+ * embedded in a corrupt outer frame remains eligible to start the next
+ * valid frame. Preserve any unread replay tail while rebuilding the queue. */
+static void queue_current_frame_for_rescan(void)
+{
+    uint8_t count = 0u;
+    uint8_t i;
+
+    replay_scratch[count++] = PREAMBLE_1;
+    for (i = 0u; i < frame_pos && count < FRAME_REPLAY_SIZE; i++)
+        replay_scratch[count++] = frame_buf[i];
+    for (i = replay_pos; i < replay_len && count < FRAME_REPLAY_SIZE; i++)
+        replay_scratch[count++] = replay_buf[i];
+    for (i = 0u; i < count; i++)
+        replay_buf[i] = replay_scratch[i];
+
+    replay_pos = 0u;
+    replay_len = count;
+    reset_receiver();
+}
+
 static uint8_t prepare_set_duty(int16_t duty)
 {
     if (duty < -(int16_t)PWM_MAX_DUTY || duty > (int16_t)PWM_MAX_DUTY)
         return 0u;
 
     if (duty == 0) {
-        motor_stop();
+        strike_stop();
         return 0u;
     }
 
@@ -777,7 +810,7 @@ static void handle_addressed_cmd(uint8_t cmd_type, const uint8_t *payload, uint8
         send_addressed_reply(reply_mode, subcmd, ack_result, 0u, FULL_REPLY_STATUS);
         break;
     case SUBCMD_STOP:
-        motor_stop();
+        strike_stop();
         send_addressed_reply(reply_mode, subcmd, ACK_RESULT_OK, 0u, FULL_REPLY_STATUS);
         break;
     case SUBCMD_CLEAR_FAULT:
@@ -903,8 +936,22 @@ static void handle_addressed_cmd(uint8_t cmd_type, const uint8_t *payload, uint8
         send_addressed_reply(reply_mode, subcmd, ack_result, ack_detail, FULL_REPLY_STATUS);
         break;
     case SUBCMD_STRIKE_HOME:
-        strike_home();
-        send_addressed_reply(reply_mode, subcmd, ACK_RESULT_OK, strike_get_sequence(), FULL_REPLY_STATUS);
+        switch (strike_home()) {
+        case STRIKE_HOME_STARTED:
+            ack_result = ACK_RESULT_OK;
+            break;
+        case STRIKE_HOME_REJECT_FAULT:
+            ack_result = ACK_RESULT_REJECT_FAULT;
+            break;
+        case STRIKE_HOME_REJECT_BUSY:
+            ack_result = ACK_RESULT_REJECT_NOT_READY;
+            break;
+        default:
+            ack_result = ACK_RESULT_INVALID_ARGUMENT;
+            break;
+        }
+        send_addressed_reply(reply_mode, subcmd, ack_result,
+                             strike_get_sequence(), FULL_REPLY_STATUS);
         break;
     case SUBCMD_STRIKE_CANCEL:
         strike_cancel();
@@ -1080,7 +1127,7 @@ static void dispatch(uint8_t cmd, const uint8_t *payload, uint8_t len)
     }
 }
 
-static void process_frame(void)
+static uint8_t process_frame(void)
 {
     uint8_t len = frame_buf[0];
     uint8_t *payload = &frame_buf[1];
@@ -1088,9 +1135,10 @@ static void process_frame(void)
     uint16_t calc_crc = crc16_ccitt(frame_buf, 1u + len);
 
     if (calc_crc != rx_crc)
-        return;
+        return 0u;
 
     dispatch(payload[0], payload, len);
+    return 1u;
 }
 
 /* ── Public API ───────────────────────────────────────────────────────── */
@@ -1116,6 +1164,7 @@ void protocol_init(void)
     proto_dbg_fwd_mode = 0u;
     uart_echo_enable();
     uart_rx_flush();
+    clear_replay();
     reset_receiver();
 }
 
@@ -1126,12 +1175,20 @@ void protocol_poll(void)
     if (uart_rx_overflowed()) {
         uart_rx_flush();
         uart_rx_clear_overflow();
+        clear_replay();
         reset_receiver();
         return;
     }
 
-    while (budget != 0u && uart_available()) {
-        uint8_t c = uart_getc();
+    while (budget != 0u && (replay_pos < replay_len || uart_available())) {
+        uint8_t c;
+
+        if (replay_pos < replay_len) {
+            c = replay_buf[replay_pos++];
+        } else {
+            clear_replay();
+            c = uart_getc();
+        }
         budget--;
 
         switch (rx_phase) {
@@ -1170,7 +1227,7 @@ void protocol_poll(void)
             if (frame_pos == 1u) {
                 uint8_t len = frame_buf[0];
                 if (len == 0u || len > MAX_PAYLOAD) {
-                    reset_receiver();
+                    queue_current_frame_for_rescan();
                     break;
                 }
                 frame_expected = 1u + len + 2u;
@@ -1179,8 +1236,10 @@ void protocol_poll(void)
 
             if (frame_expected != 0u && frame_pos >= frame_expected) {
                 DBG('F');
-                process_frame();
-                reset_receiver();
+                if (process_frame())
+                    reset_receiver();
+                else
+                    queue_current_frame_for_rescan();
             }
             break;
         }
@@ -1188,6 +1247,7 @@ void protocol_poll(void)
         if (uart_rx_overflowed()) {
             uart_rx_flush();
             uart_rx_clear_overflow();
+            clear_replay();
             reset_receiver();
             return;
         }
@@ -1197,10 +1257,12 @@ void protocol_poll(void)
 void protocol_tick(uint32_t elapsed_ticks)
 {
     if (rx_phase != RX_SCAN_0 && rx_timeout != 0u) {
-        if (elapsed_ticks >= rx_timeout)
+        if (elapsed_ticks >= rx_timeout) {
+            clear_replay();
             reset_receiver();
-        else
+        } else {
             rx_timeout = (uint8_t)(rx_timeout - elapsed_ticks);
+        }
     }
 }
 

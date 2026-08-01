@@ -8,6 +8,7 @@ from __future__ import annotations
 import dataclasses
 import struct
 import time
+from collections import deque
 from typing import Iterable, Optional
 
 import serial
@@ -586,6 +587,7 @@ class RingClientV2:
         raw_tail = bytearray()
         crc_failures: list[bytes] = []
         invalid_lengths: list[bytes] = []
+        replay: deque[int] = deque()
 
         def timeout_debug() -> str:
             pending_error = None
@@ -630,6 +632,8 @@ class RingClientV2:
 
         def next_byte() -> int:
             while True:
+                if replay:
+                    return replay.popleft()
                 if time.monotonic() >= deadline:
                     raise RingTimeout(f"timeout waiting for frame; {timeout_debug()}")
                 byte = self.ser.read(1)
@@ -660,7 +664,12 @@ class RingClientV2:
                 if len(buf) == 1:
                     length = buf[0]
                     if length == 0 or length > MAX_PAYLOAD:
-                        _remember_event(invalid_lengths, PREAMBLE + bytes(buf))
+                        bad_frame = PREAMBLE + bytes(buf)
+                        _remember_event(invalid_lengths, bad_frame)
+                        # Restart one byte after the candidate preamble. This
+                        # preserves a valid frame whose A5 5A appeared inside
+                        # a corrupt length/body instead of discarding it.
+                        replay.extend(bad_frame[1:])
                         phase = scan_0
                         buf.clear()
                         expected = 0
@@ -680,6 +689,7 @@ class RingClientV2:
                     bad_frame = PREAMBLE + bytes(buf)
                     _remember_event(crc_failures, bad_frame)
                     self._trace("rx-crc-fail", bad_frame)
+                    replay.extend(bad_frame[1:])
                     phase = scan_0
                     buf.clear()
                     expected = 0
@@ -793,22 +803,9 @@ class RingClientV2:
             cmd = payload[0] if payload else 0
             payload_subcmd = payload[1] & SUBCMD_MASK if len(payload) >= 2 else 0
             if cmd == expected_cmd and payload_subcmd == expected_subcmd:
-                if len(payload) == 5:
-                    return CommandAck(
-                        address=address,
-                        subcmd=payload_subcmd,
-                        result=payload[2],
-                        detail=struct.unpack(">H", payload[3:5])[0],
-                    )
-                if len(payload) == 17:
-                    # ACK_TIMED: piggyback metrics from prev_compact snapshot.
-                    return CommandAck(
-                        address=address,
-                        subcmd=payload_subcmd,
-                        result=payload[2],
-                        detail=struct.unpack(">H", payload[3:5])[0],
-                        metrics=_parse_strike_timing_payload(address, payload[5:17]),
-                    )
+                ack = self._parse_ack_payload(address, expected_subcmd, payload)
+                if ack is not None:
+                    return ack
             elif cmd == (CMD_STATUS_BASE | address):
                 self._print_unexpected_reply(
                     f"expected ACK reply addr={address} "
@@ -818,6 +815,26 @@ class RingClientV2:
                 )
             _remember_event(skipped, payload)
             self._trace("skip", payload)
+
+    @staticmethod
+    def _parse_ack_payload(address: int, subcmd: int, payload: bytes) -> Optional[CommandAck]:
+        if len(payload) not in (5, 17):
+            return None
+        if payload[0] != (CMD_ACK_BASE | address):
+            return None
+        payload_subcmd = payload[1] & SUBCMD_MASK
+        if payload_subcmd != (subcmd & SUBCMD_MASK):
+            return None
+        metrics = None
+        if len(payload) == 17:
+            metrics = _parse_strike_timing_payload(address, payload[5:17])
+        return CommandAck(
+            address=address,
+            subcmd=payload_subcmd,
+            result=payload[2],
+            detail=struct.unpack(">H", payload[3:5])[0],
+            metrics=metrics,
+        )
 
     def _addressed_command(
         self,
@@ -949,6 +966,87 @@ class RingClientV2:
 
     def strike(self, address: int, current_ma: int, reply_mode: str = REPLY_MODE_FULL) -> AddressedReply:
         return self._addressed_command(address, SUBCMD_STRIKE, struct.pack(">h", current_ma), reply_mode)
+
+    def strike_burst(
+        self,
+        strikes: Iterable[tuple[int, int]],
+        reply_mode: str = REPLY_MODE_ACK,
+    ) -> list[Optional[CommandAck]]:
+        """Transmit a same-deadline chord without waiting between commands.
+
+        Frames are put on the wire farthest-address first so each reply is
+        inserted downstream of every later target. Replies are collected only
+        after the complete command train has been written. The returned list
+        follows the caller's input order; a missing ACK is represented by None.
+        """
+        assert self.ser is not None
+        items = [(int(address), int(current_ma)) for address, current_ma in strikes]
+        if not items:
+            return []
+        addresses = [address for address, _ in items]
+        if len(set(addresses)) != len(addresses):
+            raise RingError("strike burst requires unique addresses")
+        encoded_reply_mode = self._encode_reply_mode(reply_mode)
+        if encoded_reply_mode not in (
+            SUBCMD_REPLY_ACK,
+            SUBCMD_REPLY_ACK_TIMED,
+            SUBCMD_REPLY_NONE,
+        ):
+            raise RingError("strike burst reply mode must be ack, ack-timed, or none")
+
+        indexed = list(enumerate(items))
+        ordered = sorted(indexed, key=lambda entry: entry[1][0], reverse=True)
+        frames: list[tuple[int, int, bytes, bytes]] = []
+        for original_index, (address, current_ma) in ordered:
+            self._check_address(address)
+            if current_ma < -32768 or current_ma > 32767:
+                raise RingError("strike current must fit in int16")
+            payload = self._build_addressed_payload(
+                address,
+                SUBCMD_STRIKE,
+                struct.pack(">h", current_ma),
+                reply_mode,
+            )
+            frames.append((original_index, address, payload, self._build_frame(payload)))
+
+        self._flush_rx()
+        wire = b"".join(frame for _, _, _, frame in frames)
+        for _, _, _, frame in frames:
+            self._trace("tx-burst", frame)
+        written = self.ser.write(wire)
+        self.ser.flush()
+        if written != len(wire):
+            raise RingError(f"short serial burst write: {written}/{len(wire)} bytes")
+        self._last_tx_payload = frames[-1][2]
+        self._last_tx_frame = frames[-1][3]
+
+        results: list[Optional[CommandAck]] = [None] * len(items)
+        if encoded_reply_mode == SUBCMD_REPLY_NONE:
+            return results
+
+        index_by_address = {address: original_index for original_index, address, _, _ in frames}
+        pending = set(index_by_address)
+        deadline = time.monotonic() + self.timeout_ms / 1000.0
+        while pending:
+            remaining_s = deadline - time.monotonic()
+            if remaining_s <= 0:
+                break
+            remaining_ms = max(1, int(remaining_s * 1000))
+            try:
+                payload = self._recv_frame(timeout_ms=remaining_ms)
+            except RingTimeout:
+                break
+            cmd = payload[0] if payload else 0
+            if CMD_ACK_BASE <= cmd < CMD_ACK_END:
+                address = cmd & 0x0F
+                if address in pending:
+                    ack = self._parse_ack_payload(address, SUBCMD_STRIKE, payload)
+                    if ack is not None:
+                        results[index_by_address[address]] = ack
+                        pending.remove(address)
+                        continue
+            self._trace("skip-burst", payload)
+        return results
 
     def strike_ex(
         self,

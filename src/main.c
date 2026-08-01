@@ -43,23 +43,24 @@ static uint32_t hall_baseline_divider;
  * and the PWM braking handlers run on the boot path. */
 static volatile uint8_t main_loop_alive;
 
-static uint32_t schedule_protocol_timeout_from_samples(uint32_t *accum, uint32_t elapsed_samples,
-                                                       uint32_t *dropped_ticks)
+static uint32_t schedule_protocol_timeout_from_control_ticks(uint32_t *accum,
+                                                             uint32_t elapsed_control_ticks,
+                                                             uint32_t *dropped_ticks)
 {
     uint32_t extra_due;
     uint32_t total_due;
     uint32_t timeout_ticks;
 
-    *accum += elapsed_samples * PROTOCOL_TICK_HZ;
-    if (*accum < PWM_FREQ_HZ) {
+    *accum += elapsed_control_ticks * PROTOCOL_TICK_HZ;
+    if (*accum < CONTROL_LOOP_HZ) {
         if (dropped_ticks != 0u)
             *dropped_ticks = 0u;
         return 0u;
     }
 
-    *accum -= PWM_FREQ_HZ;
-    extra_due = *accum / PWM_FREQ_HZ;
-    *accum -= extra_due * PWM_FREQ_HZ;
+    *accum -= CONTROL_LOOP_HZ;
+    extra_due = *accum / CONTROL_LOOP_HZ;
+    *accum -= extra_due * CONTROL_LOOP_HZ;
     total_due = 1u + extra_due;
     timeout_ticks = HZ_TICKS_FROM_MS(PROTOCOL_TICK_HZ, PROTOCOL_FRAME_TIMEOUT_MS);
 
@@ -155,7 +156,6 @@ void SysTick_Handler(void)
     uint32_t dropped_updates;
     uint32_t dropped_ticks;
     uint32_t protocol_ticks;
-    uint16_t elapsed_samples;
 
     /* Kick WDT only when the main loop has set its liveness flag since the
      * last tick — this way a hung main loop still trips the watchdog. */
@@ -169,23 +169,25 @@ void SysTick_Handler(void)
         hall_refresh_baseline();
     }
 
-    elapsed_samples = motor_tick_control();
+    /* Motor-control cadence follows actual PWM/ADC samples internally, but
+     * housekeeping must continue when STOP masks PWM and ADC triggers cease. */
+    (void)motor_tick_control();
 
-    if (schedule_latest_from_samples(&strike_tick_accum, elapsed_samples,
-                                     STRIKE_LOOP_HZ, &dropped_updates)) {
+    if (schedule_latest_from_control_ticks(&strike_tick_accum, 1u,
+                                           STRIKE_LOOP_HZ, &dropped_updates)) {
         if (dropped_updates != 0u)
             timing_note_strike_drops(dropped_updates);
         strike_tick();
     }
 
-    if (schedule_latest_from_samples(&indicator_tick_accum, elapsed_samples,
-                                     INDICATOR_TICK_HZ, &dropped_updates)) {
+    if (schedule_latest_from_control_ticks(&indicator_tick_accum, 1u,
+                                           INDICATOR_TICK_HZ, &dropped_updates)) {
         indicator_tick();
     }
 
-    protocol_ticks = schedule_protocol_timeout_from_samples(&protocol_tick_accum,
-                                                            elapsed_samples,
-                                                            &dropped_ticks);
+    protocol_ticks = schedule_protocol_timeout_from_control_ticks(&protocol_tick_accum,
+                                                                  1u,
+                                                                  &dropped_ticks);
     if (protocol_ticks != 0u) {
         if (dropped_ticks != 0u)
             timing_note_protocol_drops(dropped_ticks);

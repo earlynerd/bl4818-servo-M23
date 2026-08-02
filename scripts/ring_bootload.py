@@ -623,118 +623,48 @@ def main() -> int:
         if args.recover_seconds > 0:
             print(f"streaming boot hold for {args.recover_seconds:.1f}s; apply power now")
             hold_boot_window(ring, args.recover_seconds)
+        addresses = None if args.all or args.broadcast_all else args.addresses
+        inline = False
 
-        count = ring.enumerate()
-        addresses = (
-            list(range(count))
-            if args.all or args.broadcast_all
-            else list(dict.fromkeys(args.addresses))
-        )
-        if not addresses:
-            raise RingError("no actuators enumerated")
-        for address in addresses:
-            if not 0 <= address < count:
-                raise RingError(f"address {address} is outside enumerated ring 0..{count - 1}")
-
-        loader = BootloaderClient(ring, retries=args.retries)
-        if not args.no_enter:
-            for address in addresses:
-                try:
-                    ring.enter_bootloader(address)
-                except RingTimeout:
-                    # It may already be a loader; the identity probe below is
-                    # authoritative and avoids treating that as an app failure.
-                    pass
-                wait_for_loader(loader, address)
-
-        for address in addresses:
-            info = loader.get_info(address)
-            if info.protocol_version not in (1, 2, 3) or info.page_size != PAGE_SIZE or info.app_limit != APP_LIMIT:
-                raise RingError(f"loader {address} reported incompatible geometry/version: {info}")
-            if args.broadcast_all and info.protocol_version < 3:
-                raise RingError(
-                    f"loader {address} protocol {info.protocol_version} "
-                    "does not support broadcast transfer"
-                )
-            print(f"[{address}] loader v{info.loader_version}, UID {info.uid}")
-            if info.reset_status is not None:
+        def show_progress(event: dict) -> None:
+            nonlocal inline
+            phase = event["phase"]
+            if phase in ("writing", "repairing"):
+                print(f"\r{event['message']}", end="", flush=True)
+                inline = True
+                return
+            if inline:
+                print()
+                inline = False
+            print(event["message"])
+            if phase == "loader_ready" and event.get("reset_status") is not None:
                 print(
-                    f"[{address}] entry RSTSTS=0x{info.reset_status:08X}, "
-                    f"ISPCTL=0x{info.entry_isp_control:08X}, "
-                    f"ISPSTS=0x{info.entry_isp_status:08X}"
+                    f"[{event['address']}] entry "
+                    f"RSTSTS=0x{event['reset_status']:08X}, "
+                    f"ISPCTL=0x{event['entry_isp_control']:08X}, "
+                    f"ISPSTS=0x{event['entry_isp_status']:08X}"
                 )
-        if args.info_only:
-            return 0
 
-        if args.broadcast_all:
-            pace_address = addresses[-1]
-            print(f"[all] broadcasting through tail address {pace_address}")
-            loader.begin_image(
-                pace_address,
-                meta,
-                command_base=CMD_BOOT_BROADCAST_BASE,
+        if args.info_only:
+            inspect_loader_targets(
+                ring,
+                addresses,
+                enter=not args.no_enter,
+                retries=args.retries,
+                require_protocol3=args.broadcast_all,
+                progress=show_progress,
             )
-            for address in addresses:
-                info = loader.get_info(address)
-                if (
-                    info.state_flags &
-                    (BOOT_FLAG_COMMITTED_VALID | BOOT_FLAG_UPDATE_ACTIVE)
-                ) != BOOT_FLAG_UPDATE_ACTIVE:
-                    raise RingError(
-                        f"loader {address} did not enter broadcast update state"
-                    )
-            loader.write_image_pages(
-                pace_address,
+        else:
+            update_ring(
+                ring,
                 image,
                 meta,
-                progress=lambda done, total: print(
-                    f"\r[all] pages {done}/{total}", end="", flush=True
-                ),
-                command_base=CMD_BOOT_BROADCAST_BASE,
+                addresses,
+                broadcast_all=args.broadcast_all,
+                enter=not args.no_enter,
+                retries=args.retries,
+                progress=show_progress,
             )
-            print()
-
-            repair = []
-            for address in addresses:
-                try:
-                    loader.verify_image(address, meta.image_crc32)
-                    print(f"[{address}] broadcast image CRC verified")
-                except RingError as exc:
-                    print(f"[{address}] broadcast verify failed ({exc}); repairing addressed")
-                    repair.append(address)
-
-            for address in repair:
-                loader.program_image(
-                    address,
-                    image,
-                    meta,
-                    progress=lambda done, total, a=address: print(
-                        f"\r[{a}] repair pages {done}/{total}", end="", flush=True
-                    ),
-                )
-                print(f"\n[{address}] addressed repair CRC verified")
-
-            for address in addresses:
-                loader.commit_image(address, meta)
-                print(f"[{address}] committed")
-            for address in addresses:
-                loader.run_application(address)
-                wait_for_application(ring, address, count)
-                print(f"[{address}] application re-enumerated and answered status")
-        else:
-            for address in addresses:
-                loader.update_image(
-                    address,
-                    image,
-                    meta,
-                    progress=lambda done, total, a=address: print(
-                        f"\r[{a}] pages {done}/{total}", end="", flush=True
-                    ),
-                )
-                print(f"\n[{address}] verified and committed")
-                loader.run_application(address)
-                wait_for_application(ring, address, count)
-                print(f"[{address}] application re-enumerated and answered status")
     finally:
         ring.close()
     return 0

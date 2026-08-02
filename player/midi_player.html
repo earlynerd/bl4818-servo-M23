@@ -114,6 +114,9 @@
   .note-bar.fired { box-shadow: 0 0 0 1px var(--accent-bright); }
   .progress-bar { height: 4px; background: var(--border); border-radius: 2px; }
   .progress-fill { height: 100%; background: var(--accent); border-radius: 2px; transition: width 0.05s linear; }
+  .firmware-meta { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--text-muted); line-height: 1.55; overflow-wrap: anywhere; }
+  .firmware-version { width: 105px; background: var(--surface); border: 1px solid var(--border); border-radius: 4px; padding: 5px 7px; color: var(--text); font-family: 'JetBrains Mono', monospace; font-size: 11px; }
+  .firmware-log { max-height: 130px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; margin-top: 6px; color: var(--text-dim); font: 9px/1.45 'JetBrains Mono', monospace; }
 
   .stats { display: flex; gap: 18px; font-size: 12px; font-family: 'JetBrains Mono', monospace; color: var(--text-muted); flex-wrap: wrap; }
 
@@ -326,6 +329,26 @@
         <button class="pill" id="enumBtn" style="flex:1 1 calc(50% - 3px)">Enumerate</button>
         <button class="pill" id="arpBtn" style="flex:1 1 100%;color:var(--accent-bright)" title="Strike each homed mallet ascending then descending at the current master to seed timing compensation.">Arpeggio (warm timings)</button>
       </div>
+    </div>
+
+    <div class="panel" id="firmwarePanel">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+        <label class="label" style="margin:0">Firmware</label>
+        <span id="firmwarePhase" style="font:10px 'JetBrains Mono',monospace;color:var(--text-dim)">idle</span>
+      </div>
+      <div id="firmwareArtifact" class="firmware-meta" style="margin-top:8px">No server build prepared.</div>
+      <div id="firmwareProgress" class="progress-bar" style="display:none;margin-top:9px"><div id="firmwareProgressFill" class="progress-fill" style="width:0%"></div></div>
+      <div id="firmwareMessage" style="font-size:11px;color:var(--text-dim);margin-top:7px">Build the checked-out source before updating.</div>
+      <div style="display:flex;gap:6px;align-items:center;margin-top:10px">
+        <input type="number" id="firmwareVersion" class="firmware-version" min="0" max="4294967295" step="1" title="Manifest image-version label (not an anti-rollback counter)">
+        <button class="pill" id="firmwareBuildBtn" style="flex:1">Build</button>
+        <button class="pill" id="firmwareUpdateBtn" style="flex:1;color:var(--accent-bright)" disabled>Update ring</button>
+      </div>
+      <p style="font-size:11px;color:var(--text-dim);margin-top:7px">Builds this server checkout, freezes that exact binary, then broadcasts it with per-device verify/commit. Updating stops playback and requires re-homing.</p>
+      <details id="firmwareLogDetails" style="display:none;margin-top:7px">
+        <summary style="cursor:pointer;font-size:10px;color:var(--text-dim)">Build output</summary>
+        <pre id="firmwareLog" class="firmware-log"></pre>
+      </details>
     </div>
 
     <div class="panel" id="busHealthPanel">
@@ -569,6 +592,9 @@ const S = {
   // accumulated counters every tick regardless (organic traffic feeds them).
   busProbe: true,
   busHealthIntervalId: null,
+  firmware: null,
+  firmwareUpdating: false,
+  firmwarePollIntervalId: null,
   // Session-wide pipeline timing breakdown — decomposes the total beat error
   // into the components between "intended fire time" and "physical impact":
   //   schedJitter — setTimeout fired N ms vs when we wanted it to (signed)
@@ -623,6 +649,115 @@ async function api(method, path, body) {
     throw new Error(`${method} ${path}: ${detail}`);
   }
   return r.json();
+}
+
+// ─── Firmware build + ring update ────────────────────────────
+function defaultFirmwareVersion() {
+  const d = new Date();
+  return +(String(d.getUTCFullYear()) +
+    String(d.getUTCMonth() + 1).padStart(2, "0") +
+    String(d.getUTCDate()).padStart(2, "0"));
+}
+
+function renderFirmware(state) {
+  const previous = S.firmware;
+  S.firmware = state;
+  const artifact = state && state.artifact;
+  const updating = !!(state && state.busy && state.operation === "update");
+  S.firmwareUpdating = updating;
+
+  const phase = document.getElementById("firmwarePhase");
+  phase.textContent = state ? state.phase : "offline";
+  phase.style.color = state && state.phase === "failed"
+    ? "var(--error)"
+    : state && state.phase === "complete"
+      ? "var(--success)"
+      : state && state.busy ? "var(--accent-bright)" : "var(--text-dim)";
+  document.getElementById("firmwareMessage").textContent =
+    (state && state.message) || "Firmware service unavailable";
+
+  const artifactEl = document.getElementById("firmwareArtifact");
+  if (artifact) {
+    const source = artifact.commit
+      ? `${artifact.commit}${artifact.dirty ? " + dirty" : ""}`
+      : "source unknown";
+    artifactEl.innerHTML =
+      `<span style="color:var(--text)">${artifact.image_size.toLocaleString()} bytes</span>` +
+      ` · CRC <span style="color:var(--accent-bright)">${escapeHtml(artifact.image_crc32_hex)}</span><br>` +
+      `version ${artifact.image_version} · ${escapeHtml(source)} · ${escapeHtml(artifact.built_at)}`;
+  } else {
+    artifactEl.textContent = "No server build prepared.";
+  }
+
+  const progress = state && state.progress;
+  const progressEl = document.getElementById("firmwareProgress");
+  const progressFill = document.getElementById("firmwareProgressFill");
+  if (state && state.busy) {
+    progressEl.style.display = "block";
+    const done = progress && Number(progress.done);
+    const total = progress && Number(progress.total);
+    progressFill.style.width = Number.isFinite(done) && Number.isFinite(total) && total > 0
+      ? `${Math.max(2, Math.min(100, done / total * 100))}%`
+      : "8%";
+  } else {
+    progressEl.style.display = "none";
+    progressFill.style.width = "0%";
+  }
+
+  const logDetails = document.getElementById("firmwareLogDetails");
+  const logEl = document.getElementById("firmwareLog");
+  if (state && state.log) {
+    logDetails.style.display = "block";
+    logEl.textContent = state.log;
+  } else {
+    logDetails.style.display = "none";
+    logEl.textContent = "";
+  }
+
+  document.getElementById("firmwareVersion").disabled = !!(state && state.busy);
+  document.getElementById("firmwareBuildBtn").disabled = !!(state && state.busy);
+  document.getElementById("firmwareUpdateBtn").disabled =
+    !!(state && state.busy) || !artifact;
+  for (const id of [
+    "homeBtn", "cancelBtn", "stopMotorsBtn", "enumBtn", "arpBtn",
+    "refreshStatusBtn", "busProbeBtn", "busResetBtn"
+  ]) {
+    const el = document.getElementById(id);
+    if (el) el.disabled = updating;
+  }
+  const playBtn = document.getElementById("playBtn");
+  if (playBtn) playBtn.disabled = updating || !S.composition;
+
+  if (previous && previous.busy && state && !state.busy) {
+    if (state.phase === "failed") {
+      showError(`Firmware ${previous.operation} failed: ${state.error || state.message}`);
+      log(`firmware ${previous.operation} failed: ${state.error || state.message}`);
+    } else if (state.phase === "ready") {
+      showSuccess(`Firmware build ready · CRC ${artifact.image_crc32_hex}`);
+      log(`firmware build ready crc=${artifact.image_crc32_hex} version=${artifact.image_version}`);
+    } else if (state.phase === "complete") {
+      const count = state.result && state.result.addresses
+        ? state.result.addresses.length : S.count;
+      showSuccess(`Firmware updated on ${count} actuator(s). Re-home before playback.`);
+      log(`firmware update complete on ${count} actuator(s)`);
+      setTimeout(refreshStatus, 250);
+    }
+  }
+}
+
+async function firmwareTick() {
+  try {
+    const state = await api("GET", "/api/firmware");
+    renderFirmware(state);
+  } catch (e) {
+    // The main connection indicator owns bridge-offline reporting.
+  }
+}
+
+function startFirmwareMonitor() {
+  if (S.firmwarePollIntervalId) return;
+  firmwareTick();
+  S.firmwarePollIntervalId = setInterval(firmwareTick, 500);
 }
 
 // Fold a fresh trigger_to_impact_ms reading into the per-slot EMA used by
@@ -691,6 +826,7 @@ function updateLatencyEma(slot, currentMa, metrics) {
 // timing piggybacked on it; we cache that into S.strikeTiming[slot] for
 // the cfg modal to display without paying for a separate query.
 function strikeAsync(addr, currentMa, label) {
+  if (S.firmwareUpdating) return;
   // The ACK we're about to receive carries metrics for the *previous*
   // completed strike on this slot, not for the strike we're sending now.
   // Snapshot the prior current here so the ACK handler can attribute the
@@ -878,6 +1014,7 @@ function renderBusHealth(snap) {
 }
 
 async function busHealthTick() {
+  if (S.firmwareUpdating) return;
   try {
     let snap;
     if (S.busProbe && !S.playing && S.count > 0) {
@@ -1905,6 +2042,10 @@ function stopPlayPolling() {
 }
 
 async function play() {
+  if (S.firmwareUpdating) {
+    showError("Firmware update in progress");
+    return;
+  }
   if (!S.composition) return;
   if (S.playing) { stopPlayback(); return; }
   hideMessages();
@@ -2536,6 +2677,50 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Buttons
   document.getElementById("playBtn").addEventListener("click", play);
   document.getElementById("stopBtn").addEventListener("click", stopPlayback);
+  const firmwareVersion = document.getElementById("firmwareVersion");
+  firmwareVersion.value = String(defaultFirmwareVersion());
+  document.getElementById("firmwareBuildBtn").addEventListener("click", async () => {
+    const version = Number(firmwareVersion.value);
+    if (!Number.isInteger(version) || version < 0 || version > 0xFFFFFFFF) {
+      showError("Firmware version must be an integer from 0 to 4294967295");
+      return;
+    }
+    try {
+      hideMessages();
+      log(`building firmware version=${version} on server…`);
+      renderFirmware(await api("POST", "/api/firmware/build", { image_version: version }));
+    } catch (e) {
+      showError("Firmware build could not start: " + e.message);
+      log("firmware build start failed: " + e.message);
+    }
+  });
+  document.getElementById("firmwareUpdateBtn").addEventListener("click", async () => {
+    const artifact = S.firmware && S.firmware.artifact;
+    if (!artifact) return;
+    const dirtyWarning = artifact.dirty
+      ? "\n\nWARNING: the server checkout had uncommitted changes when this was built."
+      : "";
+    const ok = window.confirm(
+      `Update all ${S.count} actuator(s) with this firmware?\n\n` +
+      `CRC32: ${artifact.image_crc32_hex}\n` +
+      `Version: ${artifact.image_version}\n` +
+      `Source: ${artifact.commit || "unknown"}${artifact.dirty ? " + dirty" : ""}` +
+      dirtyWarning +
+      "\n\nPlayback will stop. Do not remove power; all actuators must be re-homed afterward."
+    );
+    if (!ok) return;
+    try {
+      hideMessages();
+      log(`starting ring firmware update crc=${artifact.image_crc32_hex}…`);
+      renderFirmware(await api("POST", "/api/firmware/update", {
+        confirm: true,
+        expected_crc32: artifact.image_crc32,
+      }));
+    } catch (e) {
+      showError("Firmware update could not start: " + e.message);
+      log("firmware update start failed: " + e.message);
+    }
+  });
   document.getElementById("resetMapBtn").addEventListener("click", () => {
     S.mapping = DEFAULT_MAPPING.slice();
     rebuildMappingIfNeeded();
@@ -2786,6 +2971,10 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // Initial connection
   await refreshStatus();
+
+  // Server-side firmware build/update state. Kept separate from normal status
+  // because ring status is intentionally unavailable during maintenance.
+  startFirmwareMonitor();
 
   // Live ring-link health monitor (per-device latency + dropped/CRC replies).
   startBusHealthMonitor();

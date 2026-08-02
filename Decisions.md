@@ -184,3 +184,10 @@ When a decision is reversed or superseded, append a new entry rather than rewrit
 - **Accepted tradeoff:** A stopped broadcast can leave the whole participating ring resident in LDROM. A tableless non-cloned CRC-32 makes the feature fit at 4,092 / 4,096 bytes, leaving 4 bytes of LDROM margin.
 - **Supersedes:** the sequential-only data-transfer detail in “Gen1 firmware updates use a permanent LDROM recovery loader” and the 16-byte protocol-2 margin in “APROM/LDROM handoffs verify both VECMAP and boot source.”
 - **Affects:** `ldrom/crc32.c`, `ldrom/protocol.c`, `scripts/ring_bootload.py`, `tests/test_ring_bootload.py`, `protocol.md`, `docs/firmware-update.md`, and `docs/host-software.md`.
+
+## 2026-08-02 — MIDI server builds and updates a frozen firmware artifact in-process
+
+- **Decision:** The browser Firmware panel uses two explicit actions: the MIDI server runs a fixed `make` in its checkout and freezes the validated application `.bin` plus CRC/version/source identity, then a separately confirmed Update action reuses the server's existing `RingClientV2` connection for the protocol-3 full-ring transaction under an exclusive maintenance flag and ring lock. The first version does not run Git operations or accept uploaded ELF/binary files.
+- **Why:** The MIDI server already owns the serial port, so launching the standalone bootloader CLI would collide with its COM handle. A frozen artifact makes the operator-confirmed CRC authoritative, while the build/update split keeps compilation non-destructive and prevents an accidental one-click source-to-fleet deployment.
+- **Supersedes:** the requirement to stop the MIDI server for every ring update when using the browser/server path; standalone `ring_bootload.py` still requires exclusive ownership and therefore still requires the server to be stopped.
+- **Affects:** `scripts/ring_bootload.py`, `scripts/ring_midi_server.py`, `player/midi_player.html`, `tests/test_ring_bootload.py`, `tests/test_ring_playback.py`, `midi_server_api.md`, `README.md`, `docs/host-software.md`, and `docs/firmware-update.md`.

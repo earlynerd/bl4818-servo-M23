@@ -50,7 +50,9 @@ flowchart LR
 
 The Python server owns the serial port and serves the browser UI. It enumerates
 the actuator ring, maps MIDI pitches to actuator addresses, schedules strikes,
-and compensates for measured mechanical latency. Each actuator closes its own
+compensates for measured mechanical latency, and can build then deploy APROM
+updates through the permanent LDROM loaders without releasing the serial port.
+Each actuator closes its own
 current, velocity, and position loops and runs the homing/strike state machine.
 The current protocol uses a four-bit address and supports up to 16 actuators per
 ring.

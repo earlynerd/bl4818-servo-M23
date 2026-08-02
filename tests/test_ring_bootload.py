@@ -3,6 +3,7 @@ import sys
 import unittest
 import zlib
 from pathlib import Path
+from unittest.mock import patch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -28,9 +29,11 @@ from ring_bootload import (  # noqa: E402
     CMD_BOOT_BASE,
     CMD_BOOT_BROADCAST_BASE,
     CMD_BOOT_REPLY_BASE,
+    BootInfo,
     BootloaderClient,
+    update_ring,
 )
-from ring_bus import RingTimeout  # noqa: E402
+from ring_bus import RingError, RingTimeout  # noqa: E402
 
 
 class FakeRing:
@@ -148,6 +151,103 @@ class BootloaderClientTests(unittest.TestCase):
             (info.reset_status, info.entry_isp_control, info.entry_isp_status),
             diagnostics,
         )
+
+
+class BootloaderUpdateTests(unittest.TestCase):
+    def test_broadcast_verifies_repairs_commits_and_restarts_individually(self):
+        image = prepare_image(
+            struct.pack("<II", 0x20000FF0, 0x00000009) + b"firmware"
+        )
+        meta = image_metadata(image, image_version=9)
+
+        class OpenRing:
+            def __init__(self):
+                self.entered = []
+                self.status_queries = []
+
+            def enumerate(self):
+                return 3
+
+            def enter_bootloader(self, address):
+                self.entered.append(address)
+
+            def query_status(self, address):
+                self.status_queries.append(address)
+
+        class Loader:
+            def __init__(self):
+                self.begin = []
+                self.writes = []
+                self.verified = []
+                self.repaired = []
+                self.committed = []
+                self.started = []
+
+            @staticmethod
+            def _info(address):
+                return BootInfo(
+                    protocol_version=3,
+                    loader_version=3,
+                    state_flags=0x02,
+                    address=address,
+                    page_size=0x200,
+                    app_limit=APP_LIMIT,
+                    image_size=0,
+                    image_crc32=0,
+                    image_version=0,
+                    uid=f"{address:024X}",
+                )
+
+            def get_info(self, address):
+                return self._info(address)
+
+            def begin_image(self, address, update_meta, *, command_base):
+                self.begin.append((address, update_meta, command_base))
+
+            def write_image_pages(self, address, update_image, update_meta,
+                                  progress, *, command_base):
+                self.writes.append((address, update_image, update_meta, command_base))
+                progress(54, 54)
+
+            def verify_image(self, address, expected_crc32):
+                self.verified.append((address, expected_crc32))
+                if address == 1:
+                    raise RingError("injected CRC mismatch")
+
+            def program_image(self, address, update_image, update_meta, progress):
+                self.repaired.append(address)
+                progress(54, 54)
+
+            def commit_image(self, address, update_meta):
+                self.committed.append(address)
+
+            def run_application(self, address):
+                self.started.append(address)
+
+        ring = OpenRing()
+        loader = Loader()
+        events = []
+        with patch("ring_bootload.BootloaderClient", return_value=loader):
+            result = update_ring(
+                ring,
+                image,
+                meta,
+                broadcast_all=True,
+                progress=events.append,
+            )
+
+        self.assertEqual(ring.entered, [0, 1, 2])
+        self.assertEqual(loader.begin[0][0::2], (2, CMD_BOOT_BROADCAST_BASE))
+        self.assertEqual(loader.writes[0][0], 2)
+        self.assertEqual(loader.writes[0][3], CMD_BOOT_BROADCAST_BASE)
+        self.assertEqual([address for address, _ in loader.verified], [0, 1, 2])
+        self.assertEqual(loader.repaired, [1])
+        self.assertEqual(loader.committed, [0, 1, 2])
+        self.assertEqual(loader.started, [0, 1, 2])
+        self.assertEqual(ring.status_queries, [0, 1, 2])
+        self.assertEqual(result["repaired"], [1])
+        self.assertIn("writing", [event["phase"] for event in events])
+        self.assertEqual(events[-1]["phase"], "complete")
 
     def test_lost_commit_ack_is_resolved_from_manifest(self):
         address = 2

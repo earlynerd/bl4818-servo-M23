@@ -295,9 +295,10 @@ py scripts/ring_bootload.py build/m2003-motor.bin -p COM7 --addr 0 `
     --recover-seconds 5 --no-enter --image-version 1
 ```
 
-`--all` replaces `--addr` for a sequential full-ring update. The updater owns
-the serial port for the entire operation; stop the MIDI server first. A normal
-update enumerates the ring before handoff. Recovery also enumerates after the
+`--all` replaces `--addr` for a sequential full-ring update. The standalone
+updater owns the serial port for the entire operation; stop the MIDI server
+before using that CLI. A normal update enumerates the ring before handoff.
+Recovery also enumerates after the
 boot-hold stream, so the requested address is the actuator's physical ring
 position in that enumeration. After every `RUN_APROM`, the tool re-enumerates
 the mixed ring and requires the updated application to answer `QUERY_STATUS`
@@ -332,6 +333,28 @@ any mismatch with the addressed transfer, commits every verified manifest
 individually, and returns each actuator to APROM individually. `--all` remains
 the sequential fallback and works with protocol 1, 2, or 3 loaders;
 `--broadcast-all` refuses any loader older than protocol 3.
+
+### MIDI server / browser updater
+
+The browser player exposes the same protocol-3 path without opening a second
+serial connection. **Build** runs the fixed `make` command in the server's
+repository checkout, validates `build/m2003-motor.bin`, and freezes the prepared
+bytes plus image size, CRC-32, version, Git commit, and dirty status in server
+memory. **Update ring** requires a second explicit confirmation tied to the
+displayed CRC, then uses the MIDI server's already-open `RingClientV2` instance.
+
+The update transaction sets an exclusive maintenance flag before stopping the
+playback worker. New strike, home, enumerate, status, tuning, and active bus
+probe requests return HTTP 409 until every application has restarted or the
+operation fails. The worker also holds the bridge ring lock for the entire
+loader transaction. Build output and structured update progress remain
+available through `GET /api/firmware`; the browser polls that endpoint because
+normal ring status is intentionally unavailable during maintenance.
+
+The first GUI version has no Git synchronization and no uploaded ELF/binary
+path. Operators update the checkout outside the GUI, inspect the displayed
+commit/dirty marker, build, then flash the frozen `.bin`. After success all
+actuators are intentionally disabled/unhomed and must be homed again.
 
 ### Single restrained actuator
 

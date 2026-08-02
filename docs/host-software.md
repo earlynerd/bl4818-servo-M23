@@ -13,7 +13,8 @@ py -m pip install -r requirements.txt
 `pyserial` is required for all ring communication. `matplotlib` is used by
 tuning/measurement plots, and `mido` is used by the direct General MIDI drummer.
 The browser player and MIDI HTTP server do not require Node.js or a JavaScript
-build toolchain.
+build toolchain. The browser's firmware-build button does require GNU Make and
+`arm-none-eabi-gcc` in the MIDI server process's `PATH`.
 
 ## MIDI server and browser player
 
@@ -71,8 +72,30 @@ torque, current, position, home, or strike commands.
 `scripts/ring_bootload.py` updates APROM through the permanent Gen1 LDROM
 loader. It stops the target application, preserves the settings pages, retries
 idempotent writes, verifies the exact application CRC, and commits the image
-last. Stop the MIDI server before running it because both require exclusive
-ownership of the serial port.
+last.
+
+When the MIDI server is running from this repository, the browser Firmware
+panel is the normal operator path:
+
+1. Set the image-version label and click **Build**. The server runs the fixed
+   `make` command in its checkout, validates `build/m2003-motor.bin`, and freezes
+   that exact image in memory. The panel shows source commit/dirty state, byte
+   count, CRC-32, and version.
+2. Review those values and click **Update ring**. After explicit confirmation,
+   the server stops playback, reserves its existing serial connection, performs
+   the protocol-3 broadcast data phase, verifies/repairs/commits every actuator
+   individually, and requires every application to re-enumerate.
+3. Re-home the complete ring before playback.
+
+The GUI intentionally does not run `git pull` or accept an ELF/file upload in
+this first version: the checked-out server source is the single build input and
+the frozen validated `.bin` is the single update artifact. A failed update may
+leave one or more actuators resident in LDROM; correct the cause and retry the
+same prepared artifact.
+
+The standalone CLI remains available for recovery and bench work. Stop the MIDI
+server before running it because a separate process cannot share the serial
+port:
 
 ```powershell
 py scripts/ring_bootload.py build/m2003-motor.bin -p COM7 --addr 0 `

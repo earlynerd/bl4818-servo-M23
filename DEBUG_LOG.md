@@ -44,3 +44,12 @@
 - **Class:** fixed-delay-protocol-race
 - **Recently-touched?** no
 - **Time to fix:** about 10 minutes
+
+## 2026-08-02 — Manifest-last recovery passed staged power-cycle testing
+
+- **Observation:** The restrained actuator was deliberately power-cycled with (1) an erased manifest and intact APROM, (2) page 0 erased with only its first 32 bytes restored, and (3) a fully written and CRC-verified APROM whose manifest commit was withheld.
+- **Result:** Every cold boot remained in a responsive, enumerable LDROM loader with no committed image and cleared volatile update state. The partial image returned `CRC_MISMATCH`; `RUN_APROM` with an invalid manifest returned `BAD_STATE`.
+- **Recovery:** A normal version-2 update rewrote 54 pages, verified CRC `0x349FA335`, committed the manifest, re-enumerated the application, and preserved strike settings `1024 / 300 / 100`. The same image also passed the one-device `--all` command path.
+- **Class:** recovery-validation
+- **Recently-touched?** yes
+- **Time to validate:** about 15 minutes of staged bench testing

@@ -67,6 +67,7 @@ The first payload byte is the command type.
 | 0x61 | STAY_IN_BOOTLOADER | -- | 1 | master -> ring during LDROM boot window |
 | 0x70+addr | BOOT_CMD | `[boot_subcmd] [data...]` | 2..36 | master -> LDROM loader |
 | 0x80+addr | BOOT_REPLY | `[boot_subcmd] [result] [detail...]` | 3..36 | LDROM loader -> master |
+| 0x90+tail_addr | BOOT_BULK_CMD | `[boot_subcmd] [data...]` | 2..36 | master -> all assigned protocol-3 LDROM loaders |
 
 ### Addressed Sub-Commands
 
@@ -160,6 +161,21 @@ Application image bytes inside `WRITE_CHUNK` retain their binary byte order.
 | `0x14` | COMMIT_IMAGE | -- | -- |
 | `0x15` | RUN_APROM | -- | --; loader remaps APROM vectors, selects APROM, and system-resets after reply drains |
 
+Protocol 3 adds `BOOT_BULK_CMD` for the idempotent data phase only:
+`BEGIN_IMAGE`, `ERASE_PAGE`, and `WRITE_CHUNK`. Every assigned loader executes
+the command, but only the loader whose address is encoded in the type byte
+returns the normal `BOOT_REPLY`. The host uses the farthest physical address
+(`count - 1`) as this tail pacekeeper because it receives each cut-through
+frame last. Commands outside the three data-phase subcommands produce no bulk
+reply and are not executed.
+
+The tail reply is a flow-control boundary, not proof that every flash operation
+succeeded. After the shared transfer, the host individually runs
+`VERIFY_IMAGE` on every loader, repeats the addressed data phase for any failed
+device, and only then individually issues `COMMIT_IMAGE` and `RUN_APROM`.
+Allowing only one reply prevents multiple loaders from injecting overlapping
+reply frames into the one-direction ring.
+
 LDROM never calls the application reset vector directly. A system reset gives
 APROM normal reset-state CPU and peripheral state. Each handoff first issues and
 verifies the M2003 `VECMAP` command for the destination, selects and verifies the
@@ -167,7 +183,7 @@ matching runtime boot source, then requests the reset. APROM then re-arms LDROM
 as the destination of the next reset before normal initialization without
 changing the vector map while APROM is running.
 
-Protocol 2 `GET_INFO` reply detail is 45 bytes:
+Protocol 2 and 3 `GET_INFO` reply detail is 45 bytes:
 
 ```text
 [protocol_version]
@@ -185,13 +201,14 @@ Protocol 2 `GET_INFO` reply detail is 45 bytes:
 ```
 
 State flags are `0x01 = committed image valid` and `0x02 = update active`;
-other bits are reserved. Loader and protocol version are both 2 in the current
+other bits are reserved. Loader and protocol version are both 3 in the current
 implementation. The final three words are raw `SYS.RSTSTS`, `FMC.ISPCTL`, and
 `FMC.ISPSTS` snapshots taken before the loader changes its FMC state. They make
 system-reset, watchdog-reset, selected boot source, and entry vector mapping
 observable over UART when SWD cannot be connected. Protocol 1 loaders return
-the original 33-byte prefix; the current host accepts either layout. Page size
-is 512 and application limit is `0x7A00`.
+the original 33-byte prefix; the current host accepts both reply layouts and
+uses addressed updates for loaders older than protocol 3. Page size is 512 and
+application limit is `0x7A00`.
 
 `BEGIN_IMAGE` accepts only a word-aligned size from 8 through `0x7A00` and
 flags 0. It erases the manifest page before marking the RAM update state

@@ -24,8 +24,9 @@ rewritten over the ring in version 1.
 - Use CRCs for transmission and image integrity. Version 1 does not provide
   authentication, signing, encryption, compression, delta updates, or A/B
   images.
-- Program one device at a time in version 1. This keeps retry and fault
-  attribution unambiguous; it does not preclude a later broadcast optimizer.
+- Keep verification, repair, manifest commit, and application restart
+  device-specific. Protocol 3 may broadcast one shared image data phase, with
+  the original sequential updater retained as the conservative fallback.
 
 This work applies to the Gen1 UART ring. It does not change the tentative Rev2
 RS485 design.
@@ -119,7 +120,7 @@ has left the device. If vector remapping fails, the already-running application
 watchdog forces a hardware reset that reloads the provisioned LDROM-first
 configuration rather than attempting a direct branch.
 
-Loader protocol 2 appends raw entry snapshots of `SYS.RSTSTS`, `FMC.ISPCTL`,
+Loader protocol 2 and 3 append raw entry snapshots of `SYS.RSTSTS`, `FMC.ISPCTL`,
 and `FMC.ISPSTS` to `GET_INFO`. These values are captured before the loader
 modifies the FMC controller and are the primary handoff diagnostic because SWD
 and UART cannot be attached at the same time on Gen1.
@@ -149,6 +150,14 @@ If reset or power loss occurs before step 5 completes, the erased or invalid
 manifest keeps the device in LDROM. Repeating `BEGIN_IMAGE` and the full image
 write is always safe. Resume-from-page is deferred until the simple full retry
 has been proven reliable.
+
+Protocol 3 optionally performs steps 2 and 3 once for all assigned loaders.
+The command type encodes the farthest address, which alone returns the normal
+reply after executing each command and therefore paces the next frame. The host
+then performs step 4 individually, repeats the addressed data phase for any
+CRC failure, and performs steps 5 and 6 individually. A stopped bulk transfer
+can leave every participating actuator resident in LDROM, but rerunning either
+bulk or sequential update is recovery-safe.
 
 Every erase and write command rejects addresses at or above
 `FIRMWARE_APP_LIMIT`; there is no `--erase-persist` escape hatch. Settings can
@@ -222,7 +231,7 @@ Recorded on 2026-08-02 from a clean build:
 
 - packaged application: 27,480 / 31,232 bytes (3,752 bytes free), CRC-32
   `0x349FA335` for image version zero;
-- permanent loader: 4,080 / 4,096 bytes (16 bytes free), with the linker
+- permanent loader: 4,092 / 4,096 bytes (4 bytes free), with the linker
   enforcing the limit;
 - manifest: exactly 512 bytes;
 - host tests cover the full firmware-update and playback host paths; Python
@@ -230,9 +239,11 @@ Recorded on 2026-08-02 from a clean build:
 - complete firmware, read-only CONFIG capture, and preservation-aware CONFIG
   transaction files generate without contacting hardware.
 
-The 16-byte LDROM margin is intentionally visible here: protocol 2 fits, but
-the loader is effectively full. Future loader features must first recover space
-or use a different architecture.
+The 4-byte LDROM margin is intentional and explicit. Protocol 3 recovers 64
+bytes by using a compact tableless CRC-32 routine, then spends almost all of
+that space on tail-acknowledged bulk transfer while retaining loader-entry
+diagnostics and every flash-safety check. Further loader features require a
+different architecture or a measured source-level size reduction.
 
 Generate the current programming and configuration-capture command files
 without connecting to hardware:
@@ -292,22 +303,56 @@ position in that enumeration. After every `RUN_APROM`, the tool re-enumerates
 the mixed ring and requires the updated application to answer `QUERY_STATUS`
 before advancing.
 
+Use the same prepared image and image-version value for every enumerated
+actuator with:
+
+```powershell
+py scripts/ring_bootload.py build/m2003-motor.bin -p COM7 --all `
+    --image-version 2
+```
+
+The command first enumerates the complete ring and confirms that every target
+can enter and answer from LDROM. It then programs one physical ring address at
+a time, CRC-verifies and commits that image, returns the device to APROM, and
+requires the application status reply before advancing. If a run is
+interrupted, rerun the same command and image version; page writes are
+idempotent and an uncommitted target remains in its loader. Image versions are
+operator-supplied labels in version 1, not an anti-rollback policy.
+
+After every actuator has protocol-3 LDROM, the faster shared-data path is:
+
+```powershell
+py scripts/ring_bootload.py build/m2003-motor.bin -p COM7 --broadcast-all `
+    --image-version 3
+```
+
+This broadcasts manifest invalidation, page erases, and chunks once, paced by
+the farthest loader's single reply. It then CRC-verifies every device, repairs
+any mismatch with the addressed transfer, commits every verified manifest
+individually, and returns each actuator to APROM individually. `--all` remains
+the sequential fallback and works with protocol 1, 2, or 3 loaders;
+`--broadcast-all` refuses any loader older than protocol 3.
+
 ### Single restrained actuator
 
 - Entering LDROM changes the normal application LED pattern to solid on.
 - LDROM-first reset verifies the APROM vector map and boot selection before
   system-resetting into a valid application; APROM re-arms LDROM before normal
   initialization and leaves the bridge disabled.
-- Loader `GET_INFO` protocol 2 reports the retained reset source and entry FMC
+- Loader `GET_INFO` protocol 2/3 reports the retained reset source and entry FMC
   state so the observed handoff can be attributed without simultaneous SWD.
 - Addressed entry ACK is observed before reset; address survives the soft
   reset mailbox path.
 - Boot interception can hold a valid image in the loader.
 - A known image programs, verifies, commits, runs, and re-enumerates.
 - Saved zero, PID, and strike settings survive the update.
-- Power removal during manifest erase, APROM erase, chunk programming, CRC
-  verification, and manifest programming always returns to a responsive
-  loader.
+- Cold-power recovery is exercised after manifest invalidation, after an APROM
+  page erase plus partial chunk programming, and after full-image CRC
+  verification with the commit deliberately withheld. Host tests separately
+  prove that every partial manifest prefix remains invalid until the final
+  magic word is written. These observable boundaries cover the recovery
+  invariant without depending on manually timing a sub-millisecond flash-word
+  operation.
 
 Record the first-device evidence here before provisioning a second actuator:
 
@@ -320,18 +365,21 @@ Record the first-device evidence here before provisioning a second actuator:
 | Valid-image cold boot | **PASS 2026-08-02:** solid LDROM LED for one second, then normal APROM application |
 | Addressed soft-reset handoff and ACK | **PASS 2026-08-02:** protocol-2 loader replied at inherited address 0; entry `RSTSTS=0000003B` has SYSRF set and WDTRF clear, `ISPCTL=0000000A` selects LDROM, and `ISPSTS=00100010` reports LDROM VECMAP |
 | Full LDROM self-program | **PASS 2026-08-02:** 54 APROM pages erased/written over COM18 in about 17 seconds; CRC verified, manifest committed, and application re-enumerated and answered status |
-| Invalid-manifest cold recovery | pending |
-| Interrupted-update recovery points | pending |
+| Protocol-3 broadcast self-program | **PASS 2026-08-02:** loader v3 was confirmed after J-Link provisioning; `--broadcast-all --image-version 3` sent all 54 pages through tail address 0, individually verified CRC `349FA335`, committed, and re-enumerated the application in about 19 seconds on the one-node ring |
+| Invalid-manifest cold recovery | **PASS 2026-08-02:** `BEGIN_IMAGE` erased only the manifest and changed loader flags from committed `01` to update-active `02`; `RUN_APROM` returned `BAD_STATE`; after power removal the actuator enumerated in LDROM with flags `00` and an erased manifest. |
+| Interrupted-update recovery points | **PASS 2026-08-02:** page 0 was erased and only its first 32 bytes rewritten; verification returned `CRC_MISMATCH`, and a cold boot returned to responsive LDROM. All 54 pages were then written and CRC-verified with commit deliberately withheld; another cold boot again returned to responsive LDROM. The manifest-prefix unit test proves commit remains invalid until magic is written last. |
 | Settings journal preserved | **PASS 2026-08-02:** before/after `home_offset=1024`, `coast_distance=300`, and `homing_duty=100` matched exactly |
-| UART log / test command / image version | UID `00200011046C70F100001DF8`; `py scripts/ring_bootload.py build/m2003-motor.bin -p COM18 --addr 0 --image-version 1`; committed image valid, 27,480 bytes, CRC-32 `349FA335`, version 1; final application `state=0`, `fault=0` |
+| UART log / test command / image version | UID `00200011046C70F100001DF8`; exercised addressed version 2, sequential `--all --image-version 2`, and protocol-3 `--broadcast-all --image-version 3` on the one-node ring; committed image valid, 27,480 bytes, CRC-32 `349FA335`, version 3; final application `IDLE`, `fault=NONE`, settings `1024 / 300 / 100` |
 
 ### Ring
 
 - A loader forwards ordinary application traffic byte-for-byte while idle.
 - The farthest, middle, and nearest positions can each be updated.
 - A deliberately failed device does not prevent retry or corrupt a neighbor.
-- Only after those tests pass: run the sequential fleet update and retain the
-  host log plus final per-device version/status results.
+- Protocol-3 bulk transfer is paced by only the farthest loader reply; every
+  device is then verified and committed individually.
+- Only after those tests pass: run sequential and broadcast fleet updates and
+  retain the host logs plus final per-device version/status results.
 
 ## Implementation progress
 
@@ -344,5 +392,7 @@ Record the first-device evidence here before provisioning a second actuator:
 - [x] Host updater, retry/commit-loss handling, and interruption tests.
 - [x] APROM/manifest/LDROM provisioning generator and read-only configuration capture.
 - [x] Preservation-aware LDROM-first CONFIG transaction added to the standard provisioning path.
-- [ ] Single-device bench gates.
+- [x] Single-device bench gates.
+- [x] Protocol-3 bulk transfer implementation, off-hardware tests, and one-node
+      bench validation.
 - [ ] Full-ring validation.

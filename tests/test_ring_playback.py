@@ -13,6 +13,9 @@ from ring_bus import (  # noqa: E402
     ACK_RESULT_REJECT_NOT_READY,
     CMD_ACK_BASE,
     CMD_ADDR_BASE,
+    CMD_ENTER_CT,
+    CMD_ENTER_SF,
+    CMD_SET_ADDRESS,
     PREAMBLE,
     REPLY_MODE_ACK,
     SUBCMD_REPLY_ACK,
@@ -148,6 +151,20 @@ class RingParserTests(unittest.TestCase):
         )
 
         self.assertEqual(client._recv_frame(), wanted_payload)
+
+
+class RingEnumerationTests(unittest.TestCase):
+    def test_enumeration_skips_delayed_control_and_seed_echoes(self):
+        client = QueuedReplyClient([
+            bytes([CMD_ENTER_SF]),
+            bytes([CMD_ENTER_SF]),
+            bytes([CMD_SET_ADDRESS, 0]),
+            bytes([CMD_SET_ADDRESS, 1]),
+            bytes([CMD_ENTER_CT]),
+        ])
+
+        self.assertEqual(client.enumerate(), 1)
+        self.assertEqual(client.device_count, 1)
 
 
 class RingBurstTests(unittest.TestCase):

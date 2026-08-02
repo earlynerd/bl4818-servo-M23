@@ -77,11 +77,24 @@ ownership of the serial port.
 ```powershell
 py scripts/ring_bootload.py build/m2003-motor.bin -p COM7 --addr 0 `
     --image-version 1
+
+# Program the same image sequentially to every enumerated actuator.
+py scripts/ring_bootload.py build/m2003-motor.bin -p COM7 --all `
+    --image-version 2
+
+# Protocol 3: transmit the data once, then verify and commit every actuator.
+py scripts/ring_bootload.py build/m2003-motor.bin -p COM7 --broadcast-all `
+    --image-version 3
 ```
 
-The loader feature is not ready for fleet use until the hardware gates in
-`docs/firmware-update.md` are checked on one restrained actuator. That document
-also covers cold-power recovery and the one-time SWD provisioning pass.
+The single-actuator programming and cold-power recovery gates are complete.
+Both `--all` and protocol-3 `--broadcast-all` have passed on a one-device ring;
+farthest/middle/nearest updates, multi-node broadcast pacing, and failure
+isolation remain bench gates before the first complete fleet run. `--all`
+remains the sequential fallback;
+`--broadcast-all` refuses older loaders, verifies each device, repairs failures
+with addressed commands, and commits individually. `docs/firmware-update.md`
+contains the evidence, recovery procedure, and one-time SWD provisioning pass.
 
 ## Tuning and measurement
 

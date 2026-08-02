@@ -15,9 +15,11 @@
 #define CMD_BOOT_BASE 0x70u
 #define CMD_BOOT_END 0x80u
 #define CMD_BOOT_REPLY_BASE 0x80u
+#define CMD_BOOT_BROADCAST_BASE 0x90u
+#define CMD_BOOT_BROADCAST_END 0xA0u
 
-#define BOOT_PROTOCOL_VERSION 2u
-#define BOOT_LOADER_VERSION 2u
+#define BOOT_PROTOCOL_VERSION 3u
+#define BOOT_LOADER_VERSION 3u
 
 #define BOOT_SUB_GET_INFO 0x01u
 #define BOOT_SUB_BEGIN_IMAGE 0x10u
@@ -149,7 +151,11 @@ static void send_reply(uint8_t subcommand, uint8_t result,
     uint8_t payload[MAX_PAYLOAD];
     uint8_t i;
 
-    if (device_address == BL_ADDRESS_UNASSIGNED)
+    if (device_address == BL_ADDRESS_UNASSIGNED ||
+        (frame_body[1] >= CMD_BOOT_BROADCAST_BASE &&
+         frame_body[1] < CMD_BOOT_BROADCAST_END &&
+         device_address !=
+            (uint8_t)(frame_body[1] - CMD_BOOT_BROADCAST_BASE)))
         return;
     payload[0] = (uint8_t)(CMD_BOOT_REPLY_BASE + device_address);
     payload[1] = subcommand;
@@ -346,14 +352,23 @@ static void handle_commit_image(void)
 
 static void handle_boot_command(const uint8_t *payload, uint8_t length)
 {
-    uint8_t target = (uint8_t)(payload[0] - CMD_BOOT_BASE);
+    uint8_t broadcast = (payload[0] >= CMD_BOOT_BROADCAST_BASE) ? 1u : 0u;
+    uint8_t target = payload[0] & 0x0Fu;
     uint8_t subcommand = (length >= 2u) ? payload[1] : 0u;
 
-    if (device_address == BL_ADDRESS_UNASSIGNED || target != device_address) {
+    if (device_address == BL_ADDRESS_UNASSIGNED ||
+        (broadcast == 0u && target != device_address)) {
         if (forward_mode == FORWARD_STORE)
             forward_current_frame();
         return;
     }
+
+    /* Only the idempotent data phase is legal as a ring-wide operation.
+     * Verification, manifest commit, and application start stay addressed. */
+    if (broadcast != 0u &&
+        (subcommand < BOOT_SUB_BEGIN_IMAGE ||
+         subcommand > BOOT_SUB_WRITE_CHUNK))
+        return;
 
     switch (subcommand) {
     case BOOT_SUB_GET_INFO:
@@ -428,7 +443,9 @@ static void dispatch(const uint8_t *payload, uint8_t length)
         hold_requested = 1u;
         if (frame_start_mode == FORWARD_STORE)
             forward_current_frame();
-    } else if (command >= CMD_BOOT_BASE && command < CMD_BOOT_END) {
+    } else if ((command >= CMD_BOOT_BASE && command < CMD_BOOT_END) ||
+               (command >= CMD_BOOT_BROADCAST_BASE &&
+                command < CMD_BOOT_BROADCAST_END)) {
         handle_boot_command(payload, length);
     } else if (forward_mode == FORWARD_STORE) {
         forward_current_frame();

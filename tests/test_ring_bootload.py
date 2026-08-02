@@ -19,10 +19,14 @@ from firmware_image import (  # noqa: E402
 )
 from ring_bootload import (  # noqa: E402
     BOOT_FLAG_COMMITTED_VALID,
+    BOOT_SUB_BEGIN_IMAGE,
     BOOT_SUB_COMMIT_IMAGE,
+    BOOT_SUB_ERASE_PAGE,
     BOOT_SUB_GET_INFO,
+    BOOT_SUB_VERIFY_IMAGE,
     BOOT_SUB_WRITE_CHUNK,
     CMD_BOOT_BASE,
+    CMD_BOOT_BROADCAST_BASE,
     CMD_BOOT_REPLY_BASE,
     BootloaderClient,
 )
@@ -180,6 +184,62 @@ class BootloaderClientTests(unittest.TestCase):
         BootloaderClient(ring, retries=2).write_chunk(address, 0x20, data)
 
         self.assertEqual(ring.sent, [command, command])
+
+    def test_broadcast_chunk_is_paced_by_tail_reply(self):
+        tail_address = 5
+        data = b"\x10\x20\x30\x40"
+        command = bytes(
+            [CMD_BOOT_BROADCAST_BASE + tail_address, BOOT_SUB_WRITE_CHUNK]
+        ) + struct.pack(">H", 0x20) + data
+        reply = bytes(
+            [
+                CMD_BOOT_REPLY_BASE + tail_address,
+                BOOT_SUB_WRITE_CHUNK,
+                0,
+                0,
+                0x20,
+            ]
+        )
+        ring = FakeRing([command, reply])
+
+        BootloaderClient(ring).write_chunk(
+            tail_address,
+            0x20,
+            data,
+            command_base=CMD_BOOT_BROADCAST_BASE,
+        )
+
+        self.assertEqual(ring.sent, [command])
+
+    def test_program_image_stops_before_manifest_commit(self):
+        address = 1
+        image = prepare_image(
+            struct.pack("<II", 0x20000FF0, 0x00000009) + b"firmware"
+        )
+        meta = image_metadata(image, image_version=8)
+        begin = bytes([CMD_BOOT_REPLY_BASE + address, BOOT_SUB_BEGIN_IMAGE, 0])
+        erase = bytes(
+            [CMD_BOOT_REPLY_BASE + address, BOOT_SUB_ERASE_PAGE, 0, 0]
+        )
+        write = bytes(
+            [CMD_BOOT_REPLY_BASE + address, BOOT_SUB_WRITE_CHUNK, 0, 0, 0]
+        )
+        verify = bytes(
+            [CMD_BOOT_REPLY_BASE + address, BOOT_SUB_VERIFY_IMAGE, 0]
+        ) + struct.pack(">I", meta.image_crc32)
+        ring = FakeRing([begin, erase, write, verify])
+
+        BootloaderClient(ring).program_image(address, image, meta)
+
+        self.assertEqual(
+            [payload[1] for payload in ring.sent],
+            [
+                BOOT_SUB_BEGIN_IMAGE,
+                BOOT_SUB_ERASE_PAGE,
+                BOOT_SUB_WRITE_CHUNK,
+                BOOT_SUB_VERIFY_IMAGE,
+            ],
+        )
 
 
 if __name__ == "__main__":

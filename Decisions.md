@@ -176,3 +176,11 @@ When a decision is reversed or superseded, append a new entry rather than rewrit
 - **Why:** Immediate re-enumeration after `RUN_APROM` exposed USB-UART latency beyond the old 10 ms flush window; the delayed `0x01` echo was mistaken for the address result even though the application had started correctly.
 - **Supersedes:** fixed 10 ms/2 ms enumeration settling delays and single-frame `SET_ADDRESS` reply handling.
 - **Affects:** `scripts/ring_bus.py`, all host tools using `RingClientV2.enumerate()`, `tests/test_ring_playback.py`, and `protocol.md`.
+
+## 2026-08-02 — Protocol 3 broadcasts only the loader data phase
+
+- **Decision:** Protocol-3 loaders accept tail-addressed ring-wide `BEGIN_IMAGE`, `ERASE_PAGE`, and `WRITE_CHUNK` commands; only the farthest loader replies for pacing, after which the host verifies, repairs, commits, and starts every actuator individually. Sequential `--all` remains supported.
+- **Why:** Every actuator receives the same cut-through image bytes, so transmitting them once removes fleet-size multiplication without allowing simultaneous replies or weakening per-device CRC and manifest-last recovery.
+- **Accepted tradeoff:** A stopped broadcast can leave the whole participating ring resident in LDROM. A tableless non-cloned CRC-32 makes the feature fit at 4,092 / 4,096 bytes, leaving 4 bytes of LDROM margin.
+- **Supersedes:** the sequential-only data-transfer detail in “Gen1 firmware updates use a permanent LDROM recovery loader” and the 16-byte protocol-2 margin in “APROM/LDROM handoffs verify both VECMAP and boot source.”
+- **Affects:** `ldrom/crc32.c`, `ldrom/protocol.c`, `scripts/ring_bootload.py`, `tests/test_ring_bootload.py`, `protocol.md`, `docs/firmware-update.md`, and `docs/host-software.md`.

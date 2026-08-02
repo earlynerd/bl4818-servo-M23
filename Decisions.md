@@ -97,3 +97,82 @@ When a decision is reversed or superseded, append a new entry rather than rewrit
 - **Accepted tradeoff:** Chord bursts use plain ACKs, so those strikes do not return the previous strike's timing snapshot inline. Timing learning continues through isolated `ACK_TIMED` strikes and explicit timing polls.
 - **Supersedes:** only the per-note wait-for-ACK dispatch detail of the 2026-05-28 server-side playback decision; the single `Player`, server-side schedule ownership, and latency-compensation architecture remain in force. The tentative Rev2 RS485 direction is unchanged.
 - **Affects:** `scripts/ring_bus.py`, `scripts/ring_midi_server.py`, `player/midi_player.html`, `midi_server_api.md`, `tests/test_ring_playback.py`.
+
+## 2026-08-01 — Gen1 firmware updates use a permanent LDROM recovery loader
+
+- **Decision:** Existing Gen1 actuators will receive a one-time SWD provisioned, 4 KB LDROM loader that runs before APROM, keeps byte-level UART cut-through forwarding, and updates one addressed device at a time. APROM is divided into application `0x0000..0x79FF`, a commit-last manifest page at `0x7A00..0x7BFF`, and the unchanged two-page settings journal at `0x7C00..0x7FFF`. The loader erases the manifest before any application page and writes it only after exact-length CRC-32 verification; an invalid or interrupted image therefore remains recoverable in LDROM. Version 1 cannot update LDROM, configuration words, or persistent settings over the ring.
+- **Why:** Manually connecting a programmer to every installed actuator is costly, while the M2003 provides enough independent LDROM for a recovery anchor. A manifest-last transaction gives power-loss recovery without an A/B application, which cannot fit in 32 KB. Keeping updates sequential preserves clear per-device retry and failure attribution on the one-direction point-to-point ring.
+- **Bench gate:** Do not encode or write CONFIG0/CBS yet. First read the fleet configuration and verify LDROM-first IAP plus system-reset behavior on one restrained actuator; the exact value remains a measured provisioning input until then.
+- **Supersedes:** the APROM-only/manual J-Link update workflow for provisioned Gen1 devices. Initial loader installation still requires SWD. The tentative Rev2 RS485 decisions are unchanged.
+- **Affects:** `m2003.ld`, `include/firmware_image.h`, `ldrom/`, `src/protocol.c`, `scripts/ring_bootload.py`, provisioning scripts, `protocol.md`, and `docs/firmware-update.md`.
+
+## 2026-08-01 — Standard J-Link flashing always installs the complete firmware stack
+
+- **Decision:** `build-jlink.ps1` and `flash-jlink.ps1` are the sole supported J-Link path and always build, program, and verify APROM, the commit manifest, and LDROM; they never write CONFIG. There is no separate app-only or provisioning entry point.
+- **Why:** The temporary split left the familiar flash command installing a loader-aware application without the loader, which was surprising and produced an actuator that could not safely accept `ENTER_BOOTLOADER`.
+- **Supersedes:** the temporary app-only `flash-jlink.ps1` plus separately named LDROM provisioning workflow created during the 2026-08-01 loader implementation.
+- **Affects:** `Makefile`, `scripts/build-jlink.ps1`, `scripts/flash-jlink.ps1`, J-Link artifacts, `README.md`, `docs/firmware.md`, and `docs/firmware-update.md`.
+
+## 2026-08-01 — Gen1 SWD and ring UART are mutually exclusive bench connections
+
+- **Decision:** Gen1 bootloader diagnostics must not assume simultaneous SWD and UART access: the J-Link SWD connection and UART ring adapter use the same two MCU pins and can only be connected one at a time.
+- **Why:** Bench testing confirmed that attaching J-Link while observing the UART boot handoff is physically impossible on the existing actuator hardware. Diagnostics must use UART-visible state, retained evidence, or a sequential cable handoff.
+- **Supersedes:** the simultaneous J-Link/UART diagnostic proposed during the first LDROM bench test; no firmware architecture decision is otherwise changed.
+- **Affects:** Gen1 bootloader bench procedure, `docs/firmware-update.md`, and future diagnostic instrumentation.
+
+## 2026-08-01 — LDROM residence is indicated by a solid onboard LED
+
+- **Decision:** The Gen1 LDROM loader configures shared PB1 as GPIO output and holds it low for its entire residency, lighting the onboard LED solid on the current N-FET retrofit; the loader never accesses the encoder while holding its shared CSn pin.
+- **Why:** SWD and UART cannot be attached together, so loader entry needs an immediate local indication that is independent of either diagnostic connection.
+- **Supersedes:** the proposed fast-blink loader indicator; the application LED patterns are unchanged.
+- **Affects:** `ldrom/platform.c`, `docs/firmware-update.md`, and `protocol.md`.
+
+## 2026-08-01 — LDROM boot-intercept window is one second
+
+- **Decision:** A valid application reached through LDROM without a valid retained boot request remains in the loader for one second before returning to APROM. PB1 remains solid for that full interval, and `STAY_IN_BOOTLOADER` may hold it resident.
+- **Why:** The former 100 ms interval was too brief to distinguish from the application's several normal LED flashes during UART-only bench diagnosis. One second makes loader execution unambiguous and gives the recovery host a practical acquisition window without adding another diagnostic-only code path.
+- **Supersedes:** the initial 100 ms provisional boot-intercept value.
+- **Affects:** `ldrom/bl_internal.h`, `protocol.md`, and `docs/firmware-update.md`.
+
+## 2026-08-01 — Standard Gen1 provisioning selects LDROM-first boot
+
+- **Decision:** The sole supported J-Link command reads and records CONFIG0..2 before any write, programs and verifies APROM/manifest/LDROM, then clears only CONFIG0.CBS (bit 7) so reset and cold power enter LDROM. The wrapper refuses a locked or unexpected CONFIG2 security state, uses the vendor CONFIG erase procedure, verifies the erased state, restores captured CONFIG1 first, commits the preserved CONFIG0 with CBS cleared last, and verifies all three words. Configuration remains inaccessible over the ring.
+- **Why:** The restrained actuator measured `CONFIG0=FFFFFFFF`, so CBS selected direct APROM boot. Bench tests proved that the runtime BS write plus system reset still returned to APROM. LDROM-first CBS is therefore required for the permanent recovery invariant: an invalid or interrupted APROM image must reach the independent loader without SWD.
+- **Supersedes:** the CONFIG-write prohibition and open CONFIG/CBS bench gate in the earlier permanent-loader decision, plus the “never writes CONFIG” clause of the standard J-Link-path decision. The one public flash path and its APROM/manifest/LDROM verification contract remain unchanged.
+- **Affects:** `scripts/flash-jlink.ps1`, `scripts/m2003_configure_ldrom.py`, `scripts/make_provision_jlink.py`, provisioning tests, `README.md`, `docs/firmware.md`, and `docs/firmware-update.md`.
+
+## 2026-08-01 — LDROM starts APROM only through system reset
+
+- **Decision:** The loader never directly calls an APROM reset vector. After validation and UART drain it selects APROM in the runtime BS bit and requests a system reset; APROM's `Reset_Handler` immediately re-arms LDROM as the next-reset destination before normal initialization.
+- **Why:** A direct IAP branch must reconstruct reset-state CPU and peripheral context and the first implementation left interrupts masked, producing a repeat watchdog/reset cycle. The M2003 system reset preserves the software BS selection, so a clean APROM reset followed by immediate LDROM re-arming is both simpler and recovery-safe.
+- **Supersedes:** the resetless vector-remap-and-jump handoff in “Gen1 firmware updates use a permanent LDROM recovery loader.”
+- **Affects:** `ldrom/main.c`, `src/startup_m2003.c`, `src/boot_control.c`, `protocol.md`, and `docs/firmware-update.md`.
+
+## 2026-08-01 — LDROM indicator drives PB1 high on the bench retrofit
+
+- **Decision:** While resident, the Gen1 LDROM loader holds shared PB1 high to light the onboard status LED solid; it still never accesses the encoder.
+- **Why:** A UART-confirmed loader hold left the LED dark with PB1 low, while the application's brief high-level indication was visible, proving the assumed polarity was reversed on the restrained actuator.
+- **Supersedes:** the PB1-low polarity in “LDROM residence is indicated by a solid onboard LED.”
+- **Affects:** `ldrom/platform.c`, `protocol.md`, and `docs/firmware-update.md`.
+
+## 2026-08-02 — APROM/LDROM handoffs verify both VECMAP and boot source
+
+- **Decision:** Both software handoffs follow the M2003 vendor ISP sequence: with interrupts masked, issue and verify `VECMAP` for the destination, select and verify the matching runtime boot source, then request a system reset. The application still re-arms LDROM early by changing only the next-reset boot source; it does not remap vectors while APROM is running. Loader protocol 2 appends the entry `SYS.RSTSTS`, `FMC.ISPCTL`, and `FMC.ISPSTS` snapshots to `GET_INFO` so the result can be diagnosed over UART.
+- **Why:** Bench behavior showed that changing the boot-source bit alone did not produce a reliable, observable transition, while the manufacturer's M2003 ISP examples explicitly pair destination `VECMAP`, boot selection, and system reset. Gen1 shares its SWD and UART pins, so retained UART-readable evidence is required to distinguish a clean system-reset handoff from a watchdog return or vector-map failure.
+- **Accepted tradeoff:** Protocol 2 leaves only 16 bytes free in the 4 KB LDROM image. Further loader features must recover code space before being added.
+- **Supersedes:** the handoff mechanism detail in “LDROM starts APROM only through system reset”; the no-direct-branch rule, true reset entry, and early LDROM re-arm remain unchanged.
+- **Affects:** `ldrom/main.c`, `ldrom/flash.c`, `ldrom/protocol.c`, `src/boot_control.c`, `scripts/ring_bootload.py`, `protocol.md`, `docs/firmware.md`, and `docs/firmware-update.md`.
+
+## 2026-08-02 — J-Link verifies the APROM vector page through physical FMC reads
+
+- **Decision:** The standard `flash-jlink.ps1` path programs once, then runs a separate read-only verification script. It reconstructs APROM bytes `0x0000..0x01FF` from physical FMC read commands and joins them with a direct debugger read of APROM above `0x0200`; the manifest and LDROM remain direct physical reads. All three images are compared byte-for-byte before any CONFIG update is committed.
+- **Why:** In provisioned LDROM-first mode, the debugger's CPU-address read at zero observes the active LDROM vector alias rather than physical APROM. The prior direct `savebin 0` check therefore reported a repeatable false APROM mismatch at reset-vector offset `+0x4` even though programming succeeded.
+- **Supersedes:** direct debugger verification of the full APROM image beginning at CPU address zero. The one public flash command and byte-for-byte verification requirement remain unchanged.
+- **Affects:** `scripts/make_provision_jlink.py`, `scripts/flash-jlink.ps1`, `tests/test_provision_jlink.py`, `docs/firmware.md`, and `docs/firmware-update.md`.
+
+## 2026-08-02 — Ring enumeration waits for returned transition frames
+
+- **Decision:** The host no longer uses fixed sleeps to change ring forwarding modes. It waits for the returned `ENTER_STORE_FORWARD` frame, accepts only a nonzero bounded `SET_ADDRESS` result while skipping delayed/seed echoes, then waits for the returned `ENTER_CUT_THROUGH` frame before declaring enumeration complete.
+- **Why:** Immediate re-enumeration after `RUN_APROM` exposed USB-UART latency beyond the old 10 ms flush window; the delayed `0x01` echo was mistaken for the address result even though the application had started correctly.
+- **Supersedes:** fixed 10 ms/2 ms enumeration settling delays and single-frame `SET_ADDRESS` reply handling.
+- **Affects:** `scripts/ring_bus.py`, all host tools using `RingClientV2.enumerate()`, `tests/test_ring_playback.py`, and `protocol.md`.

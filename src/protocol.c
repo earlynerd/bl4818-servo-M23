@@ -18,6 +18,7 @@
 #include "strike.h"
 #include "timing.h"
 #include "irq_util.h"
+#include "boot_control.h"
 /* Enable for parser state tracing: #define DBG(c) uart_putc(c) */
 #define DBG(c) ((void)0)
 
@@ -71,6 +72,7 @@
 #define SUBCMD_SET_CSN_POLARITY    0x18u
 #define SUBCMD_QUERY_STRIKE_TIMING 0x19u  /* compact strike-timing-only reply */
 #define SUBCMD_STRIKE_EX        0x1Au  /* strike with articulation type + type-specific param */
+#define SUBCMD_ENTER_BOOTLOADER 0x1Bu
 #define SUBCMD_MASK             0x3Fu
 #define SUBCMD_REPLY_MASK       0xC0u
 #define SUBCMD_REPLY_FULL       0x00u
@@ -1080,6 +1082,18 @@ static void handle_addressed_cmd(uint8_t cmd_type, const uint8_t *payload, uint8
             }
         }
         send_addressed_reply(reply_mode, subcmd, ack_result, ack_detail, FULL_REPLY_STATUS);
+        break;
+    case SUBCMD_ENTER_BOOTLOADER:
+        if (len == 2u) {
+            strike_stop();
+            boot_control_request(device_addr);
+            send_addressed_reply(reply_mode, subcmd, ACK_RESULT_OK, 0u,
+                                 FULL_REPLY_STATUS);
+        } else {
+            send_addressed_reply(reply_mode, subcmd,
+                                 ACK_RESULT_INVALID_ARGUMENT, 0u,
+                                 FULL_REPLY_STATUS);
+        }
         break;
     default:
         break;

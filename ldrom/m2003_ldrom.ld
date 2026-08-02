@@ -1,16 +1,8 @@
-/*
- * M2003FC1AE application linker script.
- *
- * APROM 0x7A00..0x7BFF is the committed-image manifest and
- * 0x7C00..0x7FFF remains the two-page persistent settings journal.
- * The top 16 bytes of SRAM are a soft-reset mailbox shared with LDROM.
- */
+/* M2003FC1AE permanent recovery-loader linker script. */
 
 MEMORY
 {
-    FLASH   (rx)  : ORIGIN = 0x00000000, LENGTH = 0x7A00
-    MANIFEST (rx) : ORIGIN = 0x00007A00, LENGTH = 0x0200
-    PERSIST (rx)  : ORIGIN = 0x00007C00, LENGTH = 0x0400
+    LDROM   (rx)  : ORIGIN = 0x00100000, LENGTH = 0x1000
     RAM     (rwx) : ORIGIN = 0x20000000, LENGTH = 0x0FF0
     MAILBOX (rw)  : ORIGIN = 0x20000FF0, LENGTH = 0x0010
 }
@@ -25,7 +17,7 @@ SECTIONS
         *(.text*)
         *(.rodata*)
         . = ALIGN(4);
-    } > FLASH
+    } > LDROM
 
     .data :
     {
@@ -33,7 +25,7 @@ SECTIONS
         *(.data*)
         . = ALIGN(4);
         _edata = .;
-    } > RAM AT > FLASH
+    } > RAM AT > LDROM
 
     _sidata = LOADADDR(.data);
 
@@ -51,9 +43,10 @@ SECTIONS
         KEEP(*(.boot_mailbox))
     } > MAILBOX
 
-    PROVIDE(_firmware_manifest = ORIGIN(MANIFEST));
-    PROVIDE(_firmware_persist = ORIGIN(PERSIST));
-
-    /* Stack stops below the mailbox so normal stack use cannot overwrite it. */
     _estack = ORIGIN(RAM) + LENGTH(RAM);
+
+    ASSERT((LOADADDR(.data) + SIZEOF(.data)) <= (ORIGIN(LDROM) + LENGTH(LDROM)),
+           "LDROM loader exceeds 4096 bytes")
+    ASSERT(_ebss <= (ORIGIN(RAM) + LENGTH(RAM)),
+           "LDROM loader RAM overlaps the boot mailbox")
 }

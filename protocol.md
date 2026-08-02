@@ -64,6 +64,9 @@ The first payload byte is the command type.
 | 0x20+addr | ADDRESSED_CMD | `[subcmd_flags] [data...]` | 2..8 | master -> ring |
 | 0x40+addr | STATUS_REPLY | query-dependent status payload | 13, 17, 32, 33, 35, 49, 53, 57, or 64 | device -> master |
 | 0x50+addr | ACK_REPLY | `[subcmd] [result] [detail_hi] [detail_lo]` (bare) or +12 timing bytes (timed) | 5 or 17 | device -> master |
+| 0x61 | STAY_IN_BOOTLOADER | -- | 1 | master -> ring during LDROM boot window |
+| 0x70+addr | BOOT_CMD | `[boot_subcmd] [data...]` | 2..36 | master -> LDROM loader |
+| 0x80+addr | BOOT_REPLY | `[boot_subcmd] [result] [detail...]` | 3..36 | LDROM loader -> master |
 
 ### Addressed Sub-Commands
 
@@ -94,6 +97,15 @@ sub-command ID; the top 2 bits select reply policy.
 | 0x16 | QUERY_TIMING | -- | 0 |
 | 0x19 | QUERY_STRIKE_TIMING | -- | 0 |
 | 0x1A | STRIKE_EX | `[type] [current_hi] [current_lo] [param_hi] [param_lo]` | 5 |
+| 0x1B | ENTER_BOOTLOADER | -- | 0 |
+
+`ENTER_BOOTLOADER` is a maintenance transition for LDROM-provisioned Gen1
+devices. The application performs the same coordinated stop as `STOP`, sends
+the requested reply, drains UART TX, records its current ring address in a
+fixed soft-reset mailbox, selects LDROM for the next system reset, and resets.
+Use compact ACK mode so the host has an explicit handoff boundary. A device
+without the permanent loader/configuration provisioning must not be sent this
+command.
 
 `STOP` immediately disables motor drive, aborts any active strike/homing
 sequence, and clears the learned-homed runtime flag. A successful `STRIKE_HOME`
@@ -112,6 +124,103 @@ ignored. Unknown types are rejected with `INVALID_ARGUMENT`.
 |------|------|-----------------|
 | 0x00 | NORMAL | ignored |
 | 0x01 | DEAD | total mute dwell in ms (0 = firmware default, currently 150; clamped to 1000) |
+
+## LDROM update protocol
+
+The permanent Gen1 LDROM loader uses the same preamble, length, CRC-16, UART
+rate, forwarding modes, and `SET_ADDRESS` enumeration as the application. It
+continues to forward each received byte immediately in cut-through mode.
+Loader command and reply type ranges are separate from application status and
+ACK ranges, so a host can distinguish the running image from its first reply.
+On the current Gen1 bench retrofit, LDROM also holds the shared PB1 CSn/status
+LED high and solid on as a local indication that the loader is resident.
+
+An application-requested loader inherits the application's address through a
+soft-reset mailbox. A loader that stayed resident after cold reset starts
+unassigned and participates in normal store-and-forward enumeration alongside
+any running application nodes.
+
+`STAY_IN_BOOTLOADER` (`0x61`) is a framed, no-reply broadcast used only during
+the loader's 1 second initial boot-intercept window. Repeatedly sending it while
+power is applied holds otherwise-valid nodes in LDROM. An invalid or
+uncommitted application remains in LDROM without this command.
+
+### Loader commands
+
+Loader multibyte command fields are big-endian, like existing protocol fields.
+Application image bytes inside `WRITE_CHUNK` retain their binary byte order.
+
+| Sub-Cmd | Name | Command data | Successful reply detail |
+| --- | --- | --- | --- |
+| `0x01` | GET_INFO | -- | protocol/version, state, geometry, committed image fields, UID, loader-entry diagnostics |
+| `0x10` | BEGIN_IMAGE | `[size_b3..b0] [crc_b3..b0] [version_b3..b0] [flags_b3..b0]` | -- |
+| `0x11` | ERASE_PAGE | `[page_index]` | `[page_index]` |
+| `0x12` | WRITE_CHUNK | `[offset_hi] [offset_lo] [4..32 data bytes]` | `[offset_hi] [offset_lo]` |
+| `0x13` | VERIFY_IMAGE | -- | `[calculated_crc_b3..b0]` |
+| `0x14` | COMMIT_IMAGE | -- | -- |
+| `0x15` | RUN_APROM | -- | --; loader remaps APROM vectors, selects APROM, and system-resets after reply drains |
+
+LDROM never calls the application reset vector directly. A system reset gives
+APROM normal reset-state CPU and peripheral state. Each handoff first issues and
+verifies the M2003 `VECMAP` command for the destination, selects and verifies the
+matching runtime boot source, then requests the reset. APROM then re-arms LDROM
+as the destination of the next reset before normal initialization without
+changing the vector map while APROM is running.
+
+Protocol 2 `GET_INFO` reply detail is 45 bytes:
+
+```text
+[protocol_version]
+[loader_version_hi] [loader_version_lo]
+[state_flags] [address]
+[page_size_hi] [page_size_lo]
+[app_limit_hi] [app_limit_lo]
+[committed_size_b3] [committed_size_b2] [committed_size_b1] [committed_size_b0]
+[committed_crc_b3] [committed_crc_b2] [committed_crc_b1] [committed_crc_b0]
+[committed_version_b3] [committed_version_b2] [committed_version_b1] [committed_version_b0]
+[uid_word_0_b3..b0] [uid_word_1_b3..b0] [uid_word_2_b3..b0]
+[reset_status_b3..b0]
+[entry_isp_control_b3..b0]
+[entry_isp_status_b3..b0]
+```
+
+State flags are `0x01 = committed image valid` and `0x02 = update active`;
+other bits are reserved. Loader and protocol version are both 2 in the current
+implementation. The final three words are raw `SYS.RSTSTS`, `FMC.ISPCTL`, and
+`FMC.ISPSTS` snapshots taken before the loader changes its FMC state. They make
+system-reset, watchdog-reset, selected boot source, and entry vector mapping
+observable over UART when SWD cannot be connected. Protocol 1 loaders return
+the original 33-byte prefix; the current host accepts either layout. Page size
+is 512 and application limit is `0x7A00`.
+
+`BEGIN_IMAGE` accepts only a word-aligned size from 8 through `0x7A00` and
+flags 0. It erases the manifest page before marking the RAM update state
+active. `ERASE_PAGE` is then limited to pages intersecting that exact proposed
+image. `WRITE_CHUNK` requires a word-aligned offset and length and rejects any
+write beyond the proposed image; the loader also rejects all application
+writes at or above `0x7A00`. Repeating a chunk with identical contents is
+idempotent. A different value at an already-programmed word fails, forcing the
+host to erase and restart that page.
+
+`VERIFY_IMAGE` calculates CRC-32/ISO-HDLC across exactly the proposed byte
+length. `COMMIT_IMAGE` recalculates it, constructs the 32-byte manifest, writes
+the non-magic words first, and writes the manifest magic last. Reset or power
+loss before that final verified word leaves the application unbootable and the
+loader resident. See `docs/firmware-update.md` for the flash map and recovery
+sequence.
+
+### Loader results
+
+Every `BOOT_REPLY` starts `[0x80+addr] [subcmd] [result]`.
+
+| Result | Meaning |
+| --- | --- |
+| `0x00` | OK |
+| `0x01` | BAD_COMMAND: wrong payload length or unknown subcommand |
+| `0x02` | BAD_STATE: command requires an active update or committed image |
+| `0x03` | BAD_RANGE: address, size, alignment, page, or flags rejected |
+| `0x04` | FLASH_FAILED: erase/program/read/map verification failed |
+| `0x05` | CRC_MISMATCH: programmed APROM differs from `BEGIN_IMAGE` |
 
 A dead strike drives and coasts identically to a normal strike at the same
 current, so the attack is unchanged. The device arms a second position
@@ -413,6 +522,14 @@ Master                          Device 0          Device 1        ...
   |                                |                 |
   v  normal operation              v                 v
 ```
+
+The host treats both forwarding-mode changes as acknowledged transitions: it
+waits for the corresponding command frame to return around the ring before
+advancing. While waiting for the final nonzero `SET_ADDRESS [N]`, it ignores
+delayed mode-command frames and the original `SET_ADDRESS [0]` cut-through
+echo. This avoids depending on USB-UART latency or an arbitrary settling delay
+and ensures every node is in the expected forwarding mode when enumeration
+returns.
 
 ## Broadcast Duty Frame Example
 

@@ -66,6 +66,23 @@ The tool contains commands that directly drive the motor. Read
 `py scripts/ring_tool.py --help` and the subcommand help before using duty,
 torque, current, position, home, or strike commands.
 
+## Firmware updates
+
+`scripts/ring_bootload.py` updates APROM through the permanent Gen1 LDROM
+loader. It stops the target application, preserves the settings pages, retries
+idempotent writes, verifies the exact application CRC, and commits the image
+last. Stop the MIDI server before running it because both require exclusive
+ownership of the serial port.
+
+```powershell
+py scripts/ring_bootload.py build/m2003-motor.bin -p COM7 --addr 0 `
+    --image-version 1
+```
+
+The loader feature is not ready for fleet use until the hardware gates in
+`docs/firmware-update.md` are checked on one restrained actuator. That document
+also covers cold-power recovery and the one-time SWD provisioning pass.
+
 ## Tuning and measurement
 
 `scripts/tune_tool.py` captures current, velocity, position, and strike step

@@ -194,6 +194,7 @@ uint8_t uart_tx_busy(void)
 void uart_tx_flush(void)
 {
     while (uart_tx_busy());
+    while (!(UART1->FIFOSTS & UART_FIFOSTS_TXEMPTYF_Msk));
 }
 
 void uart_rx_flush(void)

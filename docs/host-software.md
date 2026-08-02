@@ -13,7 +13,8 @@ py -m pip install -r requirements.txt
 `pyserial` is required for all ring communication. `matplotlib` is used by
 tuning/measurement plots, and `mido` is used by the direct General MIDI drummer.
 The browser player and MIDI HTTP server do not require Node.js or a JavaScript
-build toolchain.
+build toolchain. The browser's firmware-build button does require GNU Make and
+`arm-none-eabi-gcc` in the MIDI server process's `PATH`.
 
 ## MIDI server and browser player
 
@@ -65,6 +66,58 @@ py scripts/ring_tool.py -p COM7 timing-status 0
 The tool contains commands that directly drive the motor. Read
 `py scripts/ring_tool.py --help` and the subcommand help before using duty,
 torque, current, position, home, or strike commands.
+
+## Firmware updates
+
+`scripts/ring_bootload.py` updates APROM through the permanent Gen1 LDROM
+loader. It stops the target application, preserves the settings pages, retries
+idempotent writes, verifies the exact application CRC, and commits the image
+last.
+
+When the MIDI server is running from this repository, the browser Firmware
+panel is the normal operator path:
+
+1. Set the image-version label and click **Build**. The server runs the fixed
+   `make` command in its checkout, validates `build/m2003-motor.bin`, and freezes
+   that exact image in memory. The panel shows source commit/dirty state, byte
+   count, CRC-32, and version.
+2. Review those values and click **Update ring**. After explicit confirmation,
+   the server stops playback, reserves its existing serial connection, performs
+   the protocol-3 broadcast data phase, verifies/repairs/commits every actuator
+   individually, and requires every application to re-enumerate.
+3. Re-home the complete ring before playback.
+
+The GUI intentionally does not run `git pull` or accept an ELF/file upload in
+this first version: the checked-out server source is the single build input and
+the frozen validated `.bin` is the single update artifact. A failed update may
+leave one or more actuators resident in LDROM; correct the cause and retry the
+same prepared artifact.
+
+The standalone CLI remains available for recovery and bench work. Stop the MIDI
+server before running it because a separate process cannot share the serial
+port:
+
+```powershell
+py scripts/ring_bootload.py build/m2003-motor.bin -p COM7 --addr 0 `
+    --image-version 1
+
+# Program the same image sequentially to every enumerated actuator.
+py scripts/ring_bootload.py build/m2003-motor.bin -p COM7 --all `
+    --image-version 2
+
+# Protocol 3: transmit the data once, then verify and commit every actuator.
+py scripts/ring_bootload.py build/m2003-motor.bin -p COM7 --broadcast-all `
+    --image-version 3
+```
+
+The single-actuator programming and cold-power recovery gates are complete.
+Both `--all` and protocol-3 `--broadcast-all` have passed on a one-device ring;
+farthest/middle/nearest updates, multi-node broadcast pacing, and failure
+isolation remain bench gates before the first complete fleet run. `--all`
+remains the sequential fallback;
+`--broadcast-all` refuses older loaders, verifies each device, repairs failures
+with addressed commands, and commits individually. `docs/firmware-update.md`
+contains the evidence, recovery procedure, and one-time SWD provisioning pass.
 
 ## Tuning and measurement
 

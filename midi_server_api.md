@@ -467,6 +467,94 @@ sounds right on the current ring layout.
 
 ---
 
+## Firmware maintenance
+
+The server can build the firmware from its own repository checkout and update
+the complete protocol-3 actuator ring without closing/reopening the serial
+port. These endpoints are asynchronous; poll `GET /api/firmware` for progress.
+They are intended for the browser Firmware panel, but use ordinary JSON.
+
+The server must have GNU Make and `arm-none-eabi-gcc` in its `PATH`. It always
+runs the fixed command `make` with the repository root as its working directory;
+the API cannot supply shell text, build arguments, paths, or Git operations.
+
+### `GET /api/firmware`
+
+Returns the current build/update state. `phase` is one of `idle`, `building`,
+`ready`, `stopping_playback`, the structured loader phases (`enumerating`,
+`entering_loader`, `loader_ready`, `broadcast_begin`, `writing`, `verifying`,
+`repairing`, `committing`, `restarting`), `complete`, or `failed`.
+
+```json
+{
+  "busy": false,
+  "operation": null,
+  "phase": "ready",
+  "message": "Firmware ready: 27480 bytes, CRC32 349FA335",
+  "progress": null,
+  "artifact": {
+    "path": "build/m2003-motor.bin",
+    "image_size": 27480,
+    "image_crc32": 882877237,
+    "image_crc32_hex": "349FA335",
+    "image_version": 20260802,
+    "commit": "0123456789ab",
+    "dirty": false,
+    "built_at": "2026-08-02T20:15:00Z"
+  },
+  "result": null,
+  "error": null,
+  "log": "...make output..."
+}
+```
+
+The prepared bytes are frozen in server memory. The subsequent update uses
+those exact bytes even if the checkout or build directory changes afterward.
+`dirty: true` means the build included uncommitted/untracked checkout changes.
+
+### `POST /api/firmware/build`
+
+```json
+{ "image_version": 20260802 }
+```
+
+Starts a server-side `make` and returns 202 with the initial state. The version
+must fit uint32 and is a manifest label, not an anti-rollback counter. A new
+build discards the previous frozen artifact before starting; a failed build
+therefore cannot accidentally leave the old image enabled for update. Returns
+409 if a firmware build/update is already active.
+
+Building does not reserve the ring; music may continue while the compiler runs.
+Only `POST /api/firmware/update` enters maintenance mode.
+
+### `POST /api/firmware/update`
+
+```json
+{
+  "confirm": true,
+  "expected_crc32": 882877237
+}
+```
+
+Starts the protocol-3 full-ring update and returns 202. The explicit boolean
+confirmation and numeric CRC are required; a stale/mismatched CRC returns 409.
+The server stops playback, rejects new ring work, and holds the bridge lock for
+the complete operation. The shared data phase is followed by per-device CRC
+verification, addressed repair where needed, per-device commit, APROM restart,
+re-enumeration, and status response.
+
+During the update, ring-touching endpoints return 409 `firmware update in
+progress`. Mapping, MIDI-library, cached playback state, cached bus-health, and
+firmware-state requests remain available. On success every actuator must be
+re-homed. On failure, one or more actuators may remain safely in LDROM; retry the
+same frozen artifact after correcting the cause.
+
+There is no authentication layer and the API allows cross-origin callers, like
+the rest of this work-network service. Anyone who can reach it can start a
+firmware build or update.
+
+---
+
 ## Lower-level endpoints
 
 These exist primarily for the browser player and bench tooling. Most

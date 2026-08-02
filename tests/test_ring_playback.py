@@ -1,8 +1,11 @@
 import struct
 import sys
+import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -13,6 +16,9 @@ from ring_bus import (  # noqa: E402
     ACK_RESULT_REJECT_NOT_READY,
     CMD_ACK_BASE,
     CMD_ADDR_BASE,
+    CMD_ENTER_CT,
+    CMD_ENTER_SF,
+    CMD_SET_ADDRESS,
     PREAMBLE,
     REPLY_MODE_ACK,
     SUBCMD_REPLY_ACK,
@@ -22,7 +28,13 @@ from ring_bus import (  # noqa: E402
     RingTimeout,
     crc16_ccitt,
 )
-from ring_midi_server import Bridge, LatencyTracker, Player  # noqa: E402
+from firmware_image import image_metadata, prepare_image  # noqa: E402
+from ring_midi_server import (  # noqa: E402
+    Bridge,
+    FirmwareUpdateManager,
+    LatencyTracker,
+    Player,
+)
 
 
 class BufferSerial:
@@ -74,6 +86,7 @@ class FakeLatency:
 class FakeBridge:
     def __init__(self, count=4):
         self.count = count
+        self.maintenance = threading.Event()
         self.latency = FakeLatency()
         self.single_calls = []
         self.burst_calls = []
@@ -148,6 +161,20 @@ class RingParserTests(unittest.TestCase):
         )
 
         self.assertEqual(client._recv_frame(), wanted_payload)
+
+
+class RingEnumerationTests(unittest.TestCase):
+    def test_enumeration_skips_delayed_control_and_seed_echoes(self):
+        client = QueuedReplyClient([
+            bytes([CMD_ENTER_SF]),
+            bytes([CMD_ENTER_SF]),
+            bytes([CMD_SET_ADDRESS, 0]),
+            bytes([CMD_SET_ADDRESS, 1]),
+            bytes([CMD_ENTER_CT]),
+        ])
+
+        self.assertEqual(client.enumerate(), 1)
+        self.assertEqual(client.device_count, 1)
 
 
 class RingBurstTests(unittest.TestCase):
@@ -280,6 +307,14 @@ class PlayerTests(unittest.TestCase):
                 {"t_ms": 0, "address": 2, "nominal_current_ma": 1000},
             ])
 
+    def test_firmware_maintenance_rejects_new_playback(self):
+        bridge = FakeBridge()
+        bridge.maintenance.set()
+        with self.assertRaisesRegex(RuntimeError, "firmware update"):
+            Player(bridge).play([
+                {"t_ms": 0, "address": 0, "nominal_current_ma": 1000},
+            ])
+
     def test_live_worker_identity_is_not_discarded(self):
         player = Player(FakeBridge())
         live = NeverStopsThread()
@@ -292,6 +327,115 @@ class PlayerTests(unittest.TestCase):
         self.assertIs(player._thread, live)
         self.assertEqual(player._id, "still-running")
         self.assertEqual(live.join_timeout, 2.0)
+
+
+class FirmwareUpdateManagerTests(unittest.TestCase):
+    def test_build_freezes_validated_binary_and_source_identity(self):
+        bridge = type("BuildBridge", (), {})()
+        manager = FirmwareUpdateManager(bridge)
+        raw = struct.pack("<II", 0x20000FF0, 0x00000009) + b"server build"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            image_path = Path(tmp) / "build" / "m2003-motor.bin"
+            image_path.parent.mkdir()
+            image_path.write_bytes(raw)
+
+            def fake_run(command, **kwargs):
+                if command == ["make"]:
+                    return type("Result", (), {
+                        "returncode": 0,
+                        "stdout": "build ok\n",
+                        "stderr": "",
+                    })()
+                if command[:2] == ["git", "rev-parse"]:
+                    return type("Result", (), {"stdout": "abc123def456\n"})()
+                if command[:2] == ["git", "status"]:
+                    return type("Result", (), {"stdout": ""})()
+                raise AssertionError(f"unexpected command {command}")
+
+            with patch("ring_midi_server.ROOT", Path(tmp)), \
+                 patch.object(FirmwareUpdateManager, "IMAGE_PATH", image_path), \
+                 patch("ring_midi_server.subprocess.run", side_effect=fake_run):
+                manager.start_build(20260802)
+                deadline = time.monotonic() + 1.0
+                while manager.snapshot()["busy"] and time.monotonic() < deadline:
+                    time.sleep(0.005)
+
+        state = manager.snapshot()
+        expected = prepare_image(raw)
+        self.assertEqual(state["phase"], "ready")
+        self.assertEqual(state["artifact"]["commit"], "abc123def456")
+        self.assertFalse(state["artifact"]["dirty"])
+        self.assertEqual(state["artifact"]["image_version"], 20260802)
+        self.assertEqual(manager._image, expected)
+
+    def test_update_reuses_bridge_connection_and_clears_maintenance(self):
+        class FakePlayer:
+            def __init__(self):
+                self.cancelled = 0
+
+            def cancel(self):
+                self.cancelled += 1
+
+        class FakeFirmwareBridge:
+            def __init__(self):
+                self.lock = threading.Lock()
+                self.maintenance = threading.Event()
+                self.client = object()
+                self.player = FakePlayer()
+                self.count = 3
+
+        bridge = FakeFirmwareBridge()
+        manager = FirmwareUpdateManager(bridge)
+        image = prepare_image(
+            struct.pack("<II", 0x20000FF0, 0x00000009) + b"firmware"
+        )
+        meta = image_metadata(image, image_version=11)
+        manager._image = image
+        manager._meta = meta
+        manager._state["artifact"] = {"image_crc32": meta.image_crc32}
+        calls = []
+        release_update = threading.Event()
+
+        def fake_update(client, frozen_image, frozen_meta, **kwargs):
+            self.assertIs(client, bridge.client)
+            self.assertIs(frozen_image, image)
+            self.assertIs(frozen_meta, meta)
+            self.assertTrue(bridge.maintenance.is_set())
+            self.assertTrue(kwargs["broadcast_all"])
+            kwargs["progress"]({
+                "phase": "writing",
+                "message": "pages 54/54",
+                "done": 54,
+                "total": 54,
+            })
+            calls.append(client)
+            release_update.wait(timeout=1.0)
+            return {
+                "count": 3,
+                "addresses": [0, 1, 2],
+                "repaired": [],
+                "image_size": meta.image_size,
+                "image_crc32": meta.image_crc32,
+                "image_version": meta.image_version,
+                "loader_versions": [3, 3, 3],
+            }
+
+        with patch("ring_midi_server.update_ring", side_effect=fake_update):
+            started = manager.start_update(meta.image_crc32)
+            self.assertTrue(started["busy"])
+            self.assertTrue(bridge.maintenance.is_set())
+            release_update.set()
+            deadline = time.monotonic() + 1.0
+            while manager.snapshot()["busy"] and time.monotonic() < deadline:
+                time.sleep(0.005)
+
+        state = manager.snapshot()
+        self.assertEqual(calls, [bridge.client])
+        self.assertEqual(bridge.player.cancelled, 1)
+        self.assertFalse(bridge.maintenance.is_set())
+        self.assertEqual(state["phase"], "complete")
+        self.assertEqual(state["result"]["addresses"], [0, 1, 2])
 
 
 if __name__ == "__main__":

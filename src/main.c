@@ -18,6 +18,7 @@
 #include "strike.h"
 #include "timing.h"
 #include "sched_util.h"
+#include "boot_control.h"
 
 extern uint32_t SystemCoreClock;
 extern uint32_t CyclesPerUs;
@@ -247,6 +248,9 @@ int main(void)
         protocol_poll_start = timing_capture_stamp();
         protocol_poll();
         timing_record_protocol_poll(protocol_poll_start);
+
+        if (boot_control_pending())
+            boot_control_enter();
 
         pending_protocol_ticks = protocol_tick_count - handled_protocol_ticks;
         timing_note_protocol_backlog(pending_protocol_ticks);

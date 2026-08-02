@@ -62,6 +62,10 @@ POST /api/play/update         -> {"master_scale": float?, "master_ma": int?,
                                  live tweaks. master_scale wins if set; otherwise
                                  master_ma/schedule_master_ma form the ratio. Applied
                                  to the next strike.
+GET  /api/firmware            -> build/update state and frozen image metadata
+POST /api/firmware/build      -> {"image_version": uint32}; build server checkout
+POST /api/firmware/update     -> {"confirm": true, "expected_crc32": uint32};
+                                 broadcast the frozen build to the complete ring
 
 Usage
 -----
@@ -75,6 +79,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 import threading
 import time
@@ -99,6 +104,8 @@ from ring_bus import (
     STRIKE_PARAM_COAST_DISTANCE,
     STRIKE_PARAM_HOMING_DUTY,
 )
+from firmware_image import image_metadata, prepare_image
+from ring_bootload import update_ring
 
 
 STRIKE_PARAM_BY_NAME = {
@@ -284,6 +291,10 @@ class Bridge:
         self.client = RingClientV2(port=port, baudrate=baud, timeout_ms=timeout_ms, trace=trace)
         self.client.open()
         self.lock = threading.Lock()
+        # Set for the complete updater transaction. HTTP handlers reject new
+        # ring work while it is set, and Player.play checks it independently so
+        # a queued playback request cannot begin as the applications restart.
+        self.maintenance = threading.Event()
         self.count: int = 0
         # Per-address cache of the most recent compact strike-timing snapshot
         # we've seen, keyed by ring address. Populated by ACK_TIMED piggyback
@@ -930,6 +941,8 @@ class Player:
         master_current_ma + vel_floor; the song endpoint stores
         schedule_master_ma). Stored verbatim under _metadata and spread back
         into status()."""
+        if self.bridge.maintenance.is_set():
+            raise RuntimeError("firmware update in progress")
         resolved: list[dict] = []
         for ev in events:
             try:
@@ -957,6 +970,8 @@ class Player:
         play_id = uuid.uuid4().hex[:8]
 
         with self._play_lock:
+            if self.bridge.maintenance.is_set():
+                raise RuntimeError("firmware update in progress")
             self._stop_and_join()
             with self._control_lock:
                 self._stop_event = threading.Event()
@@ -1165,8 +1180,246 @@ class Player:
             self._cursor = len(events)
 
 
+class FirmwareUpdateManager:
+    """Asynchronous build + ring update state owned by the MIDI server.
+
+    A successful build is frozen in memory. The later update therefore flashes
+    exactly the size/CRC/version shown to the operator even if the checkout or
+    build directory changes between the two button presses.
+    """
+
+    IMAGE_PATH = ROOT / "build" / "m2003-motor.bin"
+    LOG_LIMIT = 12000
+
+    def __init__(self, bridge: Bridge) -> None:
+        self.bridge = bridge
+        self._lock = threading.Lock()
+        self._image: bytes | None = None
+        self._meta = None
+        self._state = {
+            "busy": False,
+            "operation": None,
+            "phase": "idle",
+            "message": "Build firmware to prepare an image",
+            "progress": None,
+            "artifact": None,
+            "result": None,
+            "error": None,
+            "log": "",
+        }
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            # Everything exposed in _state is JSON-shaped. This gives callers
+            # a detached snapshot without sharing nested progress/result maps.
+            return json.loads(json.dumps(self._state))
+
+    def _begin(self, operation: str, phase: str, message: str) -> None:
+        with self._lock:
+            if self._state["busy"]:
+                raise RuntimeError(
+                    f"firmware {self._state['operation']} already in progress"
+                )
+            self._state.update({
+                "busy": True,
+                "operation": operation,
+                "phase": phase,
+                "message": message,
+                "progress": None,
+                "result": None,
+                "error": None,
+                "log": "",
+            })
+
+    def _fail(self, exc: Exception, log_text: str = "") -> None:
+        with self._lock:
+            failed = {
+                "busy": False,
+                "operation": None,
+                "phase": "failed",
+                "message": str(exc),
+                "progress": None,
+                "error": str(exc),
+            }
+            if log_text:
+                failed["log"] = log_text[-self.LOG_LIMIT :]
+            self._state.update(failed)
+
+    @staticmethod
+    def _git_source() -> tuple[str | None, bool | None]:
+        try:
+            commit = subprocess.run(
+                ["git", "rev-parse", "--short=12", "HEAD"],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=True,
+            ).stdout.strip()
+            dirty = bool(subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=True,
+            ).stdout.strip())
+            return commit or None, dirty
+        except (OSError, subprocess.SubprocessError):
+            return None, None
+
+    def start_build(self, image_version: int) -> dict:
+        version = int(image_version)
+        if not 0 <= version <= 0xFFFFFFFF:
+            raise ValueError("image_version must be a uint32")
+        self._begin("build", "building", "Building firmware on the instrument server")
+        with self._lock:
+            self._image = None
+            self._meta = None
+            self._state["artifact"] = None
+        thread = threading.Thread(
+            target=self._run_build,
+            args=(version,),
+            name="firmware-build",
+            daemon=True,
+        )
+        thread.start()
+        return self.snapshot()
+
+    def _run_build(self, image_version: int) -> None:
+        log_text = ""
+        try:
+            built = subprocess.run(
+                ["make"],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                errors="replace",
+                timeout=180,
+                check=False,
+            )
+            log_text = (built.stdout or "") + (built.stderr or "")
+            if built.returncode != 0:
+                raise RuntimeError(f"firmware build failed (make exit {built.returncode})")
+            raw = self.IMAGE_PATH.read_bytes()
+            image = prepare_image(raw)
+            meta = image_metadata(image, image_version=image_version)
+            commit, dirty = self._git_source()
+            artifact = {
+                "path": str(self.IMAGE_PATH.relative_to(ROOT)).replace("\\", "/"),
+                "image_size": meta.image_size,
+                "image_crc32": meta.image_crc32,
+                "image_crc32_hex": f"{meta.image_crc32:08X}",
+                "image_version": meta.image_version,
+                "commit": commit,
+                "dirty": dirty,
+                "built_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }
+            with self._lock:
+                self._image = image
+                self._meta = meta
+                self._state.update({
+                    "busy": False,
+                    "operation": None,
+                    "phase": "ready",
+                    "message": (
+                        f"Firmware ready: {meta.image_size} bytes, "
+                        f"CRC32 {meta.image_crc32:08X}"
+                    ),
+                    "progress": None,
+                    "artifact": artifact,
+                    "result": None,
+                    "error": None,
+                    "log": log_text[-self.LOG_LIMIT :],
+                })
+        except Exception as exc:
+            traceback.print_exc()
+            self._fail(exc, log_text)
+
+    def start_update(self, expected_crc32: int) -> dict:
+        expected = int(expected_crc32)
+        with self._lock:
+            artifact = self._state.get("artifact")
+            if self._image is None or self._meta is None or artifact is None:
+                raise RuntimeError("build firmware before starting an update")
+            if expected != self._meta.image_crc32:
+                raise RuntimeError(
+                    "displayed firmware no longer matches the server artifact; refresh and confirm again"
+                )
+        self._begin(
+            "update",
+            "stopping_playback",
+            "Stopping playback and reserving the ring",
+        )
+        # Close the race before the worker cancels playback and waits for the
+        # ring lock. Handler and Player checks reject all new ring work now.
+        self.bridge.maintenance.set()
+        thread = threading.Thread(
+            target=self._run_update,
+            name="firmware-update",
+            daemon=True,
+        )
+        thread.start()
+        return self.snapshot()
+
+    def _update_progress(self, event: dict) -> None:
+        progress = {
+            key: value
+            for key, value in event.items()
+            if key not in ("phase", "message")
+        }
+        with self._lock:
+            self._state.update({
+                "phase": event["phase"],
+                "message": event["message"],
+                "progress": progress or None,
+            })
+
+    def _run_update(self) -> None:
+        try:
+            if self.bridge.player is not None:
+                self.bridge.player.cancel()
+            with self._lock:
+                image = self._image
+                meta = self._meta
+            if image is None or meta is None:
+                raise RuntimeError("prepared firmware artifact disappeared")
+
+            with self.bridge.lock:
+                result = update_ring(
+                    self.bridge.client,
+                    image,
+                    meta,
+                    addresses=None,
+                    broadcast_all=True,
+                    progress=self._update_progress,
+                )
+                self.bridge.count = result["count"]
+            with self._lock:
+                self._state.update({
+                    "busy": False,
+                    "operation": None,
+                    "phase": "complete",
+                    "message": (
+                        f"Updated {len(result['addresses'])} actuator(s); "
+                        "re-home before playback"
+                    ),
+                    "progress": None,
+                    "result": result,
+                    "error": None,
+                })
+        except Exception as exc:
+            traceback.print_exc()
+            self._fail(RuntimeError(
+                f"{exc}; one or more actuators may remain in LDROM — retry the same artifact"
+            ))
+        finally:
+            self.bridge.maintenance.clear()
+
+
 class Handler(BaseHTTPRequestHandler):
     bridge: Bridge | None = None
+    firmware: FirmwareUpdateManager | None = None
     # Optional on-disk MIDI library. When set by --library-dir, /api/library
     # lists .mid/.midi files in this folder (recursing into subfolders) and
     # /api/library/<path> serves the raw bytes.
@@ -1292,6 +1545,19 @@ class Handler(BaseHTTPRequestHandler):
             self._cors()
             self.end_headers()
             self.wfile.write(data)
+            return
+
+        if self.path == "/api/firmware":
+            self._json(200, self.firmware.snapshot())
+            return
+
+        request_path = urlparse(self.path).path
+        if self.bridge.maintenance.is_set() and request_path in {
+            "/api/status",
+            "/api/pitches",
+            "/api/strike-timing",
+        }:
+            self._json(409, {"error": "firmware update in progress"})
             return
 
         if self.path == "/api/status":
@@ -1429,6 +1695,53 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         try:
+            if self.path == "/api/firmware/build":
+                data = self._read_json()
+                version = int(data.get("image_version", time.strftime("%Y%m%d")))
+                try:
+                    state = self.firmware.start_build(version)
+                except ValueError as exc:
+                    self._json(400, {"error": str(exc)})
+                    return
+                except RuntimeError as exc:
+                    self._json(409, {"error": str(exc)})
+                    return
+                self._json(202, state)
+                return
+
+            if self.path == "/api/firmware/update":
+                data = self._read_json()
+                if data.get("confirm") is not True:
+                    self._json(400, {"error": "explicit confirmation is required"})
+                    return
+                if "expected_crc32" not in data:
+                    self._json(400, {"error": "expected_crc32 is required"})
+                    return
+                try:
+                    state = self.firmware.start_update(int(data["expected_crc32"]))
+                except (ValueError, RuntimeError) as exc:
+                    self._json(409, {"error": str(exc)})
+                    return
+                self._json(202, state)
+                return
+
+            request_path = urlparse(self.path).path
+            if self.bridge.maintenance.is_set() and request_path in {
+                "/api/enumerate",
+                "/api/home",
+                "/api/strike",
+                "/api/strikes",
+                "/api/strike-param",
+                "/api/cancel",
+                "/api/bus-health/probe",
+                "/api/stop",
+                "/api/play",
+                "/api/play/update",
+                "/api/save-settings",
+            }:
+                self._json(409, {"error": "firmware update in progress"})
+                return
+
             if self.path == "/api/enumerate":
                 count = self.bridge.enumerate()
                 self._json(200, {"count": count})
@@ -1775,6 +2088,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     Handler.bridge = bridge
+    Handler.firmware = FirmwareUpdateManager(bridge)
     Handler.library_dir = library_dir
     Handler.default_master_ma = max(
         STRIKE_MA_MIN, min(STRIKE_MA_MAX, int(args.motif_current_ma))

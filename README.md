@@ -50,7 +50,9 @@ flowchart LR
 
 The Python server owns the serial port and serves the browser UI. It enumerates
 the actuator ring, maps MIDI pitches to actuator addresses, schedules strikes,
-and compensates for measured mechanical latency. Each actuator closes its own
+compensates for measured mechanical latency, and can build then deploy APROM
+updates through the permanent LDROM loaders without releasing the serial port.
+Each actuator closes its own
 current, velocity, and position loops and runs the homing/strike state machine.
 The current protocol uses a four-bit address and supports up to 16 actuators per
 ring.
@@ -93,12 +95,18 @@ Install `arm-none-eabi-gcc` and GNU Make, then run:
 make
 ```
 
-The main output is `build/m2003-motor.bin`. To also generate the J-Link command
-file:
+The main output is `build/m2003-motor.bin`. Generate the complete J-Link
+payload (application, commit manifest, permanent LDROM loader, and read-only
+CONFIG capture) with:
 
 ```powershell
 powershell -File scripts/build-jlink.ps1
 ```
+
+Generation does not contact hardware or change CONFIG. The ring updater and
+its single-device recovery gates are documented in [Ring firmware
+update](docs/firmware-update.md). Do not provision a fleet from the development
+branch before those gates are recorded there.
 
 ### 3. Flash an actuator
 
@@ -108,10 +116,12 @@ Connect the programmer over SWD and run:
 powershell -File scripts/flash-jlink.ps1
 ```
 
-The script builds, flashes, and verifies the application image when J-Link
-readback is available. Disconnect motor power while changing wiring or
-attaching the programmer; a servo actuator can move unexpectedly during
-bring-up.
+This standard command first records CONFIG0..2, programs and byte-verifies
+APROM, its manifest, and LDROM, then preserves the existing configuration while
+selecting LDROM-first boot. It refuses automatic CONFIG changes on a locked or
+unexpected security configuration. Disconnect motor power while changing
+wiring or attaching the programmer; a servo actuator can move unexpectedly
+during bring-up.
 
 ### 4. Start the MIDI player
 
@@ -140,6 +150,7 @@ Run `py scripts/ring_tool.py --help` for the complete command list.
 - [Hardware guide](docs/hardware.md): current BL4818 modification and actuator assembly architecture.
 - [Performance video](docs/video/handpan_video_h264.mp4): ten actuators playing with sound.
 - [Firmware guide](docs/firmware.md): architecture, build, flash, and module boundaries.
+- [Ring firmware update](docs/firmware-update.md): LDROM recovery design, flash layout, and validation gates.
 - [Host software guide](docs/host-software.md): server, browser players, and bench tools.
 - [Replication status](docs/replication-status.md): what is reproducible now and what still needs source material.
 - [Ring Bus Protocol v2](protocol.md): serial packet and command specification.

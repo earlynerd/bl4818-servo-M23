@@ -62,6 +62,7 @@ SUBCMD_DETECT_CSN_POLARITY = 0x17
 SUBCMD_SET_CSN_POLARITY    = 0x18
 SUBCMD_QUERY_STRIKE_TIMING = 0x19
 SUBCMD_STRIKE_EX     = 0x1A
+SUBCMD_ENTER_BOOTLOADER = 0x1B
 SUBCMD_MASK            = 0x3F
 SUBCMD_REPLY_FULL      = 0x00
 SUBCMD_REPLY_ACK       = 0x40
@@ -163,6 +164,7 @@ SUBCMD_NAMES  = {
     SUBCMD_SET_CSN_POLARITY: "SET_CSN_POLARITY",
     SUBCMD_QUERY_STRIKE_TIMING: "QUERY_STRIKE_TIMING",
     SUBCMD_STRIKE_EX: "STRIKE_EX",
+    SUBCMD_ENTER_BOOTLOADER: "ENTER_BOOTLOADER",
 }
 ACK_RESULT_NAMES = {
     ACK_RESULT_OK: "OK",
@@ -708,22 +710,48 @@ class RingClientV2:
         )
 
     def enumerate(self) -> int:
+        def receive_matching(predicate, description: str) -> bytes:
+            deadline = time.monotonic() + self.timeout_ms / 1000.0
+            skipped: list[bytes] = []
+            while True:
+                remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
+                try:
+                    payload = self._recv_frame(timeout_ms=remaining_ms)
+                except RingTimeout as exc:
+                    skipped_text = ", ".join(item.hex(" ") for item in skipped)
+                    raise RingTimeout(
+                        f"timeout waiting for {description}; skipped=[{skipped_text}]"
+                    ) from exc
+                if predicate(payload):
+                    return payload
+                _remember_event(skipped, payload)
+                self._trace("skip", payload)
+
         self._flush_rx()
         self._send_frame(bytes([CMD_ENTER_SF]))
-        time.sleep(0.010)
-        self._flush_rx()
+        receive_matching(
+            lambda payload: payload == bytes([CMD_ENTER_SF]),
+            "ENTER_STORE_FORWARD echo",
+        )
 
-        self._send_frame(bytes([CMD_SET_ADDRESS, 0x00]))
-        payload = self._recv_frame()
-
-        if len(payload) < 2 or payload[0] != CMD_SET_ADDRESS:
-            raise RingError(f"unexpected enumerate reply: {payload.hex(' ')}")
+        seed = bytes([CMD_SET_ADDRESS, 0x00])
+        self._send_frame(seed)
+        payload = receive_matching(
+            lambda reply: (
+                len(reply) == 2
+                and reply[0] == CMD_SET_ADDRESS
+                and 0 < reply[1] <= MAX_DEVICES
+            ),
+            "SET_ADDRESS count",
+        )
 
         self.device_count = payload[1]
 
-        time.sleep(0.002)
         self._send_frame(bytes([CMD_ENTER_CT]))
-        time.sleep(0.010)
+        receive_matching(
+            lambda reply: reply == bytes([CMD_ENTER_CT]),
+            "ENTER_CUT_THROUGH echo",
+        )
         self._flush_rx()
 
         return self.device_count
@@ -938,6 +966,14 @@ class RingClientV2:
 
     def clear_settings(self, address: int, reply_mode: str = REPLY_MODE_ACK) -> AddressedReply:
         return self._addressed_command(address, SUBCMD_CLEAR_SETTINGS, reply_mode=reply_mode)
+
+    def enter_bootloader(self, address: int) -> AddressedReply:
+        """Stop, ACK, and reset one application into its permanent LDROM loader."""
+        return self._addressed_command(
+            address,
+            SUBCMD_ENTER_BOOTLOADER,
+            reply_mode=REPLY_MODE_ACK,
+        )
 
     def detect_csn_polarity(self, address: int, reply_mode: str = REPLY_MODE_ACK) -> AddressedReply:
         """Probe both SSI CSn polarities, keep the one whose MT6701 frame passes CRC, persist on success.
@@ -1567,6 +1603,7 @@ __all__ = [
     "SUBCMD_QUERY_STRIKE_TIMING",
     "SUBCMD_QUERY_TIMING",
     "SUBCMD_DETECT_CSN_POLARITY",
+    "SUBCMD_ENTER_BOOTLOADER",
     "SUBCMD_SET_CSN_POLARITY",
     "SUBCMD_REPLY_ACK",
     "SUBCMD_REPLY_ACK_TIMED",

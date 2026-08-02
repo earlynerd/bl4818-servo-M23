@@ -3,6 +3,7 @@
  */
 
 #include <stdint.h>
+#include "boot_control.h"
 
 extern uint32_t _sidata, _sdata, _edata, _sbss, _ebss, _estack;
 extern int main(void);
@@ -25,6 +26,10 @@ void Reset_Handler(void)
     while (dst < &_ebss) {
         *dst++ = 0;
     }
+
+    /* LDROM selected APROM for this clean system reset. Re-arm LDROM before
+     * application initialization so every later reset returns through it. */
+    boot_control_arm_loader();
 
     main();
     while (1);

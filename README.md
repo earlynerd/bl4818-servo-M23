@@ -73,9 +73,9 @@ See [Repository map](docs/repository-map.md) for a guided tour.
 
 ## Quick software start
 
-The supported development path is currently Windows. The firmware Makefile
-expects GNU Make and the Arm GNU toolchain in `PATH`; the flash scripts expect a
-SEGGER J-Link and PowerShell.
+The firmware builds on Windows and POSIX hosts, including Raspbian. Its Makefile
+expects GNU Make and the Arm GNU toolchain in `PATH`. Initial SWD provisioning
+still uses the PowerShell/J-Link scripts and is therefore Windows-oriented.
 
 ### 1. Install host dependencies
 

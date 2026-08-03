@@ -474,9 +474,12 @@ the complete protocol-3 actuator ring without closing/reopening the serial
 port. These endpoints are asynchronous; poll `GET /api/firmware` for progress.
 They are intended for the browser Firmware panel, but use ordinary JSON.
 
-The server must have GNU Make and `arm-none-eabi-gcc` in its `PATH`. It always
-runs the fixed command `make` with the repository root as its working directory;
-the API cannot supply shell text, build arguments, paths, or Git operations.
+The server must have GNU Make, `arm-none-eabi-gcc`, `arm-none-eabi-objcopy`, and
+`arm-none-eabi-size` in its `PATH`. The Makefile supports Windows and POSIX
+hosts, including Raspbian. The server always runs the fixed command `make` with
+the repository root as its working directory; the API cannot supply shell text,
+build arguments, paths, or Git operations. Failed build output is retained for
+the browser and also written to the server shell.
 
 ### `GET /api/firmware`
 

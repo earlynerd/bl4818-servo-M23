@@ -13,8 +13,11 @@ py -m pip install -r requirements.txt
 `pyserial` is required for all ring communication. `matplotlib` is used by
 tuning/measurement plots, and `mido` is used by the direct General MIDI drummer.
 The browser player and MIDI HTTP server do not require Node.js or a JavaScript
-build toolchain. The browser's firmware-build button does require GNU Make and
-`arm-none-eabi-gcc` in the MIDI server process's `PATH`.
+build toolchain. The browser's firmware-build button requires GNU Make plus
+`arm-none-eabi-gcc`, `arm-none-eabi-objcopy`, and `arm-none-eabi-size` in the
+MIDI server process's `PATH`. The Makefile supports Windows and POSIX hosts,
+including Raspbian. A failed build is reported in both the browser's Build
+output and the server shell.
 
 ## MIDI server and browser player
 

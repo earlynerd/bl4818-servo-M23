@@ -191,3 +191,10 @@ When a decision is reversed or superseded, append a new entry rather than rewrit
 - **Why:** The MIDI server already owns the serial port, so launching the standalone bootloader CLI would collide with its COM handle. A frozen artifact makes the operator-confirmed CRC authoritative, while the build/update split keeps compilation non-destructive and prevents an accidental one-click source-to-fleet deployment.
 - **Supersedes:** the requirement to stop the MIDI server for every ring update when using the browser/server path; standalone `ring_bootload.py` still requires exclusive ownership and therefore still requires the server to be stopped.
 - **Affects:** `scripts/ring_bootload.py`, `scripts/ring_midi_server.py`, `player/midi_player.html`, `tests/test_ring_bootload.py`, `tests/test_ring_playback.py`, `midi_server_api.md`, `README.md`, `docs/host-software.md`, and `docs/firmware-update.md`.
+
+## 2026-08-03 — Firmware Makefile supports Windows and POSIX hosts
+
+- **Decision:** GNU Make selects Windows or POSIX directory/cleanup commands and defaults to `py` or `python3` respectively, while keeping tool variables overrideable. The MIDI server also writes captured failed-build output to its shell as well as retaining it for the browser.
+- **Why:** The instrument server runs Raspbian; the previous Windows command used by object rules failed with Make exit 2 before compilation, and output capture hid the underlying error from the server shell.
+- **Supersedes:** the Windows-only build-host assumption in the README and firmware guide. PowerShell/J-Link SWD provisioning remains Windows-oriented.
+- **Affects:** `Makefile`, `scripts/ring_midi_server.py`, `README.md`, `docs/firmware.md`, `docs/host-software.md`, and `midi_server_api.md`.

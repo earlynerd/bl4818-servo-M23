@@ -1300,7 +1300,18 @@ class FirmwareUpdateManager:
             )
             log_text = (built.stdout or "") + (built.stderr or "")
             if built.returncode != 0:
-                raise RuntimeError(f"firmware build failed (make exit {built.returncode})")
+                if log_text:
+                    sys.stderr.write(log_text)
+                    if not log_text.endswith("\n"):
+                        sys.stderr.write("\n")
+                    sys.stderr.flush()
+                detail = next(
+                    (line.strip() for line in reversed(log_text.splitlines()) if line.strip()),
+                    "no build output",
+                )
+                raise RuntimeError(
+                    f"firmware build failed (make exit {built.returncode}): {detail}"
+                )
             raw = self.IMAGE_PATH.read_bytes()
             image = prepare_image(raw)
             meta = image_metadata(image, image_version=image_version)

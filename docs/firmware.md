@@ -11,25 +11,29 @@ encoder. Authoritative pin assignments and control constants live in
 
 ## Toolchain
 
-The current build is Windows-oriented and requires:
+The firmware build supports Windows and POSIX hosts, including Raspbian, and
+requires:
 
 - GNU Make
 - Arm GNU Toolchain (`arm-none-eabi-gcc`, `arm-none-eabi-objcopy`, and
   `arm-none-eabi-size` in `PATH`)
-- PowerShell for the clean/build wrappers
-- SEGGER J-Link Software for flashing
-- Python available as `py` to generate the J-Link command file
+- Python 3 for generated packaging/provisioning files. The Makefile uses `py`
+  on Windows and `python3` on POSIX; override `PYTHON=...` if needed.
+
+PowerShell and SEGGER J-Link Software are additionally required for the Windows
+SWD provisioning workflow. They are not required for an ordinary `make` build
+on the instrument server.
 
 Build the binary and ELF image:
 
-```powershell
+```console
 make
 ```
 
 Build both the application and the separately linked 4 KB LDROM recovery
 loader:
 
-```powershell
+```console
 make images
 ```
 

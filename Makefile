@@ -4,7 +4,24 @@
 CC      = arm-none-eabi-gcc
 OBJCOPY = arm-none-eabi-objcopy
 SIZE    = arm-none-eabi-size
-PYTHON  = py
+
+ifeq ($(OS),Windows_NT)
+PYTHON ?= py
+define MAKE_DIR
+if not exist "$(subst /,\,$(1))" mkdir "$(subst /,\,$(1))"
+endef
+define REMOVE_BUILD
+powershell -NoProfile -Command "if (Test-Path '$(BUILD_DIR)') { Remove-Item -LiteralPath '$(BUILD_DIR)' -Recurse -Force }"
+endef
+else
+PYTHON ?= python3
+define MAKE_DIR
+mkdir -p "$(1)"
+endef
+define REMOVE_BUILD
+rm -rf -- "$(BUILD_DIR)"
+endef
+endif
 
 # ── Project ──────────────────────────────────────────────────────────────────
 PROJECT = m2003-motor
@@ -90,11 +107,11 @@ build-jlink: images
 		--config-read-output $(BUILD_DIR)/m2003-config-read.jlink
 
 $(BUILD_DIR)/%.o: %.c
-	@if not exist $(subst /,\,$(dir $@)) mkdir $(subst /,\,$(dir $@))
+	@$(call MAKE_DIR,$(dir $@))
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/ldrom/%.o: ldrom/%.c
-	@if not exist $(subst /,\,$(dir $@)) mkdir $(subst /,\,$(dir $@))
+	@$(call MAKE_DIR,$(dir $@))
 	$(CC) $(LDROM_CFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/$(PROJECT).elf: $(OBJS) m2003.ld
@@ -116,7 +133,7 @@ ldrom-size: $(BUILD_DIR)/$(LDROM_PROJECT).elf
 	$(SIZE) $<
 
 clean:
-	powershell -NoProfile -Command "if (Test-Path '$(BUILD_DIR)') { Remove-Item -LiteralPath '$(BUILD_DIR)' -Recurse -Force }"
+	@$(REMOVE_BUILD)
 
 .PHONY: all images ldrom package clean size ldrom-size build-jlink
 

@@ -562,6 +562,14 @@ class RingClientV2:
             self.ser.read(waiting)
             time.sleep(0.001)
 
+    def _discard_rx_available(self) -> None:
+        """Discard bytes already buffered without waiting for the ring to idle."""
+        if not self.ser:
+            return
+        waiting = self.ser.in_waiting
+        if waiting > 0:
+            self.ser.read(waiting)
+
     def _build_frame(self, payload: bytes) -> bytes:
         length = len(payload)
         body = bytes([length]) + payload
@@ -1045,7 +1053,14 @@ class RingClientV2:
             )
             frames.append((original_index, address, payload, self._build_frame(payload)))
 
-        self._flush_rx()
+        # Fire-and-forget playback must not wait for the complete command echo
+        # to circle back before the next musical deadline. Drain only bytes
+        # already present; acknowledged transactions retain the stronger
+        # idle-boundary flush before reply matching.
+        if encoded_reply_mode == SUBCMD_REPLY_NONE:
+            self._discard_rx_available()
+        else:
+            self._flush_rx()
         wire = b"".join(frame for _, _, _, frame in frames)
         for _, _, _, frame in frames:
             self._trace("tx-burst", frame)

@@ -10,3 +10,12 @@ Bench-observed bugs and their resolutions. Structural decisions live in DECISION
 - **Class:** filtered-estimate-latency (control action keyed to a lagging derived signal instead of the raw measurement)
 - **Recently-touched?** yes — mute entry written earlier the same session it was bench-tested.
 - **Time to fix:** ~1 session (diagnosis was user-assisted from bench observation).
+
+## 2026-08-03 — Chords clumped or dropped following MIDI notes
+
+- **Observation:** A freshly updated 14-actuator handpan ring played isolated-note songs normally, but chord passages sometimes pulled a later note into the chord or lost several following notes. One captured play scheduled 278 events but attempted only 212, with 13 transport failures, one `REJECT_NOT_READY`, and 508.7 ms maximum serial wait.
+- **Root cause:** In commit `c62435e`, `scripts/ring_midi_server.py:1088` grouped by compensated transmit time without requiring the same MIDI impact time, while `scripts/ring_midi_server.py:1142` synchronously collected chord replies; missing replies stalled the absolute-time worker. `player/midi_player.html:1983` then canceled the still-running worker 500 ms after nominal song duration.
+- **Fix:** Require equal MIDI `t_ms` for chord membership, transmit playback chords with reply mode `NONE`, account for them as unacknowledged rather than accepted, and let server state exclusively determine natural completion.
+- **Class:** blocking-reply-in-realtime-scheduler
+- **Recently-touched?** yes — all three paths were introduced or changed with the chord synchronization work.
+- **Time to fix:** one bench feedback cycle.

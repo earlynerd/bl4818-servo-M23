@@ -21,7 +21,9 @@ from ring_bus import (  # noqa: E402
     CMD_SET_ADDRESS,
     PREAMBLE,
     REPLY_MODE_ACK,
+    REPLY_MODE_NONE,
     SUBCMD_REPLY_ACK,
+    SUBCMD_REPLY_NONE,
     SUBCMD_STRIKE,
     CommandAck,
     RingClientV2,
@@ -68,9 +70,15 @@ class QueuedReplyClient(RingClientV2):
         self.ser = BufferSerial()
         self.device_count = 4
         self.replies = list(replies)
+        self.flush_rx_count = 0
+        self.discard_rx_count = 0
 
     def _flush_rx(self):
-        pass
+        self.flush_rx_count += 1
+
+    def _discard_rx_available(self):
+        self.discard_rx_count += 1
+        super()._discard_rx_available()
 
     def _recv_frame(self, timeout_ms=None):
         if not self.replies:
@@ -79,8 +87,11 @@ class QueuedReplyClient(RingClientV2):
 
 
 class FakeLatency:
+    def __init__(self, compensation_by_address=None):
+        self.compensation_by_address = compensation_by_address or {}
+
     def compensation_ms(self, address, current_ma):
-        return 0.0
+        return float(self.compensation_by_address.get(address, 0.0))
 
 
 class FakeBridge:
@@ -89,7 +100,7 @@ class FakeBridge:
         self.maintenance = threading.Event()
         self.latency = FakeLatency()
         self.single_calls = []
-        self.burst_calls = []
+        self.chord_calls = []
         self.single_result = {
             "accepted": True,
             "result_name": "OK",
@@ -100,12 +111,13 @@ class FakeBridge:
         self.single_calls.append((address, current_ma))
         return dict(self.single_result)
 
-    def strike_burst(self, items):
-        self.burst_calls.append([dict(item) for item in items])
+    def strike_chord(self, items):
+        self.chord_calls.append([dict(item) for item in items])
         return [
             {
-                "accepted": True,
-                "result_name": "OK",
+                "accepted": None,
+                "sent": True,
+                "result_name": "SENT_NO_ACK",
                 "server_timing_us": {},
             }
             for _ in items
@@ -139,6 +151,15 @@ class FakeStrikeClient:
 
     def strike(self, address, current_ma, reply_mode):
         return self.replies.pop(0)
+
+
+class FakeChordClient:
+    def __init__(self):
+        self.calls = []
+
+    def strike_burst(self, pairs, reply_mode):
+        self.calls.append((list(pairs), reply_mode))
+        return [None] * len(pairs)
 
 
 class FakeHealth:
@@ -214,6 +235,28 @@ class RingBurstTests(unittest.TestCase):
         self.assertEqual([reply.address for reply in results], [1, 3, 2])
         self.assertEqual([reply.detail for reply in results], [11, 33, 22])
         self.assertEqual(client.ser.flush_count, 1)
+        self.assertEqual(client.flush_rx_count, 1)
+        self.assertEqual(client.discard_rx_count, 0)
+
+    def test_no_reply_burst_sets_reply_none_on_every_command(self):
+        client = QueuedReplyClient([])
+
+        results = client.strike_burst(
+            [(1, 1100), (3, 1300)], reply_mode=REPLY_MODE_NONE
+        )
+
+        frame_size = 9
+        wire = bytes(client.ser.written)
+        subcommands = [
+            wire[offset + 4]
+            for offset in range(0, len(wire), frame_size)
+        ]
+        self.assertTrue(
+            all(value == (SUBCMD_STRIKE | SUBCMD_REPLY_NONE) for value in subcommands)
+        )
+        self.assertEqual(results, [None, None])
+        self.assertEqual(client.flush_rx_count, 0)
+        self.assertEqual(client.discard_rx_count, 1)
 
 
 class BridgeTests(unittest.TestCase):
@@ -252,6 +295,29 @@ class BridgeTests(unittest.TestCase):
         self.assertTrue(accepted["accepted"])
         self.assertEqual(bridge.latency.last_accepted_current(0), 1200)
 
+    def test_chord_sends_without_ack_and_clears_latency_attribution(self):
+        bridge = object.__new__(Bridge)
+        bridge.lock = threading.Lock()
+        bridge.latency = LatencyTracker()
+        bridge.health = FakeHealth()
+        bridge.client = FakeChordClient()
+        bridge.latency.record_accepted(1, 900)
+        bridge.latency.record_accepted(3, 1000)
+
+        results = bridge.strike_chord([
+            {"address": 1, "current_ma": 1100},
+            {"address": 3, "current_ma": 1300},
+        ])
+
+        self.assertEqual(
+            bridge.client.calls,
+            [([(1, 1100), (3, 1300)], REPLY_MODE_NONE)],
+        )
+        self.assertTrue(all(result["sent"] for result in results))
+        self.assertTrue(all(result["accepted"] is None for result in results))
+        self.assertIsNone(bridge.latency.last_accepted_current(1))
+        self.assertIsNone(bridge.latency.last_accepted_current(3))
+
 
 class PlayerTests(unittest.TestCase):
     @staticmethod
@@ -262,7 +328,7 @@ class PlayerTests(unittest.TestCase):
             if thread.is_alive():
                 raise AssertionError("player worker did not finish")
 
-    def test_same_deadline_notes_use_one_burst(self):
+    def test_same_midi_time_notes_use_one_unacknowledged_burst(self):
         bridge = FakeBridge()
         player = Player(bridge)
         player.play([
@@ -271,15 +337,51 @@ class PlayerTests(unittest.TestCase):
         ])
         self.wait_for_player(player)
 
-        self.assertEqual(len(bridge.burst_calls), 1)
+        self.assertEqual(len(bridge.chord_calls), 1)
         self.assertEqual(
-            [item["address"] for item in bridge.burst_calls[0]],
+            [item["address"] for item in bridge.chord_calls[0]],
             [3, 1],
         )
         stats = player.status()["dispatch_stats"]
         self.assertEqual(stats["attempted"], 2)
-        self.assertEqual(stats["accepted"], 2)
+        self.assertEqual(stats["accepted"], 0)
+        self.assertEqual(stats["unacknowledged"], 2)
         self.assertEqual(stats["bursts"], 1)
+
+    def test_matching_trigger_times_do_not_merge_distinct_midi_times(self):
+        bridge = FakeBridge()
+        bridge.latency = FakeLatency({1: 50.0, 2: 100.0})
+        player = Player(bridge)
+        player.play([
+            {"t_ms": 50, "address": 1, "nominal_current_ma": 1100},
+            {"t_ms": 100, "address": 2, "nominal_current_ma": 1200},
+        ])
+        self.wait_for_player(player)
+
+        self.assertEqual(bridge.chord_calls, [])
+        self.assertEqual(bridge.single_calls, [(1, 1100), (2, 1200)])
+        stats = player.status()["dispatch_stats"]
+        self.assertEqual(stats["accepted"], 2)
+        self.assertEqual(stats["bursts"], 0)
+
+    def test_same_midi_time_remains_chord_when_compensation_splits_deadlines(self):
+        bridge = FakeBridge()
+        bridge.latency = FakeLatency({1: 0.0, 2: 5.0})
+        player = Player(bridge)
+        player.play([
+            {"t_ms": 5, "address": 1, "nominal_current_ma": 1100},
+            {"t_ms": 5, "address": 2, "nominal_current_ma": 1200},
+        ])
+        self.wait_for_player(player)
+
+        self.assertEqual(
+            [[item["address"] for item in call] for call in bridge.chord_calls],
+            [[2], [1]],
+        )
+        self.assertEqual(bridge.single_calls, [])
+        stats = player.status()["dispatch_stats"]
+        self.assertEqual(stats["unacknowledged"], 2)
+        self.assertEqual(stats["bursts"], 0)
 
     def test_rejected_strike_is_reported(self):
         bridge = FakeBridge()
@@ -327,6 +429,11 @@ class PlayerTests(unittest.TestCase):
         self.assertIs(player._thread, live)
         self.assertEqual(player._id, "still-running")
         self.assertEqual(live.join_timeout, 2.0)
+
+    def test_browser_does_not_wall_clock_cancel_natural_completion(self):
+        html = (REPO_ROOT / "player" / "midi_player.html").read_text(encoding="utf-8")
+        self.assertNotIn('setTimeout(() => stopPlayback("ended")', html)
+        self.assertIn('if (reason !== "ended")', html)
 
 
 class FirmwareUpdateManagerTests(unittest.TestCase):

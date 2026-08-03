@@ -303,9 +303,11 @@ Notes:
 - `NONE` only suppresses the device-generated reply. In cut-through mode the
   command frame itself still propagates around the ring and returns to the
   master RX path.
-- `ACK_TIMED` is the recommended reply mode for `STRIKE`: it costs 12 extra
-  payload bytes (~480 µs at 250 kbaud) but eliminates the need for a separate
-  `QUERY_STRIKE` round trip to harvest the previous strike's timing.
+- `ACK_TIMED` is the recommended reply mode for interactive and isolated
+  `STRIKE` commands: it costs 12 extra payload bytes (~480 µs at 250 kbaud) but
+  eliminates the need for a separate `QUERY_STRIKE` round trip to harvest the
+  previous strike's timing. The server's real-time MIDI chord trains use
+  `NONE`; reply loss must not become scheduler flow control during playback.
 
 ### ACK Replies
 

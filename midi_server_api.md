@@ -134,11 +134,15 @@ don't need to do anything to opt in — just send `t_ms` values that
 reflect when you want the *impact* to happen, and the bridge handles
 the offset.
 
-Beats stay flush even for chords (multiple events at the same `t_ms`). Events
-whose compensated trigger deadlines fall within 1 ms are emitted as one
-addressed command train, farthest ring address first, without waiting between
-commands. The bridge collects the compact ACKs only after the whole train is
-written, removing per-note host round trips without adding a broadcast command.
+Beats stay flush even for chords (multiple events at exactly the same `t_ms`).
+Only events sharing that MIDI impact time are eligible to share a command
+train; a later note is never pulled into a chord merely because latency
+compensation gives it a similar transmission deadline. Chord members whose
+compensated trigger deadlines fall within 1 ms are emitted farthest-address
+first without waiting between commands. Playback chord commands request no
+reply, so a missing ACK cannot stall the real-time scheduler. Isolated notes
+retain `ACK_TIMED`, and explicit timing polls remain available for learning and
+diagnostics.
 The EMA needs a handful of strikes to converge on a slot if the bridge
 has just started; the first few strikes use a 50 ms default.
 
@@ -313,7 +317,7 @@ play-time (`name`, `master_current_ma`, `vel_floor` from pitch-style;
   "master_scale": 1.0,
   "muted": [],
   "dispatch_stats": {
-    "attempted": 2, "accepted": 2, "rejected": 0,
+    "attempted": 2, "accepted": 0, "unacknowledged": 2, "rejected": 0,
     "transport_failed": 0, "muted": 0, "bursts": 1, "reasons": {}
   },
   "name": "ci-passed",
@@ -336,7 +340,7 @@ play-time (`name`, `master_current_ma`, `vel_floor` from pitch-style;
   "master_scale": 1.0,
   "muted": [],
   "dispatch_stats": {
-    "attempted": 3, "accepted": 2, "rejected": 1,
+    "attempted": 3, "accepted": 1, "unacknowledged": 1, "rejected": 1,
     "transport_failed": 0, "muted": 0, "bursts": 1,
     "reasons": {"REJECT_NOT_READY": 1}
   },
@@ -350,8 +354,10 @@ play-time (`name`, `master_current_ma`, `vel_floor` from pitch-style;
 - `master_scale` and `muted` reflect any live tweaks from
   `/api/play/update`. They reset on each `/api/play`.
 - `dispatch_stats` is retained after the worker finishes so the final idle
-  poll can report accepted firmware ACKs, device rejections, missing/failed
-  transport replies, muted events, and chord-burst count.
+  poll can report accepted firmware ACKs, intentionally unacknowledged chord
+  transmissions, device rejections, missing/failed transport replies, muted
+  events, and chord-burst count. `unacknowledged` means the complete command
+  was written with reply mode `NONE`; it is not an inferred acceptance.
 - `elapsed_ms` and `remaining_ms` are computed from the server's
   monotonic clock at the time of the request. They're clamped so that
   `elapsed_ms + remaining_ms == duration_ms` once the schedule is

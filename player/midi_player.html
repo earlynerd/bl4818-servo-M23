@@ -1971,11 +1971,12 @@ async function runArpeggio() {
 // library's autoplay-next; a user-initiated stop must never auto-advance.
 function stopPlayback(reason = "user") {
   const wasPlaying = S.playing;
-  // Tell the server to stop dispatching. Fire-and-forget — UI shouldn't
-  // wait on the network. If the request never arrives (link gone), the
-  // server worker still exits naturally at end-of-schedule.
-  fetch(API_BASE + "/api/play/stop", { method: "POST", keepalive: true })
-    .catch(() => {});
+  // A natural end is reported by the authoritative server worker, so there is
+  // nothing to cancel. Only an explicit user stop sends the stop request.
+  if (reason !== "ended") {
+    fetch(API_BASE + "/api/play/stop", { method: "POST", keepalive: true })
+      .catch(() => {});
+  }
   stopPlayPolling();
   S.timeouts.forEach(id => clearTimeout(id));
   S.timeouts = [];
@@ -2016,15 +2017,18 @@ function startPlayPolling() {
         const rejected = Number(ds.rejected || 0);
         const transport = Number(ds.transport_failed || 0);
         const accepted = Number(ds.accepted || 0);
+        const unacknowledged = Number(ds.unacknowledged || 0);
         if (rejected || transport) {
           const reasons = Object.entries(ds.reasons || {})
             .map(([name, count]) => `${name}=${count}`).join(", ");
           const summary = `playback: accepted=${accepted}, rejected=${rejected}, ` +
-            `transport=${transport}${reasons ? ` (${reasons})` : ""}`;
+            `unacknowledged=${unacknowledged}, transport=${transport}` +
+            `${reasons ? ` (${reasons})` : ""}`;
           log(summary);
           showError(summary);
         } else {
-          log(`playback: accepted=${accepted}, bursts=${Number(ds.bursts || 0)}`);
+          log(`playback: accepted=${accepted}, unacknowledged=${unacknowledged}, ` +
+              `bursts=${Number(ds.bursts || 0)}`);
         }
         stopPlayback("ended");
         return;
@@ -2118,10 +2122,9 @@ async function play() {
   // Count this as a play for the library (if the track came from there).
   if (typeof window.libraryNotePlayed === "function") window.libraryNotePlayed();
 
-  // Final teardown — the server worker has already exited by the time the
-  // last note's wall position elapses. This just resets the UI.
-  const wallTotal = c.maxMs / scale;
-  S.timeouts.push(setTimeout(() => stopPlayback("ended"), wallTotal + 500));
+  // The server worker is authoritative for completion. A wall-clock teardown
+  // used to cancel the tail of a song whenever serial reply waits put the
+  // worker behind the nominal MIDI duration.
 
   (function animate() {
     const elapsed = performance.now() - S.startWall;

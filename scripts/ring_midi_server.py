@@ -100,6 +100,7 @@ from ring_bus import (
     DEFAULT_BAUD,
     REPLY_MODE_ACK,
     REPLY_MODE_ACK_TIMED,
+    REPLY_MODE_NONE,
     STRIKE_PARAM_HOME_OFFSET,
     STRIKE_PARAM_COAST_DISTANCE,
     STRIKE_PARAM_HOMING_DUTY,
@@ -477,6 +478,54 @@ class Bridge:
             results.append(result)
         return results
 
+    def strike_chord(self, items: list[dict]) -> list[dict]:
+        """Transmit a playback chord without requesting or waiting for ACKs.
+
+        Playback cannot use replies as flow control: a missing chord ACK used
+        to stall the absolute-time scheduler for up to the serial timeout.
+        Manual and isolated playback strikes keep their timed ACK path.
+        """
+        if not items:
+            return []
+        t_recv = time.monotonic()
+        pairs = [(int(item["address"]), int(item["current_ma"])) for item in items]
+        with self.lock:
+            t_lock = time.monotonic()
+            try:
+                self.client.strike_burst(pairs, reply_mode=REPLY_MODE_NONE)
+            except Exception as exc:
+                for address, _ in pairs:
+                    self.latency.forget_accepted(address)
+                    self._record_bus_exc(address, exc)
+                raise
+            t_post_send = time.monotonic()
+            # With no ACK there is no safe current bucket to associate with
+            # the next piggyback timing sample. Drop one sample rather than
+            # silently attributing it to an older accepted strike.
+            for address, _ in pairs:
+                self.latency.forget_accepted(address)
+
+        send_us = int((t_post_send - t_lock) * 1_000_000)
+        amortized_us = send_us // max(1, len(items))
+        return [
+            {
+                "address": address,
+                "accepted": None,
+                "sent": True,
+                "result": None,
+                "result_name": "SENT_NO_ACK",
+                "detail": 0,
+                "server_timing_us": {
+                    "lock_wait": int((t_lock - t_recv) * 1_000_000),
+                    "serial_send": amortized_us,
+                    "burst_total": send_us,
+                    "burst_size": len(items),
+                    "handler_total": int((time.monotonic() - t_recv) * 1_000_000),
+                },
+            }
+            for address, _ in pairs
+        ]
+
     def strikes(self, items: list[dict]) -> list[dict]:
         results: list[dict] = []
         prev_currents: list[int | None] = []
@@ -853,6 +902,7 @@ class Player:
         return {
             "attempted": 0,
             "accepted": 0,
+            "unacknowledged": 0,
             "rejected": 0,
             "transport_failed": 0,
             "muted": 0,
@@ -1052,6 +1102,9 @@ class Player:
             if transport_error or not result or result.get("result_name") == "NO-ACK":
                 self._dispatch_stats["transport_failed"] += 1
                 reason = "TRANSPORT"
+            elif result.get("sent") and result.get("accepted") is None:
+                self._dispatch_stats["unacknowledged"] += 1
+                return
             elif result.get("accepted"):
                 self._dispatch_stats["accepted"] += 1
                 return
@@ -1079,8 +1132,10 @@ class Player:
 
     def _run(self, events: list[dict], stop: threading.Event, play_id: str) -> None:
         t0 = self._started_monotonic
+        chord_addresses: dict[int, set[int]] = {}
         dispatch_events: list[dict] = []
         for ev in events:
+            chord_addresses.setdefault(ev["t_ms"], set()).add(ev["address"])
             planned_comp_ms = self.bridge.latency.compensation_ms(
                 ev["address"], ev["nominal_current_ma"]
             )
@@ -1092,21 +1147,32 @@ class Player:
             key=lambda ev: (ev["trigger_ms"], ev["t_ms"], -ev["address"])
         )
 
-        cursor = 0
-        while cursor < len(dispatch_events):
-            first = dispatch_events[cursor]
+        pending = list(dispatch_events)
+        dispatched = 0
+        while pending:
+            first = pending.pop(0)
             group = [first]
             used_addresses = {first["address"]}
-            next_cursor = cursor + 1
-            while next_cursor < len(dispatch_events):
-                candidate = dispatch_events[next_cursor]
+            candidate_index = 0
+            while candidate_index < len(pending):
+                candidate = pending[candidate_index]
                 if candidate["trigger_ms"] - first["trigger_ms"] > self.BURST_WINDOW_MS:
                     break
-                if candidate["address"] in used_addresses:
-                    break
-                group.append(candidate)
-                used_addresses.add(candidate["address"])
-                next_cursor += 1
+                # A transmission-time coincidence is not a chord. Require the
+                # original MIDI impact deadline to match as well; different
+                # compensation values may otherwise pull a later note into an
+                # earlier chord.
+                if (
+                    candidate["t_ms"] == first["t_ms"]
+                    and candidate["address"] not in used_addresses
+                ):
+                    group.append(pending.pop(candidate_index))
+                    used_addresses.add(candidate["address"])
+                    continue
+                candidate_index += 1
+
+            is_chord = len(chord_addresses[first["t_ms"]]) > 1
+            dispatched += len(group)
 
             target = t0 + first["trigger_ms"] / 1000.0
             remaining = target - time.monotonic()
@@ -1121,7 +1187,7 @@ class Player:
             with self._control_lock:
                 scale = self._master_scale
                 muted = set(self._muted)
-                self._cursor = next_cursor
+                self._cursor = dispatched
 
             active: list[dict] = []
             previous_predictions: dict[int, float | None] = {}
@@ -1145,16 +1211,16 @@ class Player:
                 active.append({"address": addr, "current_ma": live_ma})
 
             if not active:
-                cursor = next_cursor
                 continue
             if not self._is_current_play(stop, play_id):
                 return
 
             try:
-                if len(active) > 1:
+                if is_chord:
                     with self._control_lock:
-                        self._dispatch_stats["bursts"] += 1
-                    results = self.bridge.strike_burst(active)
+                        if len(active) > 1:
+                            self._dispatch_stats["bursts"] += 1
+                    results = self.bridge.strike_chord(active)
                 else:
                     item = active[0]
                     results = [self.bridge.strike(item["address"], item["current_ma"])]
@@ -1163,7 +1229,6 @@ class Player:
                 for item in active:
                     self._last_prediction_ms.pop(item["address"], None)
                     self._note_dispatch_result(None, transport_error=True)
-                cursor = next_cursor
                 continue
 
             for item, result in zip(active, results):
@@ -1172,9 +1237,8 @@ class Player:
                 self._fold_dispatch_metrics(addr, result, previous_predictions.get(addr))
                 if result.get("accepted"):
                     self._last_prediction_ms[addr] = current_predictions[addr]
-                elif result.get("result_name") == "NO-ACK":
+                elif result.get("result_name") in ("NO-ACK", "SENT_NO_ACK"):
                     self._last_prediction_ms.pop(addr, None)
-            cursor = next_cursor
 
         with self._control_lock:
             self._cursor = len(events)

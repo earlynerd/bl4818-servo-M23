@@ -49,6 +49,13 @@ The file is machine/instrument state and is ignored by Git.
 The HTTP API, payloads, timing compensation, and integration examples are
 documented in `midi_server_api.md`.
 
+During MIDI playback, only events with the same requested impact time are
+treated as a chord. Chord commands are pipelined farthest-address first with
+firmware replies suppressed, preventing a missing reply from blocking later
+notes. Isolated notes retain timed acknowledgments. The browser follows the
+server's playback state through completion and never cancels a song merely
+because its nominal wall-clock duration elapsed.
+
 ## Ring diagnostics
 
 List serial ports and enumerate actuators:

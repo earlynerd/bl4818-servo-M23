@@ -198,3 +198,9 @@ When a decision is reversed or superseded, append a new entry rather than rewrit
 - **Why:** The instrument server runs Raspbian; the previous Windows command used by object rules failed with Make exit 2 before compilation, and output capture hid the underlying error from the server shell.
 - **Supersedes:** the Windows-only build-host assumption in the README and firmware guide. PowerShell/J-Link SWD provisioning remains Windows-oriented.
 - **Affects:** `Makefile`, `scripts/ring_midi_server.py`, `README.md`, `docs/firmware.md`, `docs/host-software.md`, and `midi_server_api.md`.
+## 2026-08-03 — Playback chords are MIDI-time groups and do not wait for replies
+
+- **Decision:** Only playback events with the same requested MIDI impact time may share a chord train; members with compensated transmit deadlines within 1 ms are written farthest-address first using reply mode `NONE`. Isolated notes retain `ACK_TIMED`, and the browser waits for authoritative server completion instead of canceling at nominal duration plus 500 ms.
+- **Why:** A 14-actuator bench run lost 13 burst ACKs, reached 508.7 ms serial waits, attempted only 212 of 278 scheduled notes, and was then canceled by the browser timer. Reply visibility cannot be allowed to block or terminate real-time playback, and similar compensated transmission times do not imply the notes are a chord.
+- **Supersedes:** the 2026-07-31 chord-dispatch rules that grouped solely by compensated deadline and collected compact ACKs after each train; farthest-first command ordering remains.
+- **Affects:** `scripts/ring_bus.py`, `scripts/ring_midi_server.py`, `player/midi_player.html`, `tests/test_ring_playback.py`, `protocol.md`, `midi_server_api.md`, and `docs/host-software.md`.

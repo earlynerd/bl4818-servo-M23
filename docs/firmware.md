@@ -72,7 +72,8 @@ available for an explicit read-only capture.
 The application linker layout is defined in `m2003.ld`; it reserves one
 512-byte committed-image manifest page immediately before the existing
 two-page settings journal. See [Ring firmware update](firmware-update.md) for
-the LDROM loader, recovery contract, and hardware validation gates.
+the stable LDROM loader, recovery contract, and completed hardware validation
+record.
 LDROM starts APROM only by verifying the APROM vector map and boot selection,
 then requesting a system reset. APROM immediately re-arms LDROM for every later
 watchdog, fault, or requested reset without changing its active vector map.

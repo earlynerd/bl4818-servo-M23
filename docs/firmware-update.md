@@ -2,11 +2,12 @@
 
 ## Status
 
-This document is the implementation and validation contract for the Gen1
-M2003 UART-ring updater. The feature is under development on the
-`LDROM-loader` branch. Build-time and host-side checks may be completed away
-from the hardware; steps explicitly marked **bench gate** must be verified on
-one restrained actuator before any fleet provisioning.
+This document is the operating, recovery, and validation record for the stable
+Gen1 M2003 UART-ring updater. The loader and protocol-3 host path have passed
+single-actuator boot/interruption recovery tests, one-node broadcast testing,
+and a complete 14-actuator handpan-ring update. The Gen1 LDROM loader is now
+maintenance-only: its protocol and flash layout are frozen unless a field defect
+requires correction, and no additional loader features are planned.
 
 The updater is intentionally a recovery system, not just an APROM write
 command. A permanent loader runs from the M2003's 4 KB LDROM, while the motor
@@ -187,7 +188,8 @@ Each existing actuator requires one final manual connection:
 4. Configure the supported LDROM-first IAP boot mode.
 5. Power-cycle and prove that LDROM validates and starts APROM.
 6. Prove addressed entry, recovery from an invalid manifest, and settings
-   preservation before repeating the process on the fleet.
+   preservation. This validation was completed before fleet provisioning and
+   must be repeated before deploying any corrective loader build.
 
 SWD and the ring UART use the same two MCU pins on Gen1 and cannot be observed
 simultaneously. Disconnect the UART adapter before attaching J-Link. After the
@@ -215,7 +217,7 @@ LDROM update permission is disabled during normal operation. Version 1 exposes
 no ring command capable of erasing or programming LDROM or configuration
 words.
 
-## Verification gates
+## Verification record
 
 ### Off-hardware
 
@@ -242,8 +244,9 @@ Recorded on 2026-08-02 from a clean build:
 The 4-byte LDROM margin is intentional and explicit. Protocol 3 recovers 64
 bytes by using a compact tableless CRC-32 routine, then spends almost all of
 that space on tail-acknowledged bulk transfer while retaining loader-entry
-diagnostics and every flash-safety check. Further loader features require a
-different architecture or a measured source-level size reduction.
+diagnostics and every flash-safety check. It is not reserved for more features;
+any future field-defect correction must preserve these protections and recover
+measured code space if needed.
 
 Generate the current programming and configuration-capture command files
 without connecting to hardware:
@@ -277,7 +280,7 @@ shared pins back to the UART adapter.
 
 There is intentionally no separate app-only or provisioning command path.
 
-The ring updater is ready for the same single-device bench gate:
+The standalone updater remains the supported recovery and command-line path:
 
 ```powershell
 # Validate an image without opening a serial port.
@@ -287,7 +290,7 @@ py scripts/ring_bootload.py build/m2003-motor.bin --addr 0 --dry-run
 py scripts/ring_bootload.py build/m2003-motor.bin -p COM18 --addr 0 `
     --no-enter --info-only
 
-# After provisioning is proven, update one addressed actuator.
+# Update one addressed actuator.
 py scripts/ring_bootload.py build/m2003-motor.bin -p COM7 --addr 0 --image-version 1
 
 # Recovery: start this, then apply power during the five-second hold stream.
@@ -356,7 +359,7 @@ path. Operators update the checkout outside the GUI, inspect the displayed
 commit/dirty marker, build, then flash the frozen `.bin`. After success all
 actuators are intentionally disabled/unhomed and must be homed again.
 
-### Single restrained actuator
+### Single restrained actuator validation
 
 - Entering LDROM changes the normal application LED pattern to solid on.
 - LDROM-first reset verifies the APROM vector map and boot selection before
@@ -377,7 +380,7 @@ actuators are intentionally disabled/unhomed and must be homed again.
   invariant without depending on manually timing a sub-millisecond flash-word
   operation.
 
-Record the first-device evidence here before provisioning a second actuator:
+Recorded restrained-device evidence:
 
 | Evidence | Result |
 | --- | --- |
@@ -396,17 +399,22 @@ Record the first-device evidence here before provisioning a second actuator:
 
 ### Ring
 
-- A loader forwards ordinary application traffic byte-for-byte while idle.
-- The farthest, middle, and nearest positions can each be updated.
-- A deliberately failed device does not prevent retry or corrupt a neighbor.
-- Protocol-3 bulk transfer is paced by only the farthest loader reply; every
-  device is then verified and committed individually.
-- Only after those tests pass: run sequential and broadcast fleet updates and
-  retain the host logs plus final per-device version/status results.
+- **PASS 2026-08-03 — complete 14-actuator handpan ring:** the instrument-server
+  GUI built the application and completed the protocol-3 ring update without an
+  update error. All actuators returned to application operation and the full
+  instrument resumed playback after homing.
+- This fleet run exercised the shared data phase through the physical tail and
+  the individual verify, repair/commit, restart, and re-enumeration sequence
+  across nearest, middle, and farthest ring positions.
+- The earlier manifest-invalidation, partial-page, uncommitted-full-image, and
+  cold-power tests remain the recovery evidence for interrupted transfers.
+- A loader continues to forward ordinary application traffic byte-for-byte
+  while idle; protocol-3 bulk transfer remains paced by only the farthest
+  loader reply, with every device verified and committed individually.
 
-## Implementation progress
+## Release status
 
-- [x] Architecture, flash boundaries, manifest contract, and bench gate
+- [x] Architecture, flash boundaries, manifest contract, and validation plan
       documented.
 - [x] Separate, size-enforced LDROM build and safe startup.
 - [x] Loader framing, enumeration, identity, and boot decision.
@@ -415,7 +423,12 @@ Record the first-device evidence here before provisioning a second actuator:
 - [x] Host updater, retry/commit-loss handling, and interruption tests.
 - [x] APROM/manifest/LDROM provisioning generator and read-only configuration capture.
 - [x] Preservation-aware LDROM-first CONFIG transaction added to the standard provisioning path.
-- [x] Single-device bench gates.
+- [x] Single-device hardware validation.
 - [x] Protocol-3 bulk transfer implementation, off-hardware tests, and one-node
       bench validation.
-- [ ] Full-ring validation.
+- [x] Full 14-actuator ring validation through the instrument-server GUI.
+
+The Gen1 loader/update implementation is complete and maintenance-only. Its
+4-byte LDROM margin is not a feature budget; future functionality belongs in a
+later hardware generation. Gen1 changes should be limited to demonstrated
+correctness or recovery defects.

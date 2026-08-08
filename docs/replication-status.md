@@ -10,6 +10,10 @@ between what can be followed today and what still needs project-owner input.
 - Windows build and J-Link flash scripts with readback verification.
 - Ring protocol implementation in firmware and Python.
 - Browser MIDI player, HTTP bridge, looper, and integration API.
+- Hardware-validated synchronized chord dispatch on the 14-actuator handpan,
+  including rapid layered MIDI passages.
+- Stable, maintenance-only Gen1 LDROM recovery loader plus successful
+  protocol-3 update of the complete 14-actuator ring.
 - Diagnostics, tuning, strike sweeps, and calibration-profile tooling.
 - KiCad source for the current flex/modchip and interface designs.
 - High-level description of the proven manual BL4818 retrofit and mechanical

@@ -56,6 +56,12 @@ notes. Isolated notes retain timed acknowledgments. The browser follows the
 server's playback state through completion and never cancels a song merely
 because its nominal wall-clock duration elapsed.
 
+**Hardware validation, 2026-08-03:** on the 14-actuator handpan, chord impacts
+were reported as nearly perfectly synchronized. Removing chord reply waits also
+let rapid layered melodies retain their intended following notes instead of
+clumping or dropping them; long-used MIDI files played audibly cleaner with the
+same mappings and strike settings.
+
 ## Ring diagnostics
 
 List serial ports and enumerate actuators:
@@ -121,10 +127,10 @@ py scripts/ring_bootload.py build/m2003-motor.bin -p COM7 --broadcast-all `
 ```
 
 The single-actuator programming and cold-power recovery gates are complete.
-Both `--all` and protocol-3 `--broadcast-all` have passed on a one-device ring;
-farthest/middle/nearest updates, multi-node broadcast pacing, and failure
-isolation remain bench gates before the first complete fleet run. `--all`
-remains the sequential fallback;
+Both `--all` and protocol-3 `--broadcast-all` passed on a one-device ring, and
+the instrument-server GUI subsequently completed a protocol-3 update of the
+full 14-actuator handpan ring. The Gen1 loader is stable and maintenance-only.
+`--all` remains the sequential fallback;
 `--broadcast-all` refuses older loaders, verifies each device, repairs failures
 with addressed commands, and commits individually. `docs/firmware-update.md`
 contains the evidence, recovery procedure, and one-time SWD provisioning pass.

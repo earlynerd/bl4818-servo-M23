@@ -52,6 +52,8 @@ The Python server owns the serial port and serves the browser UI. It enumerates
 the actuator ring, maps MIDI pitches to actuator addresses, schedules strikes,
 compensates for measured mechanical latency, and can build then deploy APROM
 updates through the permanent LDROM loaders without releasing the serial port.
+The updater and synchronized chord scheduler are hardware-validated on the
+14-actuator handpan ring.
 Each actuator closes its own
 current, velocity, and position loops and runs the homing/strike state machine.
 The current protocol uses a four-bit address and supports up to 16 actuators per
@@ -103,10 +105,10 @@ CONFIG capture) with:
 powershell -File scripts/build-jlink.ps1
 ```
 
-Generation does not contact hardware or change CONFIG. The ring updater and
-its single-device recovery gates are documented in [Ring firmware
-update](docs/firmware-update.md). Do not provision a fleet from the development
-branch before those gates are recorded there.
+Generation does not contact hardware or change CONFIG. The stable Gen1 ring
+updater, its recovery evidence, and its completed 14-actuator validation are
+documented in [Ring firmware update](docs/firmware-update.md). The LDROM loader
+is now maintenance-only; no further Gen1 loader features are planned.
 
 ### 3. Flash an actuator
 
@@ -150,7 +152,7 @@ Run `py scripts/ring_tool.py --help` for the complete command list.
 - [Hardware guide](docs/hardware.md): current BL4818 modification and actuator assembly architecture.
 - [Performance video](docs/video/handpan_video_h264.mp4): ten actuators playing with sound.
 - [Firmware guide](docs/firmware.md): architecture, build, flash, and module boundaries.
-- [Ring firmware update](docs/firmware-update.md): LDROM recovery design, flash layout, and validation gates.
+- [Ring firmware update](docs/firmware-update.md): stable LDROM recovery design, flash layout, operation, and validation record.
 - [Host software guide](docs/host-software.md): server, browser players, and bench tools.
 - [Replication status](docs/replication-status.md): what is reproducible now and what still needs source material.
 - [Ring Bus Protocol v2](protocol.md): serial packet and command specification.

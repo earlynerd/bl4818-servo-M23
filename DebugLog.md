@@ -19,3 +19,4 @@ Bench-observed bugs and their resolutions. Structural decisions live in DECISION
 - **Class:** blocking-reply-in-realtime-scheduler
 - **Recently-touched?** yes — all three paths were introduced or changed with the chord synchronization work.
 - **Time to fix:** one bench feedback cycle.
+- **Hardware validation:** **PASS 2026-08-03** on the 14-actuator handpan; chords were nearly perfectly synchronized and rapid layered passages retained following notes cleanly.

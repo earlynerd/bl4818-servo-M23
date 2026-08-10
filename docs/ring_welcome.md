@@ -69,8 +69,11 @@ both the full and short `foo.local` → `foo` forms).
 Per-person trigger state is stored in `welcome_state.json` as
 `{"Sly": "2026-06-09"}`. A person plays only when their stored date isn't
 today's local date, then the date is updated (atomic write). Delete the file
-to re-arm everyone. `active_hours` (e.g. `"06:30-19:00"`, wraps past midnight)
-suppresses playback outside working hours.
+to re-arm everyone. `arrival_delay_s` (default `60`) waits after the first
+detection before playing, allowing time to walk from the Wi-Fi boundary to the
+door. Pending greetings do not block later network scans and do not require a
+sleeping phone to answer every scan. `active_hours` (e.g. `"06:30-19:00"`,
+wraps past midnight) suppresses playback outside working hours.
 
 ## Defining a song
 
@@ -108,6 +111,6 @@ which knows the live mapping. Preview any result in the browser player at
 | `scan [--range CIDR]` | One-shot discovery dump (IP/MAC/hostname). |
 | `list` | Show the roster and who has triggered today. |
 | `test <name>` | Resolve and play one person's song immediately. |
-| `watch [--interval S] [--range CIDR]` | Run the daemon. |
+| `watch [--interval S] [--delay S] [--range CIDR]` | Run the daemon; `--delay` overrides `arrival_delay_s`. |
 
 Common flags: `--config`, `--state`, `--ping-timeout`, `--no-netbios`.

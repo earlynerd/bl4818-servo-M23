@@ -46,6 +46,7 @@ import argparse
 import concurrent.futures
 import ipaddress
 import json
+import math
 import os
 import platform
 import re
@@ -67,6 +68,7 @@ ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG = ROOT / "welcome_config.json"
 DEFAULT_STATE = ROOT / "welcome_state.json"
 DEFAULT_BASE_URL = "http://127.0.0.1:8765"
+DEFAULT_ARRIVAL_DELAY_S = 60.0
 IS_WINDOWS = platform.system() == "Windows"
 
 _MAC_RE = re.compile(r"([0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}")
@@ -562,6 +564,18 @@ def cmd_watch(args: argparse.Namespace) -> int:
         print("error: set 'ip_range' in the config (or pass --range).", file=sys.stderr)
         return 1
     interval = args.interval or cfg.get("interval_s", 25)
+    delay_value = args.delay if args.delay is not None else cfg.get(
+        "arrival_delay_s", DEFAULT_ARRIVAL_DELAY_S)
+    try:
+        arrival_delay_s = float(delay_value)
+    except (TypeError, ValueError):
+        print("error: arrival_delay_s/--delay must be a number of seconds.",
+              file=sys.stderr)
+        return 1
+    if not math.isfinite(arrival_delay_s) or arrival_delay_s < 0:
+        print("error: arrival_delay_s/--delay must be a finite, non-negative "
+              "number.", file=sys.stderr)
+        return 1
     base_url = cfg.get("server", DEFAULT_BASE_URL)
     try:
         active = parse_active_hours(cfg.get("active_hours"))
@@ -569,12 +583,16 @@ def cmd_watch(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     client = ChimeClient(base_url=base_url)
+    # name -> (roster entry, monotonic deadline). A pending arrival remains
+    # queued even if a sleeping phone misses a later scan; detection itself is
+    # the event we are delaying, not a requirement for continuous presence.
+    pending_arrivals: dict[str, tuple[dict, float]] = {}
 
     print(f"[welcome] watching {ip_range} every {interval}s, "
           f"ring server {base_url}")
     print(f"[welcome] {len(cfg['people'])} people in roster"
           + (f", active hours {cfg['active_hours']}" if active else "")
-          + ".  Ctrl-C to stop.")
+          + f", arrival delay {arrival_delay_s:g}s.  Ctrl-C to stop.")
 
     try:
         while True:
@@ -585,6 +603,36 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 continue
 
             today = today_str()
+
+            # Play greetings whose delay has elapsed before doing another
+            # network scan. Failed attempts are left queued for a later retry.
+            now = time.monotonic()
+            due = [
+                (name, person)
+                for name, (person, deadline) in pending_arrivals.items()
+                if deadline <= now and state.get(name) != today
+            ]
+            for name in list(pending_arrivals):
+                if state.get(name) == today:
+                    pending_arrivals.pop(name, None)
+            if due:
+                try:
+                    pitches = client.pitches()
+                except ChimeClientError as exc:
+                    print(f"[{ts}] ring server unreachable, will retry: {exc}")
+                    retry_at = time.monotonic() + interval
+                    for name, person in due:
+                        pending_arrivals[name] = (person, retry_at)
+                else:
+                    for name, person in due:
+                        print(f"[{ts}] {name} arrival delay elapsed -> greeting")
+                        if play_person_song(client, person, pitches, log=print):
+                            state[name] = today
+                            save_state(state_path, state)
+                            pending_arrivals.pop(name, None)
+                        else:
+                            pending_arrivals[name] = (
+                                person, time.monotonic() + interval)
             try:
                 devices = scan_network(
                     ip_range, ping_timeout_ms=args.ping_timeout,
@@ -595,38 +643,37 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 time.sleep(interval)
                 continue
 
-            # Who is present right now?
-            arrivals = []
+            # Queue newly detected roster members. Scanning continues during
+            # the delay so simultaneous arrivals are collected independently.
+            newly_detected = []
             for person in cfg["people"]:
                 name = person.get("name", "?")
-                if state.get(name) == today:
+                if state.get(name) == today or name in pending_arrivals:
                     continue  # already greeted today
                 if any(person_matches(person, dev) for dev in devices):
-                    arrivals.append(person)
+                    pending_arrivals[name] = (
+                        person, time.monotonic() + arrival_delay_s)
+                    newly_detected.append(name)
+                    print(f"[{ts}] {name} detected -> greeting in "
+                          f"{arrival_delay_s:g}s")
 
-            if arrivals:
-                # Refresh the live mapping once per batch.
-                try:
-                    pitches = client.pitches()
-                except ChimeClientError as exc:
-                    print(f"[{ts}] ring server unreachable, will retry: {exc}")
-                    time.sleep(interval)
-                    continue
-                for person in arrivals:
-                    name = person.get("name", "?")
-                    print(f"[{ts}] {name} arrived -> first time today")
-                    if play_person_song(client, person, pitches, log=print):
-                        state[name] = today
-                        save_state(state_path, state)
-            else:
+            if not newly_detected:
                 present = sum(
                     1 for person in cfg["people"]
                     if any(person_matches(person, d) for d in devices)
                 )
                 print(f"[{ts}] {len(devices)} devices, {present} roster member(s) "
-                      f"present, no new arrivals")
+                      f"present, {len(pending_arrivals)} greeting(s) pending")
 
-            time.sleep(interval)
+            sleep_s = float(interval)
+            if pending_arrivals:
+                next_deadline = min(
+                    deadline for _, deadline in pending_arrivals.values())
+                sleep_s = min(
+                    sleep_s,
+                    max(0.05, next_deadline - time.monotonic()),
+                )
+            time.sleep(sleep_s)
     except KeyboardInterrupt:
         print("\n[welcome] stopped.")
         return 0
@@ -670,6 +717,9 @@ def main(argv: list[str] | None = None) -> int:
                              help="run the walk-in watcher daemon")
     p_watch.add_argument("--range", help="override config ip_range")
     p_watch.add_argument("--interval", type=int, help="seconds between scans")
+    p_watch.add_argument("--delay", type=float,
+                         help=("seconds to wait after first detecting a roster "
+                               "device before greeting it"))
     p_watch.set_defaults(func=cmd_watch)
 
     args = parser.parse_args(argv)

@@ -100,7 +100,10 @@
   .play-btn.playing { background: var(--accent); }
   .stop-btn { background: var(--surface-alt); border: 1px solid var(--border); color: var(--text); }
 
-  .piano-roll { flex: 1; min-height: 220px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; display: flex; }
+  .piano-roll-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .piano-roll-controls { display: flex; align-items: center; gap: 8px; color: var(--text-muted); font: 11px 'JetBrains Mono', monospace; }
+  .piano-roll-controls .slider { width: 130px; }
+  .piano-roll { flex: none; height: 220px; min-height: 220px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; display: flex; }
   .piano-labels { width: 56px; flex-shrink: 0; border-right: 1px solid var(--border); display: flex; flex-direction: column; }
   .piano-label { flex: 1; display: flex; align-items: center; justify-content: center; font-size: 9px; font-family: 'JetBrains Mono', monospace; padding: 0 6px; gap: 4px; overflow: hidden; min-height: 0; }
   .piano-label.unmapped { color: var(--text-dim); }
@@ -391,7 +394,16 @@
         </div>
       </div>
       <div id="progressContainer" class="progress-bar" style="display:none"><div id="progressFill" class="progress-fill" style="width:0%"></div></div>
-      <div class="piano-roll">
+      <div class="piano-roll-toolbar">
+        <span class="label" style="margin:0">Piano Roll</span>
+        <div class="piano-roll-controls">
+          <button class="pill active" id="rollAutoBtn" type="button" style="padding:4px 8px;font-size:11px">Auto fit</button>
+          <label for="rollRowHeightSlider">Row height</label>
+          <input type="range" id="rollRowHeightSlider" min="10" max="48" step="1" value="22" class="slider" disabled>
+          <span id="rollRowHeightDisplay" style="min-width:64px;text-align:right">auto</span>
+        </div>
+      </div>
+      <div class="piano-roll" id="pianoRoll">
         <div class="piano-labels" id="pianoLabels"></div>
         <div class="piano-grid" id="pianoGrid"></div>
       </div>
@@ -497,6 +509,7 @@ const STORAGE_KEY_FB = "robotdrum.fallback.v1";
 const STORAGE_KEY_KBD = "robotdrum.kbd.v1";
 const STORAGE_KEY_COMP = "robotdrum.comp.v1";
 const STORAGE_KEY_LIB = "robotdrum.library.v1"; // library UI prefs: shuffle/autoplay/sort/favOnly
+const STORAGE_KEY_ROLL = "robotdrum.pianoroll.v1";
 // Home row first (most ergonomic for 10-mallet drums), then top row for
 // extra slots. Keys are matched against e.key.toLowerCase().
 const KEYBOARD_KEYS = ["a","s","d","f","g","h","j","k","l",";","'","q","w","e","r","t","y","u","i","o","p"];
@@ -546,6 +559,8 @@ const S = {
   loadedMidiName: null,
   loadedFromLibrary: false,
   kbdEnabled: false,
+  rollAutoScale: true,
+  rollRowHeight: 22,
   playing: false,
   timeouts: [],
   animFrame: null,
@@ -1131,6 +1146,21 @@ function loadKbdEnabled() {
 }
 function saveKbdEnabled() {
   localStorage.setItem(STORAGE_KEY_KBD, S.kbdEnabled ? "1" : "0");
+}
+function loadRollSettings() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(STORAGE_KEY_ROLL) || "{}");
+    S.rollAutoScale = raw.auto !== false;
+    if (Number.isFinite(raw.rowHeight)) {
+      S.rollRowHeight = Math.max(10, Math.min(48, Math.round(raw.rowHeight)));
+    }
+  } catch {}
+}
+function saveRollSettings() {
+  localStorage.setItem(STORAGE_KEY_ROLL, JSON.stringify({
+    auto: S.rollAutoScale,
+    rowHeight: S.rollRowHeight,
+  }));
 }
 function loadCompSettings() {
   try {
@@ -1832,6 +1862,22 @@ function renderPianoRoll() {
   const BLACK_KEYS = new Set([1, 3, 6, 8, 10]); // C#, D#, F#, G#, A#
   const rh = 100 / rowCount;
 
+  // Auto mode uses the available viewport while keeping labels legible. Manual
+  // mode gives each semitone the requested number of pixels. In either mode
+  // the roll grows to the complete pitch range, so mapped mallets are never
+  // clipped below a fixed-height viewport.
+  const availableHeight = Math.max(220, window.innerHeight - 280);
+  const rowHeight = S.rollAutoScale
+    ? Math.max(10, Math.min(32, Math.floor(availableHeight / rowCount)))
+    : S.rollRowHeight;
+  const rollHeight = Math.max(220, rowCount * rowHeight);
+  document.getElementById("pianoRoll").style.height = `${rollHeight}px`;
+  const rowHeightDisplay = document.getElementById("rollRowHeightDisplay");
+  if (rowHeightDisplay) {
+    rowHeightDisplay.textContent = S.rollAutoScale
+      ? `auto (${rowHeight}px)` : `${rowHeight}px`;
+  }
+
   // Labels — top down (highest pitch first).
   let labels = "";
   for (let r = 0; r < rowCount; r++) {
@@ -2145,6 +2191,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   S.fallback = loadFallback();
   S.velFloor = loadVelFloor();
   S.kbdEnabled = loadKbdEnabled();
+  loadRollSettings();
   loadCompSettings();
 
   // File / drop zone
@@ -2675,6 +2722,35 @@ document.addEventListener("DOMContentLoaded", async () => {
   ts.addEventListener("input", refreshTempoLabel);
   document.getElementById("tempoResetBtn").addEventListener("click", () => {
     ts.value = "1.00"; refreshTempoLabel();
+  });
+
+  // Piano-roll vertical scale. Auto fit is the default; switching it off
+  // restores the last manual row height. Both choices persist locally.
+  const rollAutoBtn = document.getElementById("rollAutoBtn");
+  const rollRowHeightSlider = document.getElementById("rollRowHeightSlider");
+  const rollRowHeightDisplay = document.getElementById("rollRowHeightDisplay");
+  function refreshRollScaleControls() {
+    rollAutoBtn.classList.toggle("active", S.rollAutoScale);
+    rollAutoBtn.textContent = S.rollAutoScale ? "Auto fit" : "Manual";
+    rollRowHeightSlider.disabled = S.rollAutoScale;
+    rollRowHeightSlider.value = String(S.rollRowHeight);
+    if (!S.rollAutoScale) rollRowHeightDisplay.textContent = `${S.rollRowHeight}px`;
+  }
+  refreshRollScaleControls();
+  rollAutoBtn.addEventListener("click", () => {
+    S.rollAutoScale = !S.rollAutoScale;
+    saveRollSettings();
+    refreshRollScaleControls();
+    if (S.composition) renderPianoRoll();
+  });
+  rollRowHeightSlider.addEventListener("input", () => {
+    S.rollRowHeight = +rollRowHeightSlider.value;
+    saveRollSettings();
+    refreshRollScaleControls();
+    if (S.composition) renderPianoRoll();
+  });
+  window.addEventListener("resize", () => {
+    if (S.composition && S.rollAutoScale) renderPianoRoll();
   });
 
   // Buttons

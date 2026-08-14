@@ -17,6 +17,7 @@ Examples:
     python ring_tool.py -p COM7 broadcast 200 0 0
     python ring_tool.py -p COM7 monitor 0 --hz 10
     python ring_tool.py -p COM7 timing-status 0
+    python ring_tool.py -p COM7 config 0
     python ring_tool.py -p COM7 detect-csn-polarity 0
     python ring_tool.py -p COM7 set-csn-polarity 0 1
     python ring_tool.py -p COM7 measure-strike-timing 0 --start 500 --stop 3000 --step 250 --csv strike.csv
@@ -71,6 +72,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("address", type=int)
 
     sp = sub.add_parser("timing-status", help="Query timing and scheduler instrumentation from a device")
+    sp.add_argument("address", type=int)
+
+    sp = sub.add_parser("config", help="Query the complete motor/strike tuning snapshot")
     sp.add_argument("address", type=int)
 
     sp = sub.add_parser("set-duty", help="Set signed duty on a device")
@@ -395,6 +399,17 @@ def main() -> int:
         elif args.command == "timing-status":
             print(format_timing_status(retry_after_enumerate(lambda: client.query_timing(args.address))))
 
+        elif args.command == "config":
+            config = retry_after_enumerate(lambda: client.query_config(args.address))
+            data = vars(config).copy()
+            data.update({
+                "persisted": config.persisted,
+                "zero_valid": config.zero_valid,
+                "csn_polarity_valid": config.csn_polarity_valid,
+                "strike_calibration_valid": config.strike_calibration_valid,
+            })
+            print(json.dumps(data, indent=2, sort_keys=True))
+
         elif args.command == "set-duty":
             print(format_status(retry_after_enumerate(lambda: client.set_duty(args.address, args.duty))))
 
@@ -471,7 +486,7 @@ def main() -> int:
             status = retry_after_enumerate(lambda: client.query_strike(args.address))
             print(
                 f"addr={status.address} strike={status.state_name} homed={status.homed} "
-                f"seq={status.sequence} flags=0x{status.flags:02X} current_ma={status.last_current_ma} "
+                f"seq={status.sequence} flags=0x{status.flags:04X} current_ma={status.last_current_ma} "
                 f"coast_ms={status.trigger_to_coast_ms if status.coast_valid else -1} "
                 f"rebound_ms={status.trigger_to_rebound_ms if status.rebound_valid else -1} "
                 f"retrigger_ready_ms={status.trigger_to_retrigger_ready_ms if status.retrigger_ready_valid else -1} "
@@ -480,6 +495,7 @@ def main() -> int:
                 f"active={int(status.active)} retriggered={int(status.retriggered)} "
                 f"retrigger_ready={int(status.retrigger_ready_valid)} "
                 f"rebound_timeout={int(status.rebound_timeout)} "
+                f"home_shift_warning={int(status.home_shift_warning)} "
                 f"drum_pos={status.drum_position} home_pos={status.home_position} "
                 f"home_offset={status.home_offset if status.home_offset is not None else 'n/a'} "
                 f"coast_distance={status.coast_distance if status.coast_distance is not None else 'n/a'} "

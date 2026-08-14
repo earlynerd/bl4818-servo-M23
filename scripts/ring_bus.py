@@ -63,6 +63,7 @@ SUBCMD_SET_CSN_POLARITY    = 0x18
 SUBCMD_QUERY_STRIKE_TIMING = 0x19
 SUBCMD_STRIKE_EX     = 0x1A
 SUBCMD_ENTER_BOOTLOADER = 0x1B
+SUBCMD_QUERY_CONFIG  = 0x1C
 SUBCMD_MASK            = 0x3F
 SUBCMD_REPLY_FULL      = 0x00
 SUBCMD_REPLY_ACK       = 0x40
@@ -107,6 +108,12 @@ STRIKE_TIMING_VELOCITY_VALID  = 0x0040
 STRIKE_TIMING_RETRIGGER_READY_VALID = 0x0080
 STRIKE_TIMING_IMPACT_VALID    = 0x0100
 STRIKE_TIMING_DEAD            = 0x0200
+STRIKE_WARNING_HOME_SHIFT     = 0x0400
+
+CONFIG_FLAG_PERSIST_VALID = 0x0001
+CONFIG_FLAG_ZERO_VALID = 0x0002
+CONFIG_FLAG_CSN_POLARITY_VALID = 0x0004
+CONFIG_FLAG_STRIKE_CAL_VALID = 0x0008
 
 # ── Timing defaults ─────────────────────────────────────────────────────────
 
@@ -134,7 +141,15 @@ def crc16_ccitt(data: bytes, init: int = 0xFFFF) -> int:
 # ── Data types ───────────────────────────────────────────────────────────────
 
 MOTOR_STATES  = {0: "IDLE", 1: "RUN", 2: "FAULT"}
-FAULT_CODES   = {0: "NONE", 1: "OVERCURRENT", 2: "HALL_INVALID"}
+FAULT_CODES   = {
+    0: "NONE",
+    1: "OVERCURRENT",
+    2: "HALL_INVALID",
+    3: "ENCODER_TIMEOUT",
+    4: "ADC_TIMEOUT",
+    5: "HOMING_LIMIT",
+    6: "STRIKE_LIMIT",
+}
 CTRL_MODES    = {0: "DUTY", 1: "VELOCITY", 2: "POSITION", 3: "TORQUE"}
 STRIKE_STATES = {0: "IDLE", 1: "HOMING", 2: "DRIVING", 3: "COASTING", 4: "LEGACY_RETURNING", 5: "CATCHING", 6: "MUTING"}
 SUBCMD_NAMES  = {
@@ -165,6 +180,7 @@ SUBCMD_NAMES  = {
     SUBCMD_QUERY_STRIKE_TIMING: "QUERY_STRIKE_TIMING",
     SUBCMD_STRIKE_EX: "STRIKE_EX",
     SUBCMD_ENTER_BOOTLOADER: "ENTER_BOOTLOADER",
+    SUBCMD_QUERY_CONFIG: "QUERY_CONFIG",
 }
 ACK_RESULT_NAMES = {
     ACK_RESULT_OK: "OK",
@@ -289,6 +305,45 @@ class MotorStatus:
 
 
 @dataclasses.dataclass
+class TuningConfig:
+    address: int
+    velocity_kp: int
+    velocity_ki: int
+    velocity_kd: int
+    velocity_ff: int
+    position_kp: int
+    position_ki: int
+    position_kd: int
+    current_kp: int
+    current_ki: int
+    torque_limit_ma: int
+    home_offset: int
+    coast_distance: int
+    homing_duty: int
+    mute_brake_ms: int
+    mute_press_ma: int
+    mute_engage_offset: int
+    flags: int
+    csn_assert_level: int
+
+    @property
+    def persisted(self) -> bool:
+        return bool(self.flags & CONFIG_FLAG_PERSIST_VALID)
+
+    @property
+    def zero_valid(self) -> bool:
+        return bool(self.flags & CONFIG_FLAG_ZERO_VALID)
+
+    @property
+    def csn_polarity_valid(self) -> bool:
+        return bool(self.flags & CONFIG_FLAG_CSN_POLARITY_VALID)
+
+    @property
+    def strike_calibration_valid(self) -> bool:
+        return bool(self.flags & CONFIG_FLAG_STRIKE_CAL_VALID)
+
+
+@dataclasses.dataclass
 class StrikeTiming:
     """Compact snapshot of the most recently completed strike's timing.
 
@@ -323,6 +378,10 @@ class StrikeTiming:
     @property
     def rebound_timeout(self) -> bool:
         return bool(self.flags & STRIKE_TIMING_REBOUND_TIMEOUT)
+
+    @property
+    def home_shift_warning(self) -> bool:
+        return bool(self.flags & STRIKE_WARNING_HOME_SHIFT)
 
     @property
     def has_data(self) -> bool:
@@ -415,6 +474,10 @@ class StrikeStatus:
     @property
     def impact_valid(self) -> bool:
         return bool(self.flags & STRIKE_TIMING_IMPACT_VALID)
+
+    @property
+    def home_shift_warning(self) -> bool:
+        return bool(self.flags & STRIKE_WARNING_HOME_SHIFT)
 
 
 @dataclasses.dataclass
@@ -903,6 +966,32 @@ class RingClientV2:
         self._flush_rx()
         self._send_frame(self._build_addressed_payload(address, SUBCMD_QUERY_STATUS))
         return self._recv_status_reply(address)
+
+    def query_config(self, address: int) -> TuningConfig:
+        self._check_address(address)
+        self._flush_rx()
+        self._send_frame(self._build_addressed_payload(address, SUBCMD_QUERY_CONFIG))
+        deadline = time.monotonic() + self.timeout_ms / 1000.0
+        expected_cmd = CMD_STATUS_BASE | address
+        skipped: list[bytes] = []
+        while True:
+            remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
+            try:
+                payload = self._recv_frame(timeout_ms=remaining_ms)
+            except RingTimeout as exc:
+                raise RingTimeout(_format_timeout_context(
+                    f"timeout waiting for config addr={address} "
+                    f"expected_cmd=0x{expected_cmd:02X}({_cmd_name(expected_cmd)}) "
+                    f"expected_len=36",
+                    skipped,
+                    exc,
+                )) from exc
+            cmd = payload[0] if payload else 0
+            if cmd == expected_cmd and len(payload) == 36:
+                values = struct.unpack(">hhhhhhhhhHhhhhhhHB", payload[1:36])
+                return TuningConfig(address, *values)
+            _remember_event(skipped, payload)
+            self._trace("skip", payload)
 
     def set_duty(self, address: int, duty: int, reply_mode: str = REPLY_MODE_FULL) -> AddressedReply:
         if duty < -32768 or duty > 32767:
@@ -1583,6 +1672,7 @@ __all__ = [
     "MAX_PAYLOAD",
     "MOTOR_STATES",
     "MotorStatus",
+    "TuningConfig",
     "PREAMBLE",
     "REPLY_MODE_ACK",
     "REPLY_MODE_ACK_TIMED",
@@ -1609,11 +1699,13 @@ __all__ = [
     "STRIKE_TIMING_RETRIGGER_READY_VALID",
     "STRIKE_TIMING_RETRIGGERED",
     "STRIKE_TIMING_VELOCITY_VALID",
+    "STRIKE_WARNING_HOME_SHIFT",
     "SUBCMD_CLEAR_FAULT",
     "SUBCMD_CLEAR_SETTINGS",
     "SUBCMD_MASK",
     "SUBCMD_NAMES",
     "SUBCMD_QUERY_STATUS",
+    "SUBCMD_QUERY_CONFIG",
     "SUBCMD_QUERY_STRIKE",
     "SUBCMD_QUERY_STRIKE_TIMING",
     "SUBCMD_QUERY_TIMING",

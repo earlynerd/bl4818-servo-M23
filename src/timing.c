@@ -148,6 +148,11 @@ uint32_t timing_capture_stamp(void)
     return timing_now();
 }
 
+uint32_t timing_elapsed_us(uint32_t start_stamp)
+{
+    return timing_counts_to_us(timing_delta_counts(start_stamp, timing_now()));
+}
+
 void timing_record_control_tick(uint32_t start_stamp)
 {
     uint32_t end_stamp = timing_now();

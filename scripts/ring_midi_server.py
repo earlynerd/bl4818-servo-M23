@@ -37,9 +37,12 @@ POST /api/library-meta        -> {"path", "favorite"?, "rating"?, "bump_play"?};
                                  into <library-dir>/.midi_library.json
 POST /api/enumerate           -> re-enumerate; returns same shape as /api/status
 POST /api/home                -> {"addresses": [int]?}; homes them, returns ok/error
+POST /api/recover             -> {"addresses": [int]}; clear fault + re-home each
 POST /api/strike              -> {"address": int, "current_ma": int}; ACK + last-strike timing
 POST /api/strikes             -> {"strikes": [{"address","current_ma"}, ...]}; batch
 POST /api/strike-param        -> {"address": int, "param": str, "value": int}; ACK
+GET  /api/config?address=N    -> full persisted/runtime tuning snapshot for one drive
+POST /api/config              -> apply one tuning group to one or many addresses
 POST /api/cancel              -> cancels all active strikes (panic stop, also stops playback)
 POST /api/stop                -> {"addresses": [int]?}; coordinated stop; re-home required
 POST /api/save-settings       -> {"addresses": [int]?}; persists strike params to NVM
@@ -104,6 +107,9 @@ from ring_bus import (
     STRIKE_PARAM_HOME_OFFSET,
     STRIKE_PARAM_COAST_DISTANCE,
     STRIKE_PARAM_HOMING_DUTY,
+    STRIKE_PARAM_MUTE_BRAKE_MS,
+    STRIKE_PARAM_MUTE_ENGAGE_OFFSET,
+    STRIKE_PARAM_MUTE_PRESS_MA,
 )
 from firmware_image import image_metadata, prepare_image
 from ring_bootload import update_ring
@@ -113,6 +119,9 @@ STRIKE_PARAM_BY_NAME = {
     "home_offset": STRIKE_PARAM_HOME_OFFSET,
     "coast_distance": STRIKE_PARAM_COAST_DISTANCE,
     "homing_duty": STRIKE_PARAM_HOMING_DUTY,
+    "mute_brake_ms": STRIKE_PARAM_MUTE_BRAKE_MS,
+    "mute_press_ma": STRIKE_PARAM_MUTE_PRESS_MA,
+    "mute_engage_offset": STRIKE_PARAM_MUTE_ENGAGE_OFFSET,
 }
 
 NOTE_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
@@ -345,6 +354,17 @@ class Bridge:
         self.health.record_ok(address, (time.monotonic() - t0) * 1_000_000)
         return s
 
+    def _query_motor_timed(self, address: int):
+        """query_status with the same link-health accounting as strike status."""
+        t0 = time.monotonic()
+        try:
+            status = self.client.query_status(address)
+        except Exception as exc:
+            self._record_bus_exc(address, exc)
+            raise
+        self.health.record_ok(address, (time.monotonic() - t0) * 1_000_000)
+        return status
+
     def status(self) -> dict:
         with self.lock:
             count = self.count
@@ -356,10 +376,30 @@ class Bridge:
                     homed.append(bool(s.homed))
                     slot = {
                         "homed": bool(s.homed),
+                        "home_shift_warning": s.home_shift_warning,
                         "home_offset": s.home_offset,
                         "coast_distance": s.coast_distance,
                         "homing_duty": s.homing_duty,
+                        # Fault entry invalidates strike homing in firmware,
+                        # so a homed slot cannot simultaneously be faulted.
+                        # Avoid doubling healthy-ring status traffic; only
+                        # ask for the full motor status when homing is absent.
+                        "fault": 0 if s.homed else None,
+                        "fault_name": "NONE" if s.homed else None,
+                        "motor_state": None,
+                        "motor_state_name": None,
                     }
+                    if not s.homed:
+                        try:
+                            motor = self._query_motor_timed(addr)
+                            slot.update({
+                                "fault": motor.fault,
+                                "fault_name": motor.fault_name,
+                                "motor_state": motor.state,
+                                "motor_state_name": motor.state_name,
+                            })
+                        except Exception as exc:
+                            slot["status_error"] = str(exc)
                     last_timing = self.strike_timing.get(addr)
                     if last_timing is not None:
                         slot["last_timing"] = last_timing
@@ -368,9 +408,15 @@ class Bridge:
                     homed.append(False)
                     slots.append({
                         "homed": False,
+                        "home_shift_warning": False,
                         "home_offset": None,
                         "coast_distance": None,
                         "homing_duty": None,
+                        "fault": None,
+                        "fault_name": None,
+                        "motor_state": None,
+                        "motor_state_name": None,
+                        "status_error": "strike status unavailable",
                     })
         return {"count": count, "homed": homed, "slots": slots}
 
@@ -580,6 +626,66 @@ class Bridge:
             )
         return self._ack_to_dict(address, reply)
 
+    def query_config(self, address: int) -> dict:
+        with self.lock:
+            config = self.client.query_config(address)
+        result = vars(config).copy()
+        result.update({
+            "persisted": config.persisted,
+            "zero_valid": config.zero_valid,
+            "csn_polarity_valid": config.csn_polarity_valid,
+            "strike_calibration_valid": config.strike_calibration_valid,
+        })
+        return result
+
+    def apply_config(self, addresses: list[int], group: str, values: dict) -> list[dict]:
+        """Apply one ordinary tuning group to any caller-selected drives.
+
+        The browser uses the same operation for a single selected actuator
+        and for the complete ring; there are no fleet-only locked settings.
+        Board-specific electrical polarity remains a separate maintenance
+        operation and is deliberately not accepted here.
+        """
+        results: list[dict] = []
+        with self.lock:
+            for addr in addresses:
+                a = int(addr)
+                try:
+                    if group == "velocity_pid":
+                        reply = self.client.set_pid(
+                            a, values["kp"], values["ki"], values["kd"],
+                            reply_mode=REPLY_MODE_ACK,
+                        )
+                    elif group == "velocity_ff":
+                        reply = self.client.set_ff(
+                            a, values["value"], reply_mode=REPLY_MODE_ACK
+                        )
+                    elif group == "position_pid":
+                        reply = self.client.set_pos_pid(
+                            a, values["kp"], values["ki"], values["kd"],
+                            reply_mode=REPLY_MODE_ACK,
+                        )
+                    elif group == "current_pi":
+                        reply = self.client.set_cur_pid(
+                            a, values["kp"], values["ki"],
+                            reply_mode=REPLY_MODE_ACK,
+                        )
+                    elif group == "torque_limit":
+                        reply = self.client.set_torque(
+                            a, values["value"], reply_mode=REPLY_MODE_ACK
+                        )
+                    elif group == "strike_param":
+                        reply = self.client.set_strike_param(
+                            a, values["param_id"], values["value"],
+                            reply_mode=REPLY_MODE_ACK,
+                        )
+                    else:
+                        raise ValueError(f"unknown config group '{group}'")
+                    results.append(self._ack_to_dict(a, reply))
+                except Exception as exc:
+                    results.append({"address": a, "accepted": False, "error": str(exc)})
+        return results
+
     def home(self, addresses: list[int], timeout_ms: int = 8000) -> list[dict]:
         """Start homing and return each device's truthful acceptance ACK.
 
@@ -599,6 +705,32 @@ class Bridge:
                     results.append({"address": a, "accepted": False, "error": str(exc)})
         return results
 
+    def recover(self, addresses: list[int]) -> list[dict]:
+        """Clear each selected fault and immediately request a fresh home."""
+        results: list[dict] = []
+        with self.lock:
+            for addr in addresses:
+                a = int(addr)
+                item = {"address": a, "accepted": False}
+                try:
+                    clear_reply = self.client.clear_fault(a, reply_mode=REPLY_MODE_ACK)
+                    clear = self._ack_to_dict(a, clear_reply)
+                    item["clear"] = clear
+                    if not clear.get("accepted"):
+                        item["error"] = clear.get("result_name", "clear fault rejected")
+                        results.append(item)
+                        continue
+                    home_reply = self._strike_home_with_retry(a)
+                    home = self._ack_to_dict(a, home_reply)
+                    item["home"] = home
+                    item["accepted"] = bool(home.get("accepted"))
+                    if not item["accepted"]:
+                        item["error"] = home.get("result_name", "home rejected")
+                except Exception as exc:
+                    item["error"] = str(exc)
+                results.append(item)
+        return results
+
     def _strike_home_with_retry(self, addr: int):
         try:
             return self.client.strike_home(addr, reply_mode=REPLY_MODE_ACK)
@@ -613,19 +745,32 @@ class Bridge:
                 raise first_exc
             return self.client.strike_home(addr, reply_mode=REPLY_MODE_ACK)
 
-    def cancel_all(self) -> None:
+    def cancel_all(self) -> dict:
         # Stop the playback worker first so it can't fire a new strike
         # between our cancel calls. player.cancel() blocks on the worker's
         # join, which only takes one strike RTT to return (the worker
         # checks the stop event between strikes and at every wait).
         if self.player is not None:
             self.player.cancel()
+        results: list[dict] = []
         with self.lock:
             for addr in range(self.count):
+                t0 = time.monotonic()
                 try:
-                    self.client.strike_cancel(addr, reply_mode=REPLY_MODE_ACK)
-                except Exception:
-                    pass
+                    reply = self.client.strike_cancel(addr, reply_mode=REPLY_MODE_ACK)
+                    result = self._ack_to_dict(addr, reply)
+                    self.health.record_ok(addr, (time.monotonic() - t0) * 1_000_000)
+                except Exception as exc:
+                    self._record_bus_exc(addr, exc)
+                    result = {
+                        "address": addr,
+                        "accepted": False,
+                        "error": str(exc),
+                    }
+                results.append(result)
+
+        failed = [item["address"] for item in results if not item.get("accepted")]
+        return {"ok": not failed, "failed": failed, "results": results}
 
     def pitches(self) -> list[dict]:
         """Currently mapped pitches, with note name + slot + homed flag,
@@ -1631,6 +1776,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/status",
             "/api/pitches",
             "/api/strike-timing",
+            "/api/config",
         }:
             self._json(409, {"error": "firmware update in progress"})
             return
@@ -1638,6 +1784,23 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/status":
             try:
                 self._json(200, self.bridge.status())
+            except Exception as exc:
+                traceback.print_exc()
+                self._json(500, {"error": str(exc)})
+            return
+
+        if request_path == "/api/config":
+            try:
+                from urllib.parse import parse_qs
+                qs = parse_qs(urlparse(self.path).query)
+                if "address" not in qs:
+                    self._json(400, {"error": "address query parameter is required"})
+                    return
+                address = int(qs["address"][0])
+                if address < 0 or address >= self.bridge.count:
+                    self._json(400, {"error": "address is outside the enumerated ring"})
+                    return
+                self._json(200, self.bridge.query_config(address))
             except Exception as exc:
                 traceback.print_exc()
                 self._json(500, {"error": str(exc)})
@@ -1804,9 +1967,11 @@ class Handler(BaseHTTPRequestHandler):
             if self.bridge.maintenance.is_set() and request_path in {
                 "/api/enumerate",
                 "/api/home",
+                "/api/recover",
                 "/api/strike",
                 "/api/strikes",
                 "/api/strike-param",
+                "/api/config",
                 "/api/cancel",
                 "/api/bus-health/probe",
                 "/api/stop",
@@ -1839,6 +2004,25 @@ class Handler(BaseHTTPRequestHandler):
                 })
                 return
 
+            if self.path == "/api/recover":
+                data = self._read_json()
+                addrs = data.get("addresses")
+                if not isinstance(addrs, list) or not addrs:
+                    self._json(400, {"error": "a non-empty addresses list is required"})
+                    return
+                addresses = [int(a) for a in addrs]
+                if any(a < 0 or a >= self.bridge.count for a in addresses):
+                    self._json(400, {"error": "address is outside the enumerated ring"})
+                    return
+                results = self.bridge.recover(addresses)
+                failed = [r["address"] for r in results if not r.get("accepted")]
+                self._json(200, {
+                    "ok": not failed,
+                    "failed": failed,
+                    "results": results,
+                })
+                return
+
             if self.path == "/api/strike":
                 data = self._read_json()
                 addr = int(data["address"])
@@ -1867,13 +2051,69 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, self.bridge.set_strike_param(addr, param_id, value))
                 return
 
+            if self.path == "/api/config":
+                data = self._read_json()
+                group = str(data.get("group", ""))
+                addrs = data.get("addresses")
+                if not isinstance(addrs, list) or not addrs:
+                    self._json(400, {"error": "a non-empty addresses list is required"})
+                    return
+                addresses = [int(a) for a in addrs]
+                if any(a < 0 or a >= self.bridge.count for a in addresses):
+                    self._json(400, {"error": "address is outside the enumerated ring"})
+                    return
+
+                def int16(name: str) -> int:
+                    value = int(data[name])
+                    if value < -32768 or value > 32767:
+                        raise ValueError(f"{name} is outside int16 range")
+                    return value
+
+                try:
+                    if group in ("velocity_pid", "position_pid"):
+                        values = {name: int16(name) for name in ("kp", "ki", "kd")}
+                    elif group == "current_pi":
+                        values = {name: int16(name) for name in ("kp", "ki")}
+                    elif group == "velocity_ff":
+                        values = {"value": int16("value")}
+                    elif group == "torque_limit":
+                        value = int(data["value"])
+                        if value < 0 or value > 65535:
+                            raise ValueError("value is outside uint16 range")
+                        values = {"value": value}
+                    elif group == "strike_param":
+                        name = str(data.get("param", ""))
+                        param_id = STRIKE_PARAM_BY_NAME.get(name)
+                        if param_id is None:
+                            raise ValueError(f"unknown strike param '{name}'")
+                        values = {"param_id": param_id, "value": int16("value")}
+                    else:
+                        raise ValueError(f"unknown config group '{group}'")
+                except (KeyError, TypeError, ValueError) as exc:
+                    self._json(400, {"error": str(exc)})
+                    return
+
+                results = self.bridge.apply_config(addresses, group, values)
+                failed = [r["address"] for r in results if not r.get("accepted")]
+                self._json(200, {
+                    "ok": not failed,
+                    "failed": failed,
+                    "results": results,
+                })
+                return
+
             if self.path == "/api/cancel":
                 try:
-                    self.bridge.cancel_all()
+                    result = self.bridge.cancel_all()
                 except RuntimeError as exc:
                     self._json(409, {"error": str(exc)})
                     return
-                self._json(200, {"ok": True})
+                if not result["ok"]:
+                    failed = ", ".join(str(addr) for addr in result["failed"])
+                    result["error"] = f"cancel failed for address(es): {failed}"
+                    self._json(502, result)
+                    return
+                self._json(200, result)
                 return
 
             if self.path == "/api/bus-health/probe":

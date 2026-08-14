@@ -64,6 +64,7 @@ typedef enum {
 #define STRIKE_TIMING_RETRIGGER_READY_VALID 0x0080u
 #define STRIKE_TIMING_IMPACT_VALID     0x0100u  /* trigger->mallet-stops time */
 #define STRIKE_TIMING_DEAD             0x0200u  /* strike was a dead (muted) strike; rebound fields never valid */
+#define STRIKE_WARNING_HOME_SHIFT      0x0400u  /* latest home moved significantly from prior calibration */
 
 typedef struct {
     uint16_t flags;
@@ -106,6 +107,12 @@ strike_trigger_result_t strike_trigger_ex(int32_t current_ma, uint8_t type, uint
 strike_home_result_t strike_home(void); /* start homing, with truthful acceptance result */
 void strike_stop(void);             /* disable motor and require re-home before striking */
 void strike_cancel(void);           /* abort sequence, return to idle */
+void strike_clear_fault(void);       /* clear motor fault and require a fresh home */
+
+/* SAVE_SETTINGS may safely pause an idle home-position hold around the
+ * blocking flash operation. The returned token must be passed to resume. */
+uint8_t strike_pause_for_persist(void);
+void strike_resume_after_persist(uint8_t resume_hold);
 
 /* Configuration (encoder counts) */
 void strike_set_home_offset(int32_t counts);

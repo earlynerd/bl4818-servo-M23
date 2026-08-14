@@ -20,3 +20,13 @@ Bench-observed bugs and their resolutions. Structural decisions live in DECISION
 - **Recently-touched?** yes — all three paths were introduced or changed with the chord synchronization work.
 - **Time to fix:** one bench feedback cycle.
 - **Hardware validation:** **PASS 2026-08-03** on the 14-actuator handpan; chords were nearly perfectly synchronized and rapid layered passages retained following notes cleanly.
+
+## 2026-08-13 — Loose mallet mount allowed a runaway strike
+
+- **Observation:** If a mallet mounting loosened and pushed the ball out of the drum path, a strike could spin the motor near top speed and sometimes throw the mallet or the ball. Homing also had no explicit travel/time ceiling, although its low duty was not energetic enough to throw hardware.
+- **Root cause:** `src/strike.c` had no terminal condition based on total encoder travel in `STRIKE_DRIVING`, `STRIKE_COASTING`, `STRIKE_MUTING`, or `STRIKE_CATCHING`; those states assumed the learned drum contact/rebound would occur. `STRIKE_HOMING` likewise relied only on stall and settle detection. A displaced mechanical stop violated both assumptions.
+- **Fix:** Accumulate absolute encoder travel for each active sequence at the existing 500 Hz strike cadence. Fault and disable PWM at one revolution for either homing or strike; add a 5-second homing backstop; invalidate homing on every motor fault and fault clear. Re-home position changes of at least 1,024 counts are now exposed as a warning, and an idle position hold can be paused safely while `SAVE_SETTINGS` persists the reference.
+- **Class:** unbounded-mechanical-state-machine
+- **Recently-touched?** no — the missing termination contract was longstanding; the bench observation exposed it.
+- **Time to fix:** one session.
+- **Hardware validation:** pending a restrained-actuator test of both limit faults, recovery/re-home, and the shifted-home warning.

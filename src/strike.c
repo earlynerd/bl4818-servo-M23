@@ -29,6 +29,11 @@
 #include "motor.h"
 #include "encoder.h"
 #include "irq_util.h"
+#include "timing.h"
+
+#if (ENCODER_COUNTS_PER_REV & (ENCODER_COUNTS_PER_REV - 1u)) != 0u
+#error "absolute_position_distance requires a power-of-two encoder count"
+#endif
 
 /* ── Helpers ─────────────────────────────────────────────────────────── */
 
@@ -44,11 +49,13 @@ typedef enum {
 static strike_state_t state;
 static home_phase_t   home_phase;
 static uint8_t        homed;
+static uint8_t        calibration_valid;
 
 /* Learned geometry */
 static int32_t        drum_position;
 static int32_t        home_position;
 static int8_t         drum_dir;         /* +1/-1: sign of "toward drum" */
+static int32_t        homing_reference_position;
 
 /* Configurable parameters */
 static int32_t        home_offset;      /* counts above drum (always positive) */
@@ -73,6 +80,11 @@ static uint32_t       timebase_ticks;
 static uint32_t       active_start_tick;
 static uint16_t       strike_sequence;
 static uint16_t       timing_flags;
+static uint16_t       warning_flags;
+static uint8_t        motion_guard_active;
+static int32_t        motion_guard_last_pos;
+static uint32_t       motion_guard_travel;
+static uint32_t       homing_start_stamp;
 static int16_t        last_current_ma;
 static uint16_t       trigger_to_coast_ms;
 static uint16_t       trigger_to_impact_ms;
@@ -92,6 +104,60 @@ static strike_compact_t prev_compact;
 static int32_t get_pos(void)
 {
     return -encoder_get_position();
+}
+
+/* Magnitude of a continuous-position step, including signed int32 wrap.
+ * The encoder cannot physically move 2^31 counts between 500 Hz samples. */
+static uint32_t position_step(int32_t pos, int32_t previous)
+{
+    uint32_t delta = (uint32_t)pos - (uint32_t)previous;
+
+    if (delta > 0x80000000u)
+        delta = 0u - delta;
+
+    return delta;
+}
+
+/* Shortest angular distance on the 14-bit absolute encoder. This avoids a
+ * false home-shift warning when equivalent positions differ by one wrap. */
+static uint32_t absolute_position_distance(int32_t a, int32_t b)
+{
+    uint32_t delta = ((uint32_t)a - (uint32_t)b) &
+                     (ENCODER_COUNTS_PER_REV - 1u);
+
+    if (delta > (ENCODER_COUNTS_PER_REV / 2u))
+        delta = ENCODER_COUNTS_PER_REV - delta;
+
+    return delta;
+}
+
+static void motion_guard_start(int32_t pos)
+{
+    motion_guard_last_pos = pos;
+    motion_guard_travel = 0u;
+    active_start_tick = timebase_ticks;
+    motion_guard_active = 1u;
+}
+
+static uint8_t motion_limit_reached(int32_t pos)
+{
+    uint32_t step = position_step(pos, motion_guard_last_pos);
+
+    motion_guard_last_pos = pos;
+    if (step >= (STRIKE_MOTION_LIMIT_COUNTS - motion_guard_travel))
+        return 1u;
+
+    motion_guard_travel += step;
+    return 0u;
+}
+
+static void abort_motion(fault_code_t code)
+{
+    motor_raise_fault(code);
+    timing_flags &= (uint16_t)~STRIKE_TIMING_ACTIVE;
+    motion_guard_active = 0u;
+    homed = 0u;
+    state = STRIKE_IDLE;
 }
 
 static uint16_t elapsed_ms_since(uint32_t start_tick)
@@ -314,7 +380,7 @@ static void snapshot_prev_compact(void)
 }
 
 static void begin_strike(int32_t current_ma, uint8_t retriggered,
-                         uint8_t type, uint16_t mute_ms)
+                         uint8_t type, uint16_t mute_ms, int32_t start_pos)
 {
     current_ma = orient_strike_current(current_ma);
 
@@ -354,7 +420,7 @@ static void begin_strike(int32_t current_ma, uint8_t retriggered,
     trigger_to_retrigger_ready_ms = 0;
     trigger_to_ready_ms = 0;
     estimated_strike_velocity_dps = 0;
-    active_start_tick = timebase_ticks;
+    motion_guard_start(start_pos);
 
     /* Coast threshold: coast_distance counts from drum, on the home side */
     coast_threshold = drum_position - drum_dir * coast_distance;
@@ -385,9 +451,11 @@ void strike_init(void)
 {
     state = STRIKE_IDLE;
     homed = 0;
+    calibration_valid = 0;
     drum_position = 0;
     home_position = 0;
     drum_dir = 0;
+    homing_reference_position = 0;
 
     home_offset    = STRIKE_HOME_OFFSET_DEFAULT;
     coast_distance = STRIKE_COAST_DISTANCE_DEFAULT;
@@ -406,6 +474,11 @@ void strike_init(void)
     active_start_tick = 0;
     strike_sequence = 0;
     timing_flags = 0;
+    warning_flags = 0;
+    motion_guard_active = 0;
+    motion_guard_last_pos = 0;
+    motion_guard_travel = 0;
+    homing_start_stamp = 0;
     last_current_ma = 0;
     trigger_to_coast_ms = 0;
     trigger_to_impact_ms = 0;
@@ -481,13 +554,20 @@ void strike_shift_position_reference(int32_t delta)
 {
     uint32_t irq_state = irq_save();
 
-    if (homed || (state == STRIKE_HOMING && home_phase == HOME_MOVE_HOME)) {
+    if (calibration_valid ||
+        (state == STRIKE_HOMING && home_phase == HOME_MOVE_HOME)) {
         drum_position -= delta;
         home_position -= delta;
     }
 
-    if (state == STRIKE_HOMING)
+    if (state == STRIKE_HOMING) {
         stall_prev_pos -= delta;
+        if (calibration_valid)
+            homing_reference_position -= delta;
+    }
+
+    if (motion_guard_active)
+        motion_guard_last_pos -= delta;
 
     if (state == STRIKE_DRIVING)
         coast_threshold -= delta;
@@ -508,8 +588,10 @@ void strike_restore_calibration(int32_t drum_pos, int32_t home_pos)
     drum_position = drum_pos;
     home_position = home_pos;
     drum_dir = (homing_duty > 0) ? 1 : -1;
+    calibration_valid = 1;
     homed = 1;
     state = STRIKE_IDLE;
+    motion_guard_active = 0u;
 
     irq_restore(irq_state);
 }
@@ -534,6 +616,9 @@ strike_home_result_t strike_home(void)
         return STRIKE_HOME_REJECT_DISABLED;
     }
 
+    if (calibration_valid)
+        homing_reference_position = drum_position;
+
     drum_dir = (homing_duty > 0) ? 1 : -1;
     homed = 0;
     drum_position = 0;
@@ -546,6 +631,8 @@ strike_home_result_t strike_home(void)
     stall_counter = 0;
     settle_counter = 0;
     stall_prev_pos = get_pos();
+    homing_start_stamp = timing_capture_stamp();
+    motion_guard_start(stall_prev_pos);
 
     state = STRIKE_HOMING;
     home_phase = HOME_SEEK_DRUM;
@@ -608,7 +695,7 @@ strike_trigger_result_t strike_trigger_ex(int32_t current_ma, uint8_t type, uint
     if (retriggered)
         motor_stop();
 
-    begin_strike(current_ma, retriggered, type, mute_ms);
+    begin_strike(current_ma, retriggered, type, mute_ms, pos);
     irq_restore(irq_state);
     return retriggered ? STRIKE_TRIGGER_RETRIGGERED : STRIKE_TRIGGER_ACCEPTED;
 }
@@ -630,7 +717,10 @@ void strike_cancel(void)
     } else {
         motor_stop();
         state = STRIKE_IDLE;
+        motion_guard_active = 0u;
     }
+    if (!was_active)
+        motion_guard_active = 0u;
     timing_flags &= (uint16_t)~STRIKE_TIMING_ACTIVE;
 
     irq_restore(irq_state);
@@ -644,8 +734,56 @@ void strike_stop(void)
     motor_stop();
     state = STRIKE_IDLE;
     homed = 0;
+    motion_guard_active = 0u;
     timing_flags &= (uint16_t)~STRIKE_TIMING_ACTIVE;
 
+    irq_restore(irq_state);
+}
+
+void strike_clear_fault(void)
+{
+    uint32_t irq_state = irq_save();
+
+    if (motor_get_state() == MOTOR_FAULT) {
+        motor_clear_fault();
+        state = STRIKE_IDLE;
+        homed = 0u;
+        motion_guard_active = 0u;
+        timing_flags &= (uint16_t)~STRIKE_TIMING_ACTIVE;
+    }
+
+    irq_restore(irq_state);
+}
+
+uint8_t strike_pause_for_persist(void)
+{
+    uint32_t irq_state = irq_save();
+    uint8_t resume_hold = 0u;
+
+    if (state == STRIKE_IDLE && homed &&
+        motor_get_state() == MOTOR_RUN &&
+        motor_get_mode() == CTRL_POSITION) {
+        motor_stop();
+        resume_hold = 1u;
+    }
+
+    irq_restore(irq_state);
+    return resume_hold;
+}
+
+void strike_resume_after_persist(uint8_t resume_hold)
+{
+    uint32_t irq_state;
+
+    if (!resume_hold)
+        return;
+
+    irq_state = irq_save();
+    if (state == STRIKE_IDLE && homed && motor_get_state() != MOTOR_FAULT) {
+        motor_set_position(home_position);
+        motor_set_mode(CTRL_POSITION);
+        motor_start();
+    }
     irq_restore(irq_state);
 }
 
@@ -664,7 +802,7 @@ void strike_get_metrics(strike_metrics_t *metrics)
         return;
 
     irq_state = irq_save();
-    metrics->flags = timing_flags;
+    metrics->flags = timing_flags | warning_flags;
     metrics->sequence = strike_sequence;
     metrics->last_current_ma = last_current_ma;
     metrics->trigger_to_coast_ms = trigger_to_coast_ms;
@@ -688,6 +826,7 @@ void strike_get_compact_metrics(strike_compact_t *compact)
 
     irq_state = irq_save();
     *compact = prev_compact;
+    compact->flags |= warning_flags;
     irq_restore(irq_state);
 }
 
@@ -706,8 +845,26 @@ void strike_tick(void)
     if (motor_get_state() == MOTOR_FAULT) {
         motor_disarm_coast();
         timing_flags &= (uint16_t)~STRIKE_TIMING_ACTIVE;
+        motion_guard_active = 0u;
+        homed = 0u;
         state = STRIKE_IDLE;
         return;
+    }
+
+    /* Cumulative travel is checked only while a homing/strike sequence is
+     * active, and only at this 500 Hz state-machine cadence. */
+    if (motion_guard_active) {
+        if (motion_limit_reached(pos)) {
+            abort_motion((state == STRIKE_HOMING) ? FAULT_HOMING_LIMIT
+                                                   : FAULT_STRIKE_LIMIT);
+            return;
+        }
+        if (state == STRIKE_HOMING &&
+            timing_elapsed_us(homing_start_stamp) >=
+            (STRIKE_HOMING_TIMEOUT_MS * 1000u)) {
+            abort_motion(FAULT_HOMING_LIMIT);
+            return;
+        }
     }
 
     switch (state) {
@@ -729,7 +886,16 @@ void strike_tick(void)
             }
 
             if (stall_counter >= STRIKE_HOMING_STALL_TICKS) {
+                if (calibration_valid &&
+                    absolute_position_distance(pos, homing_reference_position) >=
+                    STRIKE_HOME_SHIFT_WARN_COUNTS) {
+                    warning_flags |= STRIKE_WARNING_HOME_SHIFT;
+                } else {
+                    warning_flags &= (uint16_t)~STRIKE_WARNING_HOME_SHIFT;
+                }
+
                 drum_position = pos;
+                calibration_valid = 1u;
                 /* Home is opposite the drum direction by home_offset */
                 update_home_position_target();
 
@@ -749,6 +915,7 @@ void strike_tick(void)
 
             if (settle_counter >= STRIKE_SETTLE_TICKS) {
                 homed = 1;
+                motion_guard_active = 0u;
                 state = STRIKE_IDLE;
                 /* Motor stays in CTRL_POSITION holding home */
             }
@@ -882,6 +1049,7 @@ void strike_tick(void)
             trigger_to_ready_ms = elapsed_ms_since(active_start_tick);
             timing_flags |= STRIKE_TIMING_READY_VALID;
             timing_flags &= (uint16_t)~STRIKE_TIMING_ACTIVE;
+            motion_guard_active = 0u;
             state = STRIKE_IDLE;
         }
         break;

@@ -301,8 +301,9 @@
     <div class="panel">
       <label class="label">Mapping</label>
       <div id="mapSummary" class="map-summary">loading…</div>
-      <div style="margin-top:10px; display:flex; gap:6px">
+      <div style="margin-top:10px; display:flex; gap:6px; flex-wrap:wrap">
         <button class="pill" id="homeAllBtn" style="flex:1; color:var(--accent)">Home all</button>
+        <button class="pill" id="recoverFaultsBtn" style="flex:1; color:var(--accent-bright)">Recover faults</button>
         <button class="pill" id="refreshStatusBtn" style="flex:1">Refresh state</button>
         <a href="/player.html" class="pill" style="flex:1; text-align:center; text-decoration:none; color:var(--text-muted)">Edit map</a>
       </div>
@@ -713,10 +714,15 @@ function renderMappingSummary() {
   for (let i = 0; i < LP.count; i++) {
     const p = LP.mapping[i];
     const homed = LP.homed[i];
+    const slot = LP.slots[i] || {};
+    const faulted = Number(slot.fault) > 0;
     const color = SLOT_COLORS[i % SLOT_COLORS.length];
     const pitchTxt = (p == null) ? "<i style=color:var(--text-dim)>—</i>" : `<span class="pitch">${midiName(p)}</span>`;
     const homedCls = homed ? "" : "unhomed";
-    h += `<div class="row ${homedCls}"><span class="swatch" style="background:${color}"></span>addr ${i}: ${pitchTxt}${homed?"":" ⚠"}</div>`;
+    const state = faulted
+      ? ` ⚠ ${escapeHtml(slot.fault_name || `fault ${slot.fault}`)}`
+      : slot.home_shift_warning ? " ⚠ home shifted" : homed ? "" : " ⚠ not homed";
+    h += `<div class="row ${homedCls}"><span class="swatch" style="background:${color}"></span>addr ${i}: ${pitchTxt}${state}</div>`;
   }
   el.innerHTML = h;
 }
@@ -1534,6 +1540,7 @@ async function init() {
   document.getElementById("clearAllBtn").addEventListener("click", clearAll);
   document.getElementById("refreshStatusBtn").addEventListener("click", refreshStatus);
   document.getElementById("homeAllBtn").addEventListener("click", onHomeAll);
+  document.getElementById("recoverFaultsBtn").addEventListener("click", onRecoverFaults);
 
   document.getElementById("midiInputSel").addEventListener("change", e => bindMidiInput(e.target.value));
 
@@ -1657,10 +1664,54 @@ async function onPanic() {
     log("panic: ring cancel sent");
   } catch (e) {
     log(`panic failed: ${e.message}`);
+    showError(`Panic cancel failed: ${e.message}`);
   }
   stopMaster();
   syncTransportVisuals();
   renderLayers();
+}
+
+async function onRecoverFaults() {
+  const button = document.getElementById("recoverFaultsBtn");
+  button.disabled = true;
+  try {
+    await refreshStatus();
+    const faults = LP.slots.map((slot, address) =>
+      slot && Number(slot.fault) > 0 ? {address, name:slot.fault_name || slot.fault} : null
+    ).filter(Boolean);
+    if (!faults.length) {
+      showSuccess("No actuator faults are currently reported");
+      return;
+    }
+    const addresses = faults.map(f => f.address);
+    log(`recover faults and re-home: ${addresses.join(",")}`);
+    const reply = await api("POST", "/api/recover", {addresses});
+    if (!reply.ok) {
+      const failed = (reply.results || []).filter(r => !r.accepted).map(r =>
+        `${r.address}:${r.error || "failed"}`
+      );
+      throw new Error(failed.join(", ") || "recovery failed");
+    }
+    const deadline = performance.now() + 8000;
+    while (performance.now() < deadline) {
+      await refreshStatus();
+      if (addresses.every(address => !!LP.homed[address])) break;
+      await new Promise(r => setTimeout(r, 250));
+    }
+    if (!addresses.every(address => !!LP.homed[address])) {
+      throw new Error("re-home did not complete before the UI timeout");
+    }
+    const shifted = addresses.filter(address => LP.slots[address] && LP.slots[address].home_shift_warning);
+    const message = `Recovered and homed ${addresses.join(", ")}` +
+      (shifted.length ? ` — warning: home shifted on ${shifted.join(", ")}` : "");
+    showSuccess(message);
+    log(message);
+  } catch (e) {
+    showError(`Recovery failed: ${e.message}`);
+    log(`recovery failed: ${e.message}`);
+  } finally {
+    button.disabled = false;
+  }
 }
 
 async function onHomeAll() {
@@ -1670,7 +1721,14 @@ async function onHomeAll() {
   btn.textContent = "Homing…";
   log("home all…");
   try {
-    await api("POST", "/api/home", {});
+    const reply = await api("POST", "/api/home", {});
+    const rejected = (reply.results || []).filter(result => !result.accepted);
+    if (rejected.length) {
+      const why = rejected.map(result =>
+        `${result.address}:${result.result_name || result.error || "rejected"}`
+      ).join(", ");
+      throw new Error(`not started on ${why}`);
+    }
     // /api/home returns once each strike-home command has been ack'd; the
     // physical motion takes another beat per device. Poll status until every
     // slot reports homed=true, or give up after a few seconds.
@@ -1684,10 +1742,28 @@ async function onHomeAll() {
       await new Promise(r => setTimeout(r, 250));
     }
     if (allHomed) {
-      log("home complete");
+      const shifted = LP.slots.map((slot, i) =>
+        slot && slot.home_shift_warning ? i : null
+      ).filter(i => i != null);
+      if (shifted.length) {
+        const message = `Home complete — warning: home shifted on ${shifted.join(", ")}`;
+        showSuccess(message);
+        log(message);
+      } else {
+        showSuccess("All actuators homed");
+        log("home complete");
+      }
     } else {
       const stuck = LP.homed.map((h, i) => h ? null : i).filter(i => i != null);
-      log(`home incomplete; pending=${stuck.join(",")}`);
+      const faults = LP.slots.map((slot, i) =>
+        slot && Number(slot.fault) > 0 ? `${i}:${slot.fault_name || slot.fault}` : null
+      ).filter(Boolean);
+      if (faults.length) {
+        showError(`Home stopped by fault(s): ${faults.join(", ")}. Use Recover faults.`);
+        log(`home incomplete; faults=${faults.join(",")}`);
+      } else {
+        log(`home incomplete; pending=${stuck.join(",")}`);
+      }
     }
   } catch (e) {
     log(`home failed: ${e.message}`);

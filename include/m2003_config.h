@@ -142,7 +142,7 @@
 /* ADC is hardware-triggered at PWM rate (20 kHz), so every fast tick
  * should normally see several samples.  If we see zero samples for this
  * many consecutive fast ticks, the ADC/PWM trigger path has failed. */
-#define ADC_SILENCE_FAULT_TICKS      20u    /* 4 ms at CURRENT_LOOP_HZ = 5 kHz */
+#define ADC_SILENCE_FAULT_TICKS      20u    /* 3.33 ms at CURRENT_LOOP_HZ = 6 kHz */
 
 /* ── Strike Defaults ──────────────────────────────────────────────────── */
 #define STRIKE_HOME_OFFSET_DEFAULT      1024    /* encoder counts above drum surface */
@@ -155,6 +155,9 @@
 #define STRIKE_SETTLE_TIME_MS           20
 #define STRIKE_HOMING_STALL_TIME_MS     200
 #define STRIKE_HOMING_STALL_THRESHOLD   4       /* counts: less than this = stalled */
+#define STRIKE_MOTION_LIMIT_COUNTS       ENCODER_COUNTS_PER_REV /* cumulative travel ceiling for homing/strike */
+#define STRIKE_HOMING_TIMEOUT_MS         5000    /* generous backstop; travel normally limits first */
+#define STRIKE_HOME_SHIFT_WARN_COUNTS    1024    /* 1/16 rev (22.5 deg) change from prior calibration */
 #define STRIKE_COAST_TIMEOUT_MS         500
 #define STRIKE_REBOUND_THRESHOLD        5       /* RPM away from drum to confirm rebound */
 #define STRIKE_IMPACT_VEL_THRESHOLD     0       /* RPM toward drum: at/below = impact (velocity zero-cross during coast) */

@@ -572,6 +572,16 @@ uint8_t motor_is_coasting(void)
     return coasting;
 }
 
+void motor_raise_fault(fault_code_t code)
+{
+    uint32_t irq_state = irq_save();
+
+    pwm_fault_brake();
+    enter_fault(code);
+
+    irq_restore(irq_state);
+}
+
 void motor_clear_fault(void)
 {
     uint32_t irq_state = irq_save();

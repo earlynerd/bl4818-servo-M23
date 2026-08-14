@@ -19,15 +19,20 @@ from ring_bus import (  # noqa: E402
     CMD_ENTER_CT,
     CMD_ENTER_SF,
     CMD_SET_ADDRESS,
+    FAULT_CODES,
     PREAMBLE,
     REPLY_MODE_ACK,
     REPLY_MODE_NONE,
     SUBCMD_REPLY_ACK,
     SUBCMD_REPLY_NONE,
+    SUBCMD_QUERY_CONFIG,
     SUBCMD_STRIKE,
+    SUBCMD_STRIKE_CANCEL,
+    STRIKE_WARNING_HOME_SHIFT,
     CommandAck,
     RingClientV2,
     RingTimeout,
+    StrikeStatus,
     crc16_ccitt,
 )
 from firmware_image import image_metadata, prepare_image  # noqa: E402
@@ -162,9 +167,45 @@ class FakeChordClient:
         return [None] * len(pairs)
 
 
+class FakeCancelClient:
+    def __init__(self, replies):
+        self.replies = list(replies)
+        self.calls = []
+
+    def strike_cancel(self, address, reply_mode):
+        self.calls.append((address, reply_mode))
+        reply = self.replies.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+
+class FakeFleetConfigClient:
+    def __init__(self):
+        self.calls = []
+
+    def set_pid(self, address, kp, ki, kd, reply_mode):
+        self.calls.append(("velocity_pid", address, kp, ki, kd, reply_mode))
+        return CommandAck(address, 0x07, ACK_RESULT_OK, 0)
+
+    def clear_fault(self, address, reply_mode):
+        self.calls.append(("clear", address, reply_mode))
+        return CommandAck(address, 0x04, ACK_RESULT_OK, 0)
+
+    def strike_home(self, address, reply_mode):
+        self.calls.append(("home", address, reply_mode))
+        return CommandAck(address, 0x0D, ACK_RESULT_OK, 0)
+
+
 class FakeHealth:
+    def __init__(self):
+        self.failures = []
+
     def record_ok(self, address, elapsed_us):
         pass
+
+    def record_fail(self, address, kind, message):
+        self.failures.append((address, kind, message))
 
 
 class RingParserTests(unittest.TestCase):
@@ -182,6 +223,42 @@ class RingParserTests(unittest.TestCase):
         )
 
         self.assertEqual(client._recv_frame(), wanted_payload)
+
+    def test_new_fault_names_and_home_shift_warning_are_exposed(self):
+        self.assertEqual(FAULT_CODES[5], "HOMING_LIMIT")
+        self.assertEqual(FAULT_CODES[6], "STRIKE_LIMIT")
+        status = StrikeStatus(
+            address=0,
+            state=0,
+            homed=1,
+            flags=STRIKE_WARNING_HOME_SHIFT,
+        )
+        self.assertTrue(status.home_shift_warning)
+
+    def test_query_config_decodes_complete_tuning_snapshot(self):
+        values = (
+            1536, 10, 20, 220,
+            1200, 10, 20,
+            96, 5, 3200,
+            1024, 300, -100,
+            30, 250, -25,
+            0x000F, 1,
+        )
+        payload = bytes([0x42]) + struct.pack(">hhhhhhhhhHhhhhhhHB", *values)
+        client = QueuedReplyClient([payload])
+
+        config = client.query_config(2)
+
+        self.assertEqual(config.address, 2)
+        self.assertEqual(config.velocity_kp, 1536)
+        self.assertEqual(config.torque_limit_ma, 3200)
+        self.assertEqual(config.mute_engage_offset, -25)
+        self.assertTrue(config.persisted)
+        self.assertTrue(config.zero_valid)
+        self.assertTrue(config.csn_polarity_valid)
+        self.assertTrue(config.strike_calibration_valid)
+        self.assertEqual(config.csn_assert_level, 1)
+        self.assertIn(bytes([SUBCMD_QUERY_CONFIG]), client.ser.written)
 
 
 class RingEnumerationTests(unittest.TestCase):
@@ -317,6 +394,64 @@ class BridgeTests(unittest.TestCase):
         self.assertTrue(all(result["accepted"] is None for result in results))
         self.assertIsNone(bridge.latency.last_accepted_current(1))
         self.assertIsNone(bridge.latency.last_accepted_current(3))
+
+    def test_cancel_all_reports_every_failure_and_continues(self):
+        bridge = object.__new__(Bridge)
+        bridge.lock = threading.Lock()
+        bridge.count = 3
+        bridge.player = type("FakePlayer", (), {
+            "cancel": lambda self: setattr(self, "cancelled", True),
+        })()
+        bridge.player.cancelled = False
+        bridge.health = FakeHealth()
+        bridge.client = FakeCancelClient([
+            CommandAck(0, SUBCMD_STRIKE_CANCEL, ACK_RESULT_OK, 10),
+            RingTimeout("lost cancel reply"),
+            CommandAck(2, SUBCMD_STRIKE_CANCEL, ACK_RESULT_REJECT_NOT_READY, 12),
+        ])
+
+        result = bridge.cancel_all()
+
+        self.assertTrue(bridge.player.cancelled)
+        self.assertEqual(
+            bridge.client.calls,
+            [(0, REPLY_MODE_ACK), (1, REPLY_MODE_ACK), (2, REPLY_MODE_ACK)],
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["failed"], [1, 2])
+        self.assertEqual(len(result["results"]), 3)
+        self.assertEqual(bridge.health.failures[0][0:2], (1, "timeouts"))
+
+    def test_fleet_config_can_apply_same_group_to_selected_addresses(self):
+        bridge = object.__new__(Bridge)
+        bridge.lock = threading.Lock()
+        bridge.client = FakeFleetConfigClient()
+
+        results = bridge.apply_config(
+            [0, 2, 3], "velocity_pid", {"kp": 100, "ki": 20, "kd": 3}
+        )
+
+        self.assertTrue(all(result["accepted"] for result in results))
+        self.assertEqual([call[1] for call in bridge.client.calls], [0, 2, 3])
+        self.assertTrue(all(call[-1] == REPLY_MODE_ACK for call in bridge.client.calls))
+
+    def test_recovery_clears_fault_before_rehoming_each_address(self):
+        bridge = object.__new__(Bridge)
+        bridge.lock = threading.Lock()
+        bridge.client = FakeFleetConfigClient()
+
+        results = bridge.recover([1, 3])
+
+        self.assertTrue(all(result["accepted"] for result in results))
+        self.assertEqual(
+            bridge.client.calls,
+            [
+                ("clear", 1, REPLY_MODE_ACK),
+                ("home", 1, REPLY_MODE_ACK),
+                ("clear", 3, REPLY_MODE_ACK),
+                ("home", 3, REPLY_MODE_ACK),
+            ],
+        )
 
 
 class PlayerTests(unittest.TestCase):

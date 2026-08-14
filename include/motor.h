@@ -14,7 +14,9 @@ typedef enum {
     FAULT_OVERCURRENT      = 1,
     FAULT_HALL_INVALID     = 2,
     FAULT_ENCODER_TIMEOUT  = 3,
-    FAULT_ADC_TIMEOUT      = 4
+    FAULT_ADC_TIMEOUT      = 4,
+    FAULT_HOMING_LIMIT     = 5,
+    FAULT_STRIKE_LIMIT     = 6
 } fault_code_t;
 
 typedef enum {
@@ -69,6 +71,7 @@ void motor_arm_coast_then_brake(int32_t coast_threshold, int32_t brake_threshold
 void motor_disarm_coast(void);
 uint8_t motor_is_coasting(void);
 uint8_t motor_is_brake_engaged(void);  /* latched when the brake stage tripped; cleared on arm/disarm */
+void motor_raise_fault(fault_code_t code); /* immediate PWM-safe fault for higher-level motion guards */
 void motor_clear_fault(void);
 
 void motor_handle_hall_transition(uint8_t hall_result); /* IRQ-side hall decode -> commutation/fault handling */

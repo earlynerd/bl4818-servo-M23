@@ -73,6 +73,7 @@
 #define SUBCMD_QUERY_STRIKE_TIMING 0x19u  /* compact strike-timing-only reply */
 #define SUBCMD_STRIKE_EX        0x1Au  /* strike with articulation type + type-specific param */
 #define SUBCMD_ENTER_BOOTLOADER 0x1Bu
+#define SUBCMD_QUERY_CONFIG     0x1Cu  /* on-demand tunable/configuration snapshot */
 #define SUBCMD_MASK             0x3Fu
 #define SUBCMD_REPLY_MASK       0xC0u
 #define SUBCMD_REPLY_FULL       0x00u
@@ -130,6 +131,7 @@ static uint8_t replay_len;
 #define PROTO_DBG_BRANCH_STRIKE_STATUS 5u
 #define PROTO_DBG_BRANCH_TIMING_STATUS 6u
 #define PROTO_DBG_BRANCH_STRIKE_TIMING 7u
+#define PROTO_DBG_BRANCH_CONFIG        8u
 
 static uint16_t proto_dbg_sequence;
 static uint8_t proto_dbg_capture_reply;
@@ -251,6 +253,7 @@ static uint8_t prepare_set_position(int32_t counts)
 #define FULL_REPLY_STRIKE_STATUS     1u
 #define FULL_REPLY_TIMING_STATUS     2u
 #define FULL_REPLY_STRIKE_TIMING     3u  /* compact 13-byte strike-timing payload */
+#define FULL_REPLY_CONFIG            4u
 
 static void proto_debug_note_addressed_cmd(
     uint8_t cmd_type,
@@ -298,6 +301,8 @@ static uint8_t proto_debug_branch_for_reply(uint8_t reply_mode, uint8_t full_rep
         return PROTO_DBG_BRANCH_TIMING_STATUS;
     if (full_reply_kind == FULL_REPLY_STRIKE_TIMING)
         return PROTO_DBG_BRANCH_STRIKE_TIMING;
+    if (full_reply_kind == FULL_REPLY_CONFIG)
+        return PROTO_DBG_BRANCH_CONFIG;
 
     return PROTO_DBG_BRANCH_STATUS;
 }
@@ -373,6 +378,67 @@ static void send_status_reply(void)
     buf[19] = (uint8_t)(crc & 0xFFu);
 
     send_frame(buf, 20);
+}
+
+static void send_config_reply(void)
+{
+    uint32_t irq_state;
+    int32_t vel_kp, vel_ki, vel_kd;
+    int32_t pos_kp, pos_ki, pos_kd;
+    int32_t cur_kp, cur_ki;
+    int16_t values[16];
+    uint16_t flags = 0u;
+    uint8_t csn_polarity = 0u;
+    uint8_t buf[39];
+    uint16_t crc;
+    uint8_t i;
+
+    irq_state = irq_save();
+    motor_get_vel_pid(&vel_kp, &vel_ki, &vel_kd);
+    motor_get_pos_pid(&pos_kp, &pos_ki, &pos_kd);
+    motor_get_cur_pid(&cur_kp, &cur_ki);
+    values[0] = (int16_t)vel_kp;
+    values[1] = (int16_t)vel_ki;
+    values[2] = (int16_t)vel_kd;
+    values[3] = (int16_t)motor_get_vel_ff();
+    values[4] = (int16_t)pos_kp;
+    values[5] = (int16_t)pos_ki;
+    values[6] = (int16_t)pos_kd;
+    values[7] = (int16_t)cur_kp;
+    values[8] = (int16_t)cur_ki;
+    values[9] = (int16_t)motor_get_torque_limit();
+    values[10] = (int16_t)strike_get_home_offset();
+    values[11] = (int16_t)strike_get_coast_distance();
+    values[12] = (int16_t)strike_get_homing_duty();
+    values[13] = (int16_t)strike_get_mute_brake_ms();
+    values[14] = (int16_t)strike_get_mute_press_ma();
+    values[15] = (int16_t)strike_get_mute_engage_offset();
+    if (persist_is_valid())
+        flags |= 0x0001u;
+    if (encoder_has_zero_reference())
+        flags |= 0x0002u;
+    if (encoder_has_csn_polarity()) {
+        flags |= 0x0004u;
+        csn_polarity = encoder_get_csn_polarity();
+    }
+    if (strike_is_homed())
+        flags |= 0x0008u;
+    irq_restore(irq_state);
+
+    buf[0] = 36u;
+    buf[1] = CMD_STATUS_BASE | device_addr;
+    for (i = 0u; i < 16u; i++) {
+        uint16_t value = (uint16_t)values[i];
+        buf[2u + 2u * i] = (uint8_t)(value >> 8);
+        buf[3u + 2u * i] = (uint8_t)(value & 0xFFu);
+    }
+    buf[34] = (uint8_t)(flags >> 8);
+    buf[35] = (uint8_t)(flags & 0xFFu);
+    buf[36] = csn_polarity;
+    crc = crc16_ccitt(buf, 37);
+    buf[37] = (uint8_t)(crc >> 8);
+    buf[38] = (uint8_t)(crc & 0xFFu);
+    send_frame(buf, 39);
 }
 
 /* Strike parameter IDs */
@@ -693,6 +759,8 @@ static void send_addressed_reply(
         send_timing_status_reply();
     else if (full_reply_kind == FULL_REPLY_STRIKE_TIMING)
         send_strike_timing_reply();
+    else if (full_reply_kind == FULL_REPLY_CONFIG)
+        send_config_reply();
     else
         send_status_reply();
 }
@@ -773,7 +841,8 @@ static void handle_addressed_cmd(uint8_t cmd_type, const uint8_t *payload, uint8
     reply_mode = sanitize_reply_mode(reply_mode_initial);
 
     if (subcmd == SUBCMD_QUERY_STATUS || subcmd == SUBCMD_QUERY_STRIKE ||
-        subcmd == SUBCMD_QUERY_TIMING || subcmd == SUBCMD_QUERY_STRIKE_TIMING)
+        subcmd == SUBCMD_QUERY_TIMING || subcmd == SUBCMD_QUERY_STRIKE_TIMING ||
+        subcmd == SUBCMD_QUERY_CONFIG)
         reply_mode = SUBCMD_REPLY_FULL;
 
     proto_debug_note_addressed_cmd(
@@ -816,7 +885,7 @@ static void handle_addressed_cmd(uint8_t cmd_type, const uint8_t *payload, uint8
         send_addressed_reply(reply_mode, subcmd, ACK_RESULT_OK, 0u, FULL_REPLY_STATUS);
         break;
     case SUBCMD_CLEAR_FAULT:
-        motor_clear_fault();
+        strike_clear_fault();
         send_addressed_reply(reply_mode, subcmd, ACK_RESULT_OK, 0u, FULL_REPLY_STATUS);
         break;
     case SUBCMD_SET_MODE:
@@ -1012,14 +1081,24 @@ static void handle_addressed_cmd(uint8_t cmd_type, const uint8_t *payload, uint8
     case SUBCMD_QUERY_STRIKE_TIMING:
         send_addressed_reply(reply_mode, subcmd, ACK_RESULT_OK, strike_get_sequence(), FULL_REPLY_STRIKE_TIMING);
         break;
+    case SUBCMD_QUERY_CONFIG:
+        send_addressed_reply(reply_mode, subcmd, ACK_RESULT_OK, 0u, FULL_REPLY_CONFIG);
+        break;
     case SUBCMD_SAVE_SETTINGS:
-        /* Flash erase disables IRQs for ~20 ms — never do it under active motion. */
-        if (motor_get_state() == MOTOR_RUN)
+    {
+        uint8_t resume_hold = strike_pause_for_persist();
+
+        /* Flash erase disables IRQs for ~20 ms. An idle strike home hold is
+         * paused above; all other active motor modes remain unsafe to save. */
+        if (motor_get_state() == MOTOR_RUN) {
             ack_result = ACK_RESULT_REJECT_NOT_READY;
-        else
+        } else {
             ack_result = ack_result_from_persist_status(persist_save_runtime());
+        }
+        strike_resume_after_persist(resume_hold);
         send_addressed_reply(reply_mode, subcmd, ack_result, 0u, FULL_REPLY_STATUS);
         break;
+    }
     case SUBCMD_CLEAR_SETTINGS:
         if (motor_get_state() == MOTOR_RUN)
             ack_result = ACK_RESULT_REJECT_NOT_READY;

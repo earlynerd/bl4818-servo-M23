@@ -174,6 +174,9 @@ What's on the ring right now.
   "slots": [
     {
       "homed": true,
+      "home_shift_warning": false,
+      "fault": 0,
+      "fault_name": "NONE",
       "home_offset": 120,
       "coast_distance": 80,
       "homing_duty": 600,
@@ -189,9 +192,11 @@ What's on the ring right now.
 }
 ```
 
-`last_timing` is only present if at least one strike has completed on
-that slot since the bridge started. `homed: false` slots have null
-strike parameters.
+`last_timing` is only present if at least one strike has completed on that
+slot since the bridge started. To preserve ring bandwidth, healthy homed slots
+do not receive a second full motor query: their fault is known to be `NONE`
+because firmware invalidates homing on every fault. Unhomed slots are queried
+for exact `fault`, `fault_name`, `motor_state`, and `motor_state_name` values.
 
 ### `GET /api/pitches`
 
@@ -440,8 +445,19 @@ across the ring. Panic stop.
 
 **Response (200):**
 ```json
-{ "ok": true }
+{
+  "ok": true,
+  "failed": [],
+  "results": [
+    {"address": 0, "accepted": true, "result": 0, "result_name": "OK", "detail": 12}
+  ]
+}
 ```
+
+If any actuator rejects the command or fails to reply, the server still
+attempts every address and returns `502` with `ok: false`, the failed address
+list, and every per-address result. The failed transaction is also counted in
+bus-health telemetry.
 
 ---
 
@@ -588,6 +604,18 @@ to see the `homed` flag flip.
 
 `ok` is false if any address rejects the command or has a transport error.
 
+### `POST /api/recover`
+
+Clear a reported fault and immediately start a mandatory fresh home on each
+selected actuator. This is the normal UI fault-recovery operation.
+
+**Request body:** `{"addresses": [2, 5]}` (non-empty list required)
+
+**Response (200):** `{"ok": true, "failed": [], "results": [<clear + home result>, ...]}`
+
+The home motion is asynchronous; poll `/api/status` until the selected slots
+report `homed: true`.
+
 ### `POST /api/strike`
 
 Single direct strike, bypassing the motif scheduler. No latency
@@ -634,7 +662,30 @@ Set a strike-related parameter on a single slot. Used by the tuning UI.
 { "address": 0, "param": "home_offset", "value": 120 }
 ```
 
-Valid `param` values: `"home_offset"`, `"coast_distance"`, `"homing_duty"`.
+Valid `param` values: `"home_offset"`, `"coast_distance"`, `"homing_duty"`,
+`"mute_brake_ms"`, `"mute_press_ma"`, and `"mute_engage_offset"`.
+
+### `GET /api/config?address=N`
+
+Read the selected actuator's complete tuning snapshot: velocity PID and
+feedforward, position PID, current PI, torque limit, all six strike parameters,
+and persistence/electrical-calibration flags. This is an on-demand operation,
+not part of regular status polling.
+
+### `POST /api/config`
+
+Apply one ordinary tuning group to any non-empty address list. A single address
+and the complete fleet use exactly the same operation, so a fleet value can
+always be overridden later on one actuator.
+
+```json
+{"addresses":[0,1,2], "group":"velocity_pid", "kp":1536, "ki":10, "kd":20}
+```
+
+Groups are `velocity_pid` (`kp`, `ki`, `kd`), `velocity_ff` (`value`),
+`position_pid` (`kp`, `ki`, `kd`), `current_pi` (`kp`, `ki`), `torque_limit`
+(`value` in mA), and `strike_param` (`param`, `value`). Board-specific CS/LED
+polarity is intentionally excluded from fleet tuning.
 
 ### `POST /api/stop`
 
@@ -649,9 +700,9 @@ strike sequence to return through its normal cancel path.
 
 ### `POST /api/save-settings`
 
-Persist the current strike-param block on each addressed slot to that
-device's NVM. Slot must not be running a strike or firmware returns
-NOT_READY.
+Persist the complete current tuning/calibration snapshot on each addressed
+slot to that device's NVM. Firmware safely pauses an idle home hold around the
+flash operation; an active strike remains NOT_READY.
 
 **Request body:** `{"addresses": [0, 1]?}` (omit for all)
 

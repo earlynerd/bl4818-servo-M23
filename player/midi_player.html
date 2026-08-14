@@ -151,7 +151,7 @@
   }
   .modal {
     background: var(--surface); border: 1px solid var(--border);
-    border-radius: 8px; width: 440px; max-width: 100%;
+    border-radius: 8px; width: 620px; max-width: 100%; max-height: calc(100vh - 32px); overflow-y: auto;
     padding: 18px; display: flex; flex-direction: column; gap: 14px;
     box-shadow: 0 12px 40px rgba(0,0,0,0.7);
   }
@@ -194,6 +194,15 @@
   }
   .modal-footer { display: flex; gap: 8px; justify-content: space-between; align-items: center; border-top: 1px solid var(--border); padding-top: 12px; }
   .modal-footer .status { font-size: 11px; font-family: 'JetBrains Mono', monospace; color: var(--text-dim); }
+  .tuning-target { display:flex; align-items:center; gap:8px; padding:8px; border:1px solid var(--border); border-radius:5px; background:var(--surface-alt); }
+  .tuning-target label, .tuning-section-title { font:10px 'JetBrains Mono',monospace; color:var(--text-dim); text-transform:uppercase; letter-spacing:1.1px; }
+  .tuning-target select { flex:1; background:var(--surface); border:1px solid var(--border); border-radius:4px; padding:5px 7px; color:var(--text); }
+  .tuning-groups { border-top:1px solid var(--border); padding-top:10px; }
+  .tuning-groups summary { cursor:pointer; color:var(--accent-bright); font-size:12px; }
+  .tuning-group { display:grid; grid-template-columns:115px 1fr auto; gap:8px; align-items:center; margin-top:9px; }
+  .tuning-group label { font:10px 'JetBrains Mono',monospace; color:var(--text-muted); text-transform:uppercase; }
+  .tuning-inputs { display:flex; gap:5px; }
+  .tuning-inputs input { width:76px; min-width:0; background:var(--surface-alt); border:1px solid var(--border); border-radius:3px; padding:4px 6px; color:var(--text); font:11px 'JetBrains Mono',monospace; }
 </style>
 </head>
 <body>
@@ -327,6 +336,7 @@
       <label class="label">Hardware</label>
       <div style="display:flex;gap:6px;flex-wrap:wrap">
         <button class="pill" id="homeBtn" style="flex:1 1 calc(50% - 3px);color:var(--accent)">Home All</button>
+        <button class="pill" id="recoverBtn" style="flex:1 1 calc(50% - 3px);color:var(--accent-bright)" title="Clear reported motor faults, then home those actuators again">Recover faults</button>
         <button class="pill" id="cancelBtn" style="flex:1 1 calc(50% - 3px);color:var(--error)">Cancel</button>
         <button class="pill" id="stopMotorsBtn" style="flex:1 1 calc(50% - 3px);color:var(--error)" title="Disable PWM on every drive (motor goes idle, no holding torque)">Disable motors</button>
         <button class="pill" id="enumBtn" style="flex:1 1 calc(50% - 3px)">Enumerate</button>
@@ -423,6 +433,14 @@
       <button class="modal-close" id="cfgCloseBtn" aria-label="close">×</button>
     </div>
 
+    <div class="tuning-target">
+      <label for="cfgTarget">Apply tuning to</label>
+      <select id="cfgTarget">
+        <option value="single">Selected actuator</option>
+        <option value="all">All enumerated actuators</option>
+      </select>
+    </div>
+
     <div class="param-row" data-param="home_offset">
       <div class="row-top">
         <label>Home Offset</label>
@@ -451,10 +469,84 @@
         <span class="hint">PWM duty used while homing</span>
       </div>
       <div class="row-controls">
-        <input type="range" min="0" max="2000" step="25" data-param-slider="homing_duty">
+        <input type="range" min="-2000" max="2000" step="25" data-param-slider="homing_duty">
         <input type="number" min="-32768" max="32767" step="1" data-param-input="homing_duty">
       </div>
     </div>
+
+    <div class="param-row" data-param="mute_brake_ms">
+      <div class="row-top">
+        <label>Dead-strike Brake</label>
+        <span class="hint">velocity braking time before the contact press</span>
+      </div>
+      <div class="row-controls">
+        <input type="range" min="0" max="500" step="5" data-param-slider="mute_brake_ms">
+        <input type="number" min="0" max="32767" step="1" data-param-input="mute_brake_ms">
+      </div>
+    </div>
+
+    <div class="param-row" data-param="mute_press_ma">
+      <div class="row-top">
+        <label>Dead-strike Press</label>
+        <span class="hint">contact current after braking; zero keeps velocity hold</span>
+      </div>
+      <div class="row-controls">
+        <input type="range" min="0" max="3000" step="25" data-param-slider="mute_press_ma">
+        <input type="number" min="0" max="32767" step="1" data-param-input="mute_press_ma">
+      </div>
+    </div>
+
+    <div class="param-row" data-param="mute_engage_offset">
+      <div class="row-top">
+        <label>Dead-strike Engage</label>
+        <span class="hint">brake trip offset from the learned drum surface</span>
+      </div>
+      <div class="row-controls">
+        <input type="range" min="-2000" max="2000" step="25" data-param-slider="mute_engage_offset">
+        <input type="number" min="-32768" max="32767" step="1" data-param-input="mute_engage_offset">
+      </div>
+    </div>
+
+    <details class="tuning-groups" open>
+      <summary>Motor loop tuning</summary>
+      <div class="tuning-group">
+        <label>Velocity PID</label>
+        <div class="tuning-inputs">
+          <input type="number" min="-32768" max="32767" data-config-group="velocity_pid" data-config-name="kp" placeholder="Kp" title="Velocity proportional coefficient">
+          <input type="number" min="-32768" max="32767" data-config-group="velocity_pid" data-config-name="ki" placeholder="Ki" title="Velocity integral coefficient">
+          <input type="number" min="-32768" max="32767" data-config-group="velocity_pid" data-config-name="kd" placeholder="Kd" title="Velocity derivative coefficient">
+        </div>
+        <button class="pill" data-config-apply="velocity_pid">Apply</button>
+      </div>
+      <div class="tuning-group">
+        <label>Velocity FF</label>
+        <div class="tuning-inputs"><input type="number" min="-32768" max="32767" data-config-group="velocity_ff" data-config-name="value" placeholder="gain"></div>
+        <button class="pill" data-config-apply="velocity_ff">Apply</button>
+      </div>
+      <div class="tuning-group">
+        <label>Position PID</label>
+        <div class="tuning-inputs">
+          <input type="number" min="-32768" max="32767" data-config-group="position_pid" data-config-name="kp" placeholder="Kp">
+          <input type="number" min="-32768" max="32767" data-config-group="position_pid" data-config-name="ki" placeholder="Ki">
+          <input type="number" min="-32768" max="32767" data-config-group="position_pid" data-config-name="kd" placeholder="Kd">
+        </div>
+        <button class="pill" data-config-apply="position_pid">Apply</button>
+      </div>
+      <div class="tuning-group">
+        <label>Current PI</label>
+        <div class="tuning-inputs">
+          <input type="number" min="-32768" max="32767" data-config-group="current_pi" data-config-name="kp" placeholder="Kp">
+          <input type="number" min="-32768" max="32767" data-config-group="current_pi" data-config-name="ki" placeholder="Ki">
+        </div>
+        <button class="pill" data-config-apply="current_pi">Apply</button>
+      </div>
+      <div class="tuning-group">
+        <label>Torque limit</label>
+        <div class="tuning-inputs"><input type="number" min="0" max="65535" data-config-group="torque_limit" data-config-name="value" placeholder="mA"></div>
+        <button class="pill" data-config-apply="torque_limit">Apply</button>
+      </div>
+      <div id="cfgElectrical" style="margin-top:10px;font:10px 'JetBrains Mono',monospace;color:var(--text-dim)">Electrical calibration: loading…</div>
+    </details>
 
     <div id="cfgTimingPanel" style="border-top:1px solid var(--border);padding-top:12px;display:flex;flex-direction:column;gap:6px">
       <div style="display:flex;align-items:baseline;justify-content:space-between">
@@ -491,7 +583,7 @@
       <span class="status" id="cfgStatus">changes apply live</span>
       <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end">
         <button class="pill" id="cfgStopBtn" style="color:var(--error)" title="Disable PWM on this drive only (motor idle). Use before Save to drive if param edits re-enabled the motor.">Disable</button>
-        <button class="pill" id="cfgSaveBtn" title="Persist these strike params to the drive's NVM so they survive a reboot">Save to drive</button>
+        <button class="pill" id="cfgSaveBtn" title="Persist all current tuning values to the selected drive(s) so they survive a reboot">Save to drive</button>
         <button class="pill" id="cfgHomeBtn">Re-home</button>
         <button class="pill" id="cfgTestBtn">Test strike</button>
       </div>
@@ -546,7 +638,7 @@ function midiName(p) { return NOTE_NAMES[p % 12] + (Math.floor(p/12) - 1); }
 const S = {
   count: 0,
   homed: [],
-  slots: [],   // slots[i] = { homed, home_offset, coast_distance, homing_duty } from /api/status
+  slots: [],   // slots[i] includes homed, home-shift warning, and strike tunables from /api/status
   mapping: [], // mapping[slot] = midi pitch (or null to disable that slot)
   trim: [],    // trim[slot] = scalar multiplier on global current (1.0 = no change)
   fallback: {}, // fallback[pitch] = slot, for pitches not directly in mapping
@@ -566,6 +658,7 @@ const S = {
   animFrame: null,
   startWall: 0,
   cfgSlot: -1,   // slot currently shown in the strike-config modal, -1 = closed
+  configBySlot: {}, // full on-demand tuning readback; keyed by ring address
   strikeTiming: {}, // strikeTiming[slot] = last metrics dict from the bridge
   // Latency compensation. compEma[slot] is { [bucketIdx]: emaMs } — a smoothed
   // trigger_to_impact_ms per current bucket — used to fire each strike that
@@ -734,7 +827,7 @@ function renderFirmware(state) {
   document.getElementById("firmwareUpdateBtn").disabled =
     !!(state && state.busy) || !artifact;
   for (const id of [
-    "homeBtn", "cancelBtn", "stopMotorsBtn", "enumBtn", "arpBtn",
+    "homeBtn", "recoverBtn", "cancelBtn", "stopMotorsBtn", "enumBtn", "arpBtn",
     "refreshStatusBtn", "busProbeBtn", "busResetBtn"
   ]) {
     const el = document.getElementById(id);
@@ -1219,12 +1312,21 @@ function renderMapTable() {
     const pitch = S.mapping[i];
     const color = SLOT_COLORS[i] || "var(--text-muted)";
     const homed = !!S.homed[i];
+    const slot = S.slots[i] || {};
+    const faulted = Number(slot.fault) > 0;
+    const stateText = faulted
+      ? `FAULT: ${escapeHtml(slot.fault_name || slot.fault)}`
+      : homed ? (slot.home_shift_warning ? "HOMED ⚠" : "HOMED")
+        : (slot.motor_state_name === "RUN" ? "HOMING" : "—");
+    const stateTitle = faulted
+      ? ` title="Motor fault ${escapeHtml(slot.fault_name || slot.fault)} — use Recover faults"`
+      : slot.home_shift_warning ? ` title="Home moved significantly from the persisted calibration"` : "";
     const noteTitle = pitch == null ? "" : ` title="${midiName(pitch)}"`;
     const trimPct = Math.round((S.trim[i] ?? 1.0) * 100);
     h += `<tr>
       <td><span class="swatch" style="background:${color}"></span>${i}</td>
       <td><input type="number" min="0" max="127" step="1" data-slot="${i}" value="${pitch == null ? "" : pitch}" placeholder="—"${noteTitle}></td>
-      <td class="${homed ? 'homed' : 'unhomed'}">${homed ? 'HOMED' : '—'}</td>
+      <td class="${homed && !faulted ? 'homed' : 'unhomed'}"${stateTitle}>${stateText}</td>
       <td style="white-space:nowrap">
         <input type="range" min="25" max="200" step="5" value="${trimPct}" data-trim-slot="${i}" class="slider" style="width:60px;vertical-align:middle">
         <span class="trim-label" data-trim-label="${i}" style="display:inline-block;min-width:30px;font-size:11px;color:var(--text-muted);text-align:right">${trimPct}%</span>
@@ -1271,12 +1373,24 @@ function renderMapTable() {
 }
 
 // ─── Strike-config modal ─────────────────────────────────────
-// Per-mallet popup for tuning home_offset / coast_distance / homing_duty.
-// Changes are applied live to the device on each input change so the user
-// can hear the effect immediately via the Test-strike button or keyboard
-// play. The slot's currently-set values are read from the cached
-// /api/status payload (Bridge.status() now returns them per slot).
-const CFG_PARAMS = ["home_offset", "coast_distance", "homing_duty"];
+// Every ordinary tuning control can target either this actuator or the whole
+// enumerated ring. Board-specific electrical polarity is deliberately shown
+// as read-only here so it cannot be changed fleet-wide by accident.
+const CFG_PARAMS = [
+  "home_offset", "coast_distance", "homing_duty",
+  "mute_brake_ms", "mute_press_ma", "mute_engage_offset",
+];
+
+function cfgAddresses() {
+  if (document.getElementById("cfgTarget").value === "all") {
+    return Array.from({length: S.count}, (_, i) => i);
+  }
+  return S.cfgSlot >= 0 ? [S.cfgSlot] : [];
+}
+function cfgTargetLabel() {
+  const addresses = cfgAddresses();
+  return addresses.length === 1 ? `addr ${addresses[0]}` : `all ${addresses.length} actuators`;
+}
 
 function openCfgModal(slot) {
   if (!Number.isInteger(slot) || slot < 0 || slot >= S.count) return;
@@ -1288,6 +1402,9 @@ function openCfgModal(slot) {
   const title = document.getElementById("cfgTitle");
   const meta = document.getElementById("cfgMeta");
   const pitch = S.mapping[slot];
+  const target = document.getElementById("cfgTarget");
+  target.value = "single";
+  target.options[0].textContent = `Selected actuator (addr ${slot})`;
   swatch.style.background = SLOT_COLORS[slot] || "var(--text-muted)";
   title.textContent = `Strike Config — addr ${slot}`;
   meta.textContent = `pitch ${pitch == null ? "— (unmapped)" : `${midiName(pitch)} (${pitch})`}`;
@@ -1296,6 +1413,7 @@ function openCfgModal(slot) {
   refreshCfgModalValues();
   refreshCfgTiming();
   modal.style.display = "flex";
+  loadCfgConfig(slot);
 }
 function closeCfgModal() {
   S.cfgSlot = -1;
@@ -1304,7 +1422,7 @@ function closeCfgModal() {
 function refreshCfgModalValues() {
   const slot = S.cfgSlot;
   if (slot < 0) return;
-  const data = S.slots[slot] || {};
+  const data = {...(S.slots[slot] || {}), ...(S.configBySlot[slot] || {})};
   for (const p of CFG_PARAMS) {
     const v = data[p];
     const slider = document.querySelector(`[data-param-slider="${p}"]`);
@@ -1317,6 +1435,41 @@ function refreshCfgModalValues() {
       // the user sees they're starting from "no reading".
       input.value = "";
     }
+  }
+  const fieldMap = {
+    velocity_pid: {kp:"velocity_kp", ki:"velocity_ki", kd:"velocity_kd"},
+    velocity_ff: {value:"velocity_ff"},
+    position_pid: {kp:"position_kp", ki:"position_ki", kd:"position_kd"},
+    current_pi: {kp:"current_kp", ki:"current_ki"},
+    torque_limit: {value:"torque_limit_ma"},
+  };
+  for (const [group, fields] of Object.entries(fieldMap)) {
+    for (const [name, key] of Object.entries(fields)) {
+      const input = document.querySelector(`[data-config-group="${group}"][data-config-name="${name}"]`);
+      if (input && Number.isFinite(data[key])) input.value = String(data[key]);
+    }
+  }
+  const electrical = document.getElementById("cfgElectrical");
+  if (data.csn_polarity_valid) {
+    electrical.textContent = `Electrical calibration · encoder CS/LED assert level ${data.csn_assert_level} · per-board setting`;
+  } else {
+    electrical.textContent = "Electrical calibration · encoder CS/LED polarity not calibrated";
+  }
+  const homeBtn = document.getElementById("cfgHomeBtn");
+  homeBtn.textContent = Number(data.fault) > 0 ? "Recover & re-home" : "Re-home";
+}
+
+async function loadCfgConfig(slot) {
+  const status = document.getElementById("cfgStatus");
+  try {
+    const config = await api("GET", `/api/config?address=${slot}`);
+    S.configBySlot[slot] = config;
+    if (!S.slots[slot]) S.slots[slot] = {};
+    for (const p of CFG_PARAMS) S.slots[slot][p] = config[p];
+    if (S.cfgSlot === slot) refreshCfgModalValues();
+  } catch (e) {
+    status.textContent = `configuration read failed: ${e.message}`;
+    status.style.color = "var(--error)";
   }
 }
 
@@ -1333,6 +1486,26 @@ async function pollStatusUntil(predicate, opts = {}) {
     if (predicate()) return true;
   }
   return false;
+}
+
+function currentFaults() {
+  const out = [];
+  for (let i = 0; i < S.count; i++) {
+    const slot = S.slots[i] || {};
+    if (Number(slot.fault) > 0) out.push({address:i, name:slot.fault_name || `code ${slot.fault}`});
+  }
+  return out;
+}
+
+async function recoverAddresses(addresses) {
+  const reply = await api("POST", "/api/recover", {addresses});
+  if (!reply.ok) {
+    const failed = (reply.results || []).filter(r => !r.accepted).map(r =>
+      `${r.address}:${r.error || (r.home && r.home.result_name) || (r.clear && r.clear.result_name) || "failed"}`
+    );
+    throw new Error(failed.join(", ") || "recovery failed");
+  }
+  return pollStatusUntil(() => addresses.every(addr => !!S.homed[addr]));
 }
 
 // After firing a one-off test strike, the device's compact-metrics snapshot
@@ -1454,27 +1627,69 @@ function refreshCfgTiming() {
     t.rebound_timeout ? `${reboundLabel}*` : reboundLabel;
   document.getElementById("cfgTimingVel").textContent = fmtVel(t.estimated_strike_velocity_dps);
 }
-async function applyStrikeParam(slot, param, value) {
+async function applyStrikeParam(param, value) {
   const status = document.getElementById("cfgStatus");
-  status.textContent = `applying ${param}=${value}…`;
+  const addresses = cfgAddresses();
+  status.textContent = `applying ${param}=${value} to ${cfgTargetLabel()}…`;
   status.style.color = "var(--text-muted)";
   try {
-    const r = await api("POST", "/api/strike-param", { address: slot, param, value });
-    if (r && r.accepted === false) {
-      status.textContent = `${param}: ${r.result_name || "rejected"}`;
+    const r = await api("POST", "/api/config", {
+      addresses, group: "strike_param", param, value,
+    });
+    if (!r.ok) {
+      status.textContent = `${param}: failed on ${(r.failed || []).join(", ")}`;
       status.style.color = "var(--error)";
-      log(`strike-param addr=${slot} ${param}=${value} -> ${r.result_name}`);
+      log(`strike-param ${cfgTargetLabel()} ${param}=${value} failed=${(r.failed || []).join(",")}`);
     } else {
-      status.textContent = `${param} = ${value} ✓`;
+      status.textContent = `${param} = ${value} on ${cfgTargetLabel()} ✓`;
       status.style.color = "var(--success)";
-      // Update local cache so the modal stays in sync.
-      if (!S.slots[slot]) S.slots[slot] = {};
-      S.slots[slot][param] = value;
+      for (const slot of addresses) {
+        if (!S.slots[slot]) S.slots[slot] = {};
+        S.slots[slot][param] = value;
+        if (!S.configBySlot[slot]) S.configBySlot[slot] = {};
+        S.configBySlot[slot][param] = value;
+      }
     }
   } catch (e) {
     status.textContent = `failed: ${e.message}`;
     status.style.color = "var(--error)";
-    log(`strike-param addr=${slot} ${param}=${value} failed: ${e.message}`);
+    log(`strike-param ${cfgTargetLabel()} ${param}=${value} failed: ${e.message}`);
+  }
+}
+
+async function applyConfigGroup(group) {
+  const status = document.getElementById("cfgStatus");
+  const addresses = cfgAddresses();
+  const inputs = [...document.querySelectorAll(`[data-config-group="${group}"]`)];
+  const values = {};
+  for (const input of inputs) {
+    const value = parseInt(input.value, 10);
+    if (!Number.isFinite(value)) {
+      status.textContent = `${group}: fill in every value first`;
+      status.style.color = "var(--error)";
+      return;
+    }
+    values[input.dataset.configName] = value;
+  }
+  status.textContent = `applying ${group.replaceAll("_", " ")} to ${cfgTargetLabel()}…`;
+  status.style.color = "var(--text-muted)";
+  try {
+    const r = await api("POST", "/api/config", {addresses, group, ...values});
+    if (!r.ok) {
+      status.textContent = `${group}: failed on ${(r.failed || []).join(", ")}`;
+      status.style.color = "var(--error)";
+      return;
+    }
+    status.textContent = `${group.replaceAll("_", " ")} applied to ${cfgTargetLabel()} ✓`;
+    status.style.color = "var(--success)";
+    log(`config ${group} applied to ${addresses.join(",")}`);
+    // Re-read the selected drive so clamped values (notably torque limit)
+    // are shown exactly as the firmware accepted them.
+    await loadCfgConfig(S.cfgSlot);
+  } catch (e) {
+    status.textContent = `apply failed: ${e.message}`;
+    status.style.color = "var(--error)";
+    log(`config ${group} failed: ${e.message}`);
   }
 }
 
@@ -2847,21 +3062,59 @@ document.addEventListener("DOMContentLoaded", async () => {
         () => S.count > 0 && S.homed.length === S.count && S.homed.every(h => h),
       );
       if (ok) {
-        showSuccess("All actuators homed");
-        log("home complete");
+        const shifted = S.slots.map((slot, i) =>
+          slot && slot.home_shift_warning ? i : null
+        ).filter(i => i != null);
+        if (shifted.length) {
+          showSuccess(`All actuators homed — warning: home shifted on ${shifted.join(", ")}`);
+          log(`home complete; shifted-home warning=${shifted.join(",")}`);
+        } else {
+          showSuccess("All actuators homed");
+          log("home complete");
+        }
       } else {
         const stuck = S.homed.map((h, i) => h ? null : i).filter(i => i != null);
-        showSuccess(`Homed ${S.homed.filter(Boolean).length}/${S.count}` +
-                    (stuck.length ? ` — still pending: ${stuck.join(",")}` : ""));
-        log(`home incomplete; pending=${stuck.join(",")}`);
+        const faults = currentFaults();
+        if (faults.length) {
+          const detail = faults.map(f => `${f.address}:${f.name}`).join(", ");
+          showError(`Home stopped by fault(s): ${detail}. Use Recover faults.`);
+          log(`home incomplete; faults=${detail}`);
+        } else {
+          showSuccess(`Homed ${S.homed.filter(Boolean).length}/${S.count}` +
+                      (stuck.length ? ` — still pending: ${stuck.join(",")}` : ""));
+          log(`home incomplete; pending=${stuck.join(",")}`);
+        }
       }
     } catch (e) {
       log("home failed: " + e.message);
       showError("Home failed: " + e.message);
     }
   });
+  document.getElementById("recoverBtn").addEventListener("click", async () => {
+    try {
+      await refreshStatus();
+      const faults = currentFaults();
+      if (!faults.length) {
+        showSuccess("No actuator faults are currently reported");
+        return;
+      }
+      const addresses = faults.map(f => f.address);
+      log(`recover faults and re-home: ${addresses.join(",")}`);
+      showSuccess(`Recovering ${addresses.length} actuator(s)…`);
+      const homed = await recoverAddresses(addresses);
+      if (!homed) throw new Error("re-home did not complete before the UI timeout");
+      const shifted = addresses.filter(addr => S.slots[addr] && S.slots[addr].home_shift_warning);
+      showSuccess(`Recovered and homed ${addresses.join(", ")}` +
+                  (shifted.length ? ` — warning: home shifted on ${shifted.join(", ")}` : ""));
+      log(`recovery complete addresses=${addresses.join(",")}`);
+    } catch (e) {
+      showError(`Recovery failed: ${e.message}`);
+      log(`recovery failed: ${e.message}`);
+    }
+  });
   document.getElementById("cancelBtn").addEventListener("click", async () => {
-    try { await api("POST", "/api/cancel"); log("cancel sent"); } catch (e) { log("cancel failed: " + e.message); }
+    try { await api("POST", "/api/cancel"); log("cancel sent"); }
+    catch (e) { log("cancel failed: " + e.message); showError("Cancel failed: " + e.message); }
   });
   document.getElementById("arpBtn").addEventListener("click", runArpeggio);
   document.getElementById("busProbeBtn").addEventListener("click", () => {
@@ -2918,7 +3171,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (!S.cfgLastSent) S.cfgLastSent = {};
       if (S.cfgLastSent[p] === v) return;
       S.cfgLastSent[p] = v;
-      applyStrikeParam(S.cfgSlot, p, v);
+      applyStrikeParam(p, v);
     };
     slider.addEventListener("input", () => { input.value = slider.value; });
     slider.addEventListener("change", () => send(slider.value));
@@ -2930,6 +3183,15 @@ document.addEventListener("DOMContentLoaded", async () => {
       send(input.value);
     });
   }
+  document.getElementById("cfgTarget").addEventListener("change", () => {
+    S.cfgLastSent = {};
+    const status = document.getElementById("cfgStatus");
+    status.textContent = `next tuning change applies to ${cfgTargetLabel()}`;
+    status.style.color = "var(--text-dim)";
+  });
+  document.querySelectorAll("button[data-config-apply]").forEach(button => {
+    button.addEventListener("click", () => applyConfigGroup(button.dataset.configApply));
+  });
   document.getElementById("cfgTestBtn").addEventListener("click", () => {
     if (S.cfgSlot < 0) return;
     const slot = S.cfgSlot;
@@ -2945,20 +3207,27 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (S.cfgSlot < 0) return;
     const slot = S.cfgSlot;
     const status = document.getElementById("cfgStatus");
-    status.textContent = `homing addr ${slot}…`;
+    const faulted = Number((S.slots[slot] || {}).fault) > 0;
+    status.textContent = `${faulted ? "recovering and homing" : "homing"} addr ${slot}…`;
     status.style.color = "var(--text-muted)";
     try {
-      const reply = await api("POST", "/api/home", { addresses: [slot] });
-      const result = (reply.results || [])[0];
-      if (result && !result.accepted) {
-        throw new Error(result.result_name || result.error || "rejected");
+      if (faulted) {
+        const ok = await recoverAddresses([slot]);
+        if (!ok) throw new Error("re-home did not complete before the UI timeout");
+      } else {
+        const reply = await api("POST", "/api/home", { addresses: [slot] });
+        const result = (reply.results || [])[0];
+        if (result && !result.accepted) {
+          throw new Error(result.result_name || result.error || "rejected");
+        }
       }
       // The command ACK only reports that homing started successfully.
       // Poll status until the device reports homed=true or we give up.
-      const ok = await pollStatusUntil(() => !!S.homed[slot]);
+      const ok = !!S.homed[slot] || await pollStatusUntil(() => !!S.homed[slot]);
       if (ok) {
-        status.textContent = `addr ${slot} homed ✓`;
-        status.style.color = "var(--success)";
+        const shifted = S.slots[slot] && S.slots[slot].home_shift_warning;
+        status.textContent = `addr ${slot} homed ✓${shifted ? " · warning: home shifted" : ""}`;
+        status.style.color = shifted ? "var(--accent-bright)" : "var(--success)";
       } else {
         status.textContent = `addr ${slot} homing… (refresh to recheck)`;
         status.style.color = "var(--text-muted)";
@@ -2994,22 +3263,23 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
   document.getElementById("cfgSaveBtn").addEventListener("click", async () => {
     if (S.cfgSlot < 0) return;
-    const slot = S.cfgSlot;
+    const addresses = cfgAddresses();
     const status = document.getElementById("cfgStatus");
-    status.textContent = `saving addr ${slot} to drive…`;
+    status.textContent = `saving ${cfgTargetLabel()} to drive flash…`;
     status.style.color = "var(--text-muted)";
     try {
-      const j = await api("POST", "/api/save-settings", { addresses: [slot] });
-      const r = (j.results || [])[0];
-      if (r && r.accepted) {
-        status.textContent = `addr ${slot} saved to drive ✓`;
+      const j = await api("POST", "/api/save-settings", { addresses });
+      const results = j.results || [];
+      const failed = results.filter(r => !r.accepted);
+      if (!failed.length && results.length === addresses.length) {
+        status.textContent = `${cfgTargetLabel()} saved to drive flash ✓`;
         status.style.color = "var(--success)";
-        log(`save-settings addr=${slot} ok`);
+        log(`save-settings addresses=${addresses.join(",")} ok`);
       } else {
-        const detail = r ? (r.error || r.result_name || "rejected") : "no reply";
+        const detail = failed.map(r => `${r.address}:${r.error || r.result_name || "rejected"}`).join(", ") || "missing reply";
         status.textContent = `save failed: ${detail}`;
         status.style.color = "var(--error)";
-        log(`save-settings addr=${slot} failed: ${detail}`);
+        log(`save-settings failed: ${detail}`);
       }
     } catch (e) {
       status.textContent = `save failed: ${e.message}`;

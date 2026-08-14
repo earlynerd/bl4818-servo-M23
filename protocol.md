@@ -99,6 +99,7 @@ sub-command ID; the top 2 bits select reply policy.
 | 0x19 | QUERY_STRIKE_TIMING | -- | 0 |
 | 0x1A | STRIKE_EX | `[type] [current_hi] [current_lo] [param_hi] [param_lo]` | 5 |
 | 0x1B | ENTER_BOOTLOADER | -- | 0 |
+| 0x1C | QUERY_CONFIG | -- | 0 |
 
 `ENTER_BOOTLOADER` is a maintenance transition for LDROM-provisioned Gen1
 devices. The application performs the same coordinated stop as `STOP`, sends
@@ -114,6 +115,24 @@ is therefore required before the next strike. With ACK reply mode,
 `STRIKE_HOME` returns `REJECT_NOT_READY` while another sequence is active,
 `REJECT_FAULT` on motor fault, and `INVALID_ARGUMENT` when homing is disabled
 (`homing_duty == 0`). `OK` means homing started, not that it has finished.
+
+Homing is bounded by both cumulative encoder travel and elapsed time: one
+encoder revolution (16,384 counts) or 5 seconds, whichever comes first. An
+active strike sequence is bounded by the same one-revolution cumulative-travel
+ceiling but has no separate time limit; low-current strikes may legitimately
+take longer, while high-current runaway reaches the encoder ceiling quickly.
+Crossing either bound immediately disables PWM, latches `HOMING_LIMIT` or
+`STRIKE_LIMIT`, clears `homed`, and requires `CLEAR_FAULT` followed by a fresh
+`STRIKE_HOME`.
+
+On a successful re-home, firmware compares the new drum position with the
+previous known calibration modulo one absolute-encoder revolution. A change of
+1,024 counts (22.5 degrees) or more sets the non-faulting
+`STRIKE_WARNING_HOME_SHIFT` status bit. A subsequent re-home within that
+threshold clears the warning. `SAVE_SETTINGS` can persist the calibration for
+comparison after reboot; when invoked during an idle position hold, firmware
+briefly disables that hold around the blocking flash write and resumes it
+afterward.
 
 ### STRIKE_EX Articulation Types
 
@@ -276,8 +295,9 @@ A `STRIKE` or `STRIKE_EX` received during MUTING is rejected with
 | 0x05 | MUTE_PRESS_MA | mA | dead strike contact-press current (default 250); 0 = hold velocity-0 for the whole dwell; value must be >= 0 |
 | 0x06 | MUTE_ENGAGE_OFFSET | encoder counts (signed) | dead strike brake trip point, this far before the learned drum surface (default 0 = at the surface; negative = past it, requiring compression travel) |
 
-`MUTE_BRAKE_MS`, `MUTE_PRESS_MA`, and `MUTE_ENGAGE_OFFSET` are not yet
-persisted by `SAVE_SETTINGS`; they reset to defaults at boot.
+All six strike parameters are included by `SAVE_SETTINGS` and restored at
+boot. Version-3 settings records remain readable; their three dead-strike
+fields use compiled defaults until the next save migrates the record to v4.
 
 ### Addressed Reply Modes
 
@@ -297,8 +317,8 @@ bits 5:0 = sub-command ID
 
 Notes:
 
-- `QUERY_STATUS`, `QUERY_STRIKE`, and `QUERY_STRIKE_TIMING` always return their
-  full reply payloads regardless of requested reply mode.
+- `QUERY_STATUS`, `QUERY_STRIKE`, `QUERY_STRIKE_TIMING`, and `QUERY_CONFIG`
+  always return their full reply payloads regardless of requested reply mode.
 - `QUERY_TIMING` also always returns its full reply payload.
 - `NONE` only suppresses the device-generated reply. In cut-through mode the
   command frame itself still propagates around the ring and returns to the
@@ -368,6 +388,28 @@ when the underlying erase/write/verify operation fails.
 `current` is the filtered control-window average current in mA. Firmware uses a
 separate sustained peak-current detector plus a higher instantaneous ceiling
 for `FAULT_OVERCURRENT`; the raw peak sample is not reported in this reply.
+The `fault` byte values are `0 = NONE`, `1 = OVERCURRENT`, `2 = HALL_INVALID`,
+`3 = ENCODER_TIMEOUT`, `4 = ADC_TIMEOUT`, `5 = HOMING_LIMIT`, and
+`6 = STRIKE_LIMIT`. `CLEAR_FAULT` is a no-op when no fault is latched; after a
+real fault it clears the latch but deliberately leaves `homed = 0`.
+
+`QUERY_CONFIG` (`0x1C`) is an on-demand read used by the server/UI tuning
+panel. It returns type `0x40 + addr` and 36 payload bytes and is intentionally
+separate from the high-frequency status and strike replies:
+
+```text
+[type]
+[vel_kp:i16] [vel_ki:i16] [vel_kd:i16] [vel_ff:i16]
+[pos_kp:i16] [pos_ki:i16] [pos_kd:i16]
+[cur_kp:i16] [cur_ki:i16] [torque_limit_ma:u16]
+[home_offset:i16] [coast_distance:i16] [homing_duty:i16]
+[mute_brake_ms:i16] [mute_press_ma:i16] [mute_engage_offset:i16]
+[flags:u16] [encoder_csn_assert_level:u8]
+```
+
+All multi-byte fields are big-endian. Flag bits are `0x0001 = valid persisted
+record loaded`, `0x0002 = encoder zero valid`, `0x0004 = CS/LED polarity
+valid`, and `0x0008 = learned strike calibration valid`.
 
 `QUERY_STRIKE` replies with the same type `0x40 + addr` and 35 payload bytes
 (legacy firmware emits 32 bytes — older hosts should accept either length).
@@ -402,6 +444,7 @@ and the byte at offset 32 (high byte). Bits:
 - `0x0080` trigger-to-retrigger-ready time valid
 - `0x0100` trigger-to-impact time valid
 - `0x0200` strike was a dead strike (`STRIKE_EX` type 0x01); rebound fields never become valid
+- `0x0400` warning: latest home shifted at least 1,024 counts from the prior known calibration
 
 Timing fields are reported in milliseconds for the most recently accepted
 strike. `t_impact` is the firmware's measurement of mallet-velocity zero-cross
@@ -509,9 +552,12 @@ also doubles the flash-write endurance of the persist region.
 Persisted items:
 
 - encoder zero reference, stored as the absolute 14-bit encoder angle
+- encoder CS/status-LED assert polarity when detected or explicitly set
 - strike tuning (`home_offset`, `coast_distance`, `homing_duty`)
+- dead-strike tuning (`mute_brake_ms`, `mute_press_ma`, `mute_engage_offset`)
 - strike learned calibration (`drum_position`, `home_position`) when homed
-- motor torque limit, velocity PID, velocity feedforward, and position PID
+- motor torque limit, velocity PID, velocity feedforward, position PID, and
+  current PI
 
 `ZERO_POSITION` updates the logical zero point immediately and also saves the
 new absolute zero reference to flash. The other tunables are only committed

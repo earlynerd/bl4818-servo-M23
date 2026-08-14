@@ -99,6 +99,15 @@ polls the serial protocol; SysTick runs the time-critical control scheduling.
 The watchdog is only refreshed when both the main loop and SysTick continue to
 run. Brownout, hard-fault, and NMI paths mask the bridge outputs before reset.
 
+Homing and strike sequences also carry local mechanical bounds in the 500 Hz
+state machine: cumulative encoder travel may not exceed one revolution, and
+homing additionally may not exceed 5 seconds. A limit disables PWM, latches a
+dedicated fault, and requires fault-clear plus re-home. Re-homing by 1,024
+counts (22.5 degrees) or more from the previous known absolute-encoder
+calibration raises an advisory status warning. Use `SAVE_SETTINGS` after a
+known-good home to make that comparison reference survive reboot; firmware
+safely pauses and resumes the idle position hold around the flash write.
+
 ## First-device validation
 
 Before connecting a full ring:
@@ -133,3 +142,10 @@ Calibration and strike parameters can be stored in on-chip flash. The encoder
 CS polarity is auto-detected from the MT6701 frame CRC and persisted. Protocol
 changes must be kept synchronized across `src/protocol.c`, `include/protocol.h`,
 `scripts/ring_bus.py`, and `protocol.md`.
+
+The normal operator path for reading, changing, and saving motor/strike tuning
+is the browser player's per-actuator configuration panel. Its target selector
+can apply every ordinary tuning value to the selected actuator or the complete
+enumerated fleet. See [parameters.md](parameters.md) for the full catalog,
+including persistence, direction/polarity semantics, and compile-time safety
+constants.

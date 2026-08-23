@@ -30,3 +30,11 @@ Bench-observed bugs and their resolutions. Structural decisions live in DECISION
 - **Recently-touched?** no — the missing termination contract was longstanding; the bench observation exposed it.
 - **Time to fix:** one session.
 - **Hardware validation:** pending a restrained-actuator test of both limit faults, recovery/re-home, and the shifted-home warning.
+
+## 2026-08-22 — First home after power-up falsely warned of a shifted drum
+
+- **Observation:** Most actuators reported a home-shift warning on the first touch-off after power-up even though the drum surface had not moved; later homes in the same boot were generally consistent.
+- **Root cause:** `src/encoder.c:163` seeds continuous position at zero from the arbitrary power-up rotor angle when no logical zero exists, while pre-fix `src/persist.c:185` saved that boot-relative drum position and pre-fix `src/strike.c:889` compared it after the next boot as though both values shared an origin.
+- **Fix:** Capture and compare the raw 14-bit encoder angle at drum contact, persist it in record v5, and make v3/v4 migration establish a new baseline without warning.
+- **Class:** boot-relative-coordinate-persisted-as-absolute
+- **Recently-touched?** yes — the warning comparison was introduced in the latest firmware commit.

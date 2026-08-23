@@ -128,12 +128,15 @@ int32_t strike_get_mute_brake_ms(void);
 int32_t strike_get_mute_press_ma(void);
 int32_t strike_get_mute_engage_offset(void);
 void strike_restore_calibration(int32_t drum_position, int32_t home_position);
+void strike_restore_drum_angle(uint16_t angle);
 void strike_shift_position_reference(int32_t delta);
 
 /* Status */
 strike_state_t strike_get_state(void);
 int32_t  strike_get_drum_position(void);
 int32_t  strike_get_home_position(void);
+uint16_t strike_get_drum_angle(void);
+uint8_t  strike_has_drum_angle(void);
 uint8_t  strike_is_homed(void);
 uint16_t strike_get_sequence(void);
 void strike_get_metrics(strike_metrics_t *metrics);

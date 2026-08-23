@@ -32,7 +32,7 @@
 #include "timing.h"
 
 #if (ENCODER_COUNTS_PER_REV & (ENCODER_COUNTS_PER_REV - 1u)) != 0u
-#error "absolute_position_distance requires a power-of-two encoder count"
+#error "absolute_angle_distance requires a power-of-two encoder count"
 #endif
 
 /* ── Helpers ─────────────────────────────────────────────────────────── */
@@ -55,7 +55,10 @@ static uint8_t        calibration_valid;
 static int32_t        drum_position;
 static int32_t        home_position;
 static int8_t         drum_dir;         /* +1/-1: sign of "toward drum" */
-static int32_t        homing_reference_position;
+static uint16_t       drum_absolute_angle;
+static uint16_t       homing_reference_angle;
+static uint8_t        drum_absolute_angle_valid;
+static uint8_t        homing_reference_angle_valid;
 
 /* Configurable parameters */
 static int32_t        home_offset;      /* counts above drum (always positive) */
@@ -118,9 +121,10 @@ static uint32_t position_step(int32_t pos, int32_t previous)
     return delta;
 }
 
-/* Shortest angular distance on the 14-bit absolute encoder. This avoids a
- * false home-shift warning when equivalent positions differ by one wrap. */
-static uint32_t absolute_position_distance(int32_t a, int32_t b)
+/* Shortest distance between two raw 14-bit absolute encoder angles. Unlike
+ * the continuous logical position, this coordinate survives a power cycle
+ * even when no logical zero reference has been configured. */
+static uint32_t absolute_angle_distance(uint16_t a, uint16_t b)
 {
     uint32_t delta = ((uint32_t)a - (uint32_t)b) &
                      (ENCODER_COUNTS_PER_REV - 1u);
@@ -455,7 +459,10 @@ void strike_init(void)
     drum_position = 0;
     home_position = 0;
     drum_dir = 0;
-    homing_reference_position = 0;
+    drum_absolute_angle = 0u;
+    homing_reference_angle = 0u;
+    drum_absolute_angle_valid = 0u;
+    homing_reference_angle_valid = 0u;
 
     home_offset    = STRIKE_HOME_OFFSET_DEFAULT;
     coast_distance = STRIKE_COAST_DISTANCE_DEFAULT;
@@ -562,8 +569,6 @@ void strike_shift_position_reference(int32_t delta)
 
     if (state == STRIKE_HOMING) {
         stall_prev_pos -= delta;
-        if (calibration_valid)
-            homing_reference_position -= delta;
     }
 
     if (motion_guard_active)
@@ -596,6 +601,16 @@ void strike_restore_calibration(int32_t drum_pos, int32_t home_pos)
     irq_restore(irq_state);
 }
 
+void strike_restore_drum_angle(uint16_t angle)
+{
+    uint32_t irq_state = irq_save();
+
+    drum_absolute_angle = (uint16_t)(angle & (ENCODER_COUNTS_PER_REV - 1u));
+    drum_absolute_angle_valid = 1u;
+
+    irq_restore(irq_state);
+}
+
 strike_home_result_t strike_home(void)
 {
     uint32_t irq_state = irq_save();
@@ -616,8 +631,9 @@ strike_home_result_t strike_home(void)
         return STRIKE_HOME_REJECT_DISABLED;
     }
 
-    if (calibration_valid)
-        homing_reference_position = drum_position;
+    homing_reference_angle_valid = drum_absolute_angle_valid;
+    if (homing_reference_angle_valid)
+        homing_reference_angle = drum_absolute_angle;
 
     drum_dir = (homing_duty > 0) ? 1 : -1;
     homed = 0;
@@ -792,6 +808,8 @@ void strike_resume_after_persist(uint8_t resume_hold)
 strike_state_t strike_get_state(void)        { return state; }
 int32_t  strike_get_drum_position(void)      { return drum_position; }
 int32_t  strike_get_home_position(void)      { return home_position; }
+uint16_t strike_get_drum_angle(void)         { return drum_absolute_angle; }
+uint8_t  strike_has_drum_angle(void)         { return drum_absolute_angle_valid; }
 uint8_t  strike_is_homed(void)               { return homed; }
 uint16_t strike_get_sequence(void)           { return strike_sequence; }
 void strike_get_metrics(strike_metrics_t *metrics)
@@ -886,8 +904,11 @@ void strike_tick(void)
             }
 
             if (stall_counter >= STRIKE_HOMING_STALL_TICKS) {
-                if (calibration_valid &&
-                    absolute_position_distance(pos, homing_reference_position) >=
+                uint16_t detected_drum_angle = encoder_get_angle();
+
+                if (homing_reference_angle_valid &&
+                    absolute_angle_distance(detected_drum_angle,
+                                            homing_reference_angle) >=
                     STRIKE_HOME_SHIFT_WARN_COUNTS) {
                     warning_flags |= STRIKE_WARNING_HOME_SHIFT;
                 } else {
@@ -895,6 +916,8 @@ void strike_tick(void)
                 }
 
                 drum_position = pos;
+                drum_absolute_angle = detected_drum_angle;
+                drum_absolute_angle_valid = 1u;
                 calibration_valid = 1u;
                 /* Home is opposite the drum direction by home_offset */
                 update_home_position_target();

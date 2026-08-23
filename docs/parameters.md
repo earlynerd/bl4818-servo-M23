@@ -34,14 +34,16 @@ live settings snapshot, not only the field that was most recently changed.
 All PID and strike tuning wire values are signed 16-bit. The torque limit is
 unsigned 16-bit on the wire and is clamped to the 3800 mA compiled safety
 ceiling by firmware. Settings records use two flash pages, CRC protection, and
-ping-pong updates. Version 4 adds dead-strike tuning while retaining read
-compatibility with version 3.
+ping-pong updates. Version 5 adds the raw drum-contact encoder angle used by
+cross-boot home-shift detection while retaining read compatibility with
+versions 3 and 4. Older records intentionally provide no warning baseline
+until a successful home is saved in the new format.
 
 ## Learned and board-specific calibration
 
 | Value | How it is established | Persistence | Operator treatment |
 |---|---|---|---|
-| Drum position | Homing stall detection | Saved only when the actuator is homed | Re-home after mechanical changes; a shift of at least 1024 counts (22.5°) from the prior calibration produces a warning. |
+| Drum position | Homing stall detection | Logical position and raw 14-bit drum-contact angle are saved only when the actuator is homed | Re-home after mechanical changes; the warning compares raw absolute angles, independent of the rotor position at power-up. A shift of at least 1024 counts (22.5°) from the saved or previous same-boot home produces a warning. |
 | Home position | Derived from drum position and `home_offset` | Saved with drum position | Automatically recalculated after homing or a live home-offset change. |
 | Drum direction | Sign of `homing_duty`, captured while homing | Reconstructed from saved calibration and homing duty | Tune per actuator if a motor/encoder is mechanically reversed; it may also be fleet-applied when the hardware is uniform. |
 | Encoder zero reference | `ZERO_POSITION` | Saved immediately | Maintenance calibration; changing it shifts logical position references. |

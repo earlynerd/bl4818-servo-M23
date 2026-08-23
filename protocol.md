@@ -125,14 +125,18 @@ Crossing either bound immediately disables PWM, latches `HOMING_LIMIT` or
 `STRIKE_LIMIT`, clears `homed`, and requires `CLEAR_FAULT` followed by a fresh
 `STRIKE_HOME`.
 
-On a successful re-home, firmware compares the new drum position with the
-previous known calibration modulo one absolute-encoder revolution. A change of
-1,024 counts (22.5 degrees) or more sets the non-faulting
+On a successful re-home, firmware compares the raw 14-bit absolute encoder
+angle at drum contact with the previous same-boot or saved contact angle. The
+comparison is independent of the logical continuous-position origin, which is
+re-seeded from the rotor's arbitrary power-up position when no logical zero
+reference exists. A change of 1,024 counts (22.5 degrees) or more sets the non-faulting
 `STRIKE_WARNING_HOME_SHIFT` status bit. A subsequent re-home within that
 threshold clears the warning. `SAVE_SETTINGS` can persist the calibration for
 comparison after reboot; when invoked during an idle position hold, firmware
 briefly disables that hold around the blocking flash write and resumes it
-afterward.
+afterward. Version 3 and 4 settings remain readable but do not contain this raw
+angle, so the first home after migrating those records establishes the baseline
+without issuing a shift warning; the next `SAVE_SETTINGS` writes version 5.
 
 ### STRIKE_EX Articulation Types
 

@@ -22,21 +22,23 @@
  * untouched page, and the device boots cleanly with prior settings.
  *
  * The linker carves out both pages in PERSIST (see m2003.ld).  The record
- * Version 4 appends the dead-strike tuning fields. Version 3 records are
- * still accepted and use the compiled dead-strike defaults until the next
- * save migrates them to v4.
+ * Version 5 appends the raw absolute drum-contact angle used by the home-shift
+ * warning. Versions 3 and 4 remain readable; their missing absolute-angle
+ * reference is learned by the next successful home and stored on the next save.
  */
 
 #define PERSIST_PAGE_COUNT   2u
 #define PERSIST_REGION_BASE  (FMC_APROM_BASE + FMC_APROM_SIZE - \
                               PERSIST_PAGE_COUNT * FMC_FLASH_PAGE_SIZE)
 #define PERSIST_MAGIC        0x31545350UL  /* "PST1" */
-#define PERSIST_VERSION      4u
+#define PERSIST_VERSION      5u
+#define PERSIST_VERSION_V4   4u
 #define PERSIST_VERSION_V3   3u
 
 #define PERSIST_FLAG_ZERO_VALID         0x0001u
 #define PERSIST_FLAG_STRIKE_CAL_VALID   0x0002u
 #define PERSIST_FLAG_CSN_POLARITY_VALID 0x0004u
+#define PERSIST_FLAG_STRIKE_ANGLE_VALID 0x0008u
 
 typedef struct {
     uint32_t magic;
@@ -68,9 +70,41 @@ typedef struct {
     int32_t strike_mute_brake_ms;
     int32_t strike_mute_press_ma;
     int32_t strike_mute_engage_offset;
+    uint16_t strike_drum_angle;
     uint16_t crc;
     uint16_t reserved1;
+    uint16_t reserved2;
 } persist_record_t;
+
+typedef struct {
+    uint32_t magic;
+    uint16_t version;
+    uint16_t flags;
+    uint32_t sequence;
+    uint16_t zero_angle;
+    uint8_t  encoder_csn_assert_level;
+    uint8_t  reserved0;
+    int32_t strike_drum_position;
+    int32_t strike_home_position;
+    int32_t strike_home_offset;
+    int32_t strike_coast_distance;
+    int32_t strike_homing_duty;
+    int32_t vel_kp;
+    int32_t vel_ki;
+    int32_t vel_kd;
+    int32_t vel_ff;
+    int32_t pos_kp;
+    int32_t pos_ki;
+    int32_t pos_kd;
+    uint32_t torque_limit_ma;
+    int32_t cur_kp;
+    int32_t cur_ki;
+    int32_t strike_mute_brake_ms;
+    int32_t strike_mute_press_ma;
+    int32_t strike_mute_engage_offset;
+    uint16_t crc;
+    uint16_t reserved1;
+} persist_record_v4_t;
 
 typedef struct {
     uint32_t magic;
@@ -102,6 +136,18 @@ typedef struct {
 typedef char persist_record_alignment_check[
     (sizeof(persist_record_t) % sizeof(uint32_t) == 0u) ? 1 : -1];
 
+typedef char persist_record_v5_layout_check[
+    (sizeof(persist_record_t) == 96u &&
+     offsetof(persist_record_t, crc) == 90u) ? 1 : -1];
+
+typedef char persist_record_v4_layout_check[
+    (sizeof(persist_record_v4_t) == 92u &&
+     offsetof(persist_record_v4_t, crc) == 88u) ? 1 : -1];
+
+typedef char persist_record_v3_layout_check[
+    (sizeof(persist_record_v3_t) == 80u &&
+     offsetof(persist_record_v3_t, crc) == 76u) ? 1 : -1];
+
 typedef char persist_record_fits_page[
     (sizeof(persist_record_t) <= FMC_FLASH_PAGE_SIZE) ? 1 : -1];
 
@@ -126,6 +172,12 @@ static uint8_t persist_record_is_valid(const persist_record_t *record)
         return 0u;
     if (record->version == PERSIST_VERSION)
         return (persist_crc(record) == record->crc) ? 1u : 0u;
+    if (record->version == PERSIST_VERSION_V4) {
+        const persist_record_v4_t *v4 = (const persist_record_v4_t *)record;
+        uint16_t crc = crc16_ccitt((const uint8_t *)v4,
+                                   (uint8_t)offsetof(persist_record_v4_t, crc));
+        return (crc == v4->crc) ? 1u : 0u;
+    }
     if (record->version == PERSIST_VERSION_V3) {
         const persist_record_v3_t *v3 = (const persist_record_v3_t *)record;
         uint16_t crc = crc16_ccitt((const uint8_t *)v3,
@@ -147,7 +199,7 @@ static void persist_apply_record(const persist_record_t *record)
     motor_set_pos_pid(record->pos_kp, record->pos_ki, record->pos_kd);
     motor_set_cur_pid(record->cur_kp, record->cur_ki);
 
-    if (record->version >= PERSIST_VERSION) {
+    if (record->version >= PERSIST_VERSION_V4) {
         strike_set_mute_brake_ms(record->strike_mute_brake_ms);
         strike_set_mute_press_ma(record->strike_mute_press_ma);
         strike_set_mute_engage_offset(record->strike_mute_engage_offset);
@@ -162,6 +214,10 @@ static void persist_apply_record(const persist_record_t *record)
     if ((record->flags & PERSIST_FLAG_STRIKE_CAL_VALID) != 0u)
         strike_restore_calibration(record->strike_drum_position,
                                    record->strike_home_position);
+
+    if (record->version >= PERSIST_VERSION &&
+        (record->flags & PERSIST_FLAG_STRIKE_ANGLE_VALID) != 0u)
+        strike_restore_drum_angle(record->strike_drum_angle);
 }
 
 static void persist_capture_runtime(persist_record_t *record, uint32_t sequence)
@@ -186,6 +242,10 @@ static void persist_capture_runtime(persist_record_t *record, uint32_t sequence)
         record->flags |= PERSIST_FLAG_STRIKE_CAL_VALID;
         record->strike_drum_position = strike_get_drum_position();
         record->strike_home_position = strike_get_home_position();
+        if (strike_has_drum_angle()) {
+            record->flags |= PERSIST_FLAG_STRIKE_ANGLE_VALID;
+            record->strike_drum_angle = strike_get_drum_angle();
+        }
     }
 
     record->strike_home_offset = strike_get_home_offset();

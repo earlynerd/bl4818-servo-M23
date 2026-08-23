@@ -228,3 +228,10 @@ When a decision is reversed or superseded, append a new entry rather than rewrit
 - **Accepted tradeoffs:** Configuration readback is an on-demand protocol reply rather than an addition to the fast/regular status path. Healthy homed status avoids a redundant full motor query; exact motor fault/state is queried when a slot becomes unhomed. Board-specific electrical CS/LED polarity is visible but excluded from fleet tuning to avoid an accidental ring-wide hardware mismatch.
 - **Supersedes:** firmware-only completion judgments and single-actuator-only browser tuning assumptions.
 - **Affects:** future review criteria; `src/protocol.c`, `src/persist.c`, `scripts/ring_bus.py`, `scripts/ring_midi_server.py`, `player/midi_player.html`, `player/looper.html`, `protocol.md`, `midi_server_api.md`, `docs/firmware.md`, and `docs/parameters.md`.
+
+## 2026-08-22 — Cross-boot home-shift detection uses the raw absolute angle
+
+- **Decision:** Home-shift detection compares the MT6701 raw 14-bit angle captured at drum contact, while logical continuous positions remain dedicated to motion control. `SAVE_SETTINGS` persists that angle in settings record version 5; v3/v4 records remain readable but establish a warning baseline only after a fresh home and save.
+- **Why:** Without an explicit logical zero, the continuous position origin is the arbitrary rotor position at power-up. Persisting that boot-relative coordinate caused false first-home warnings even when the physical drum contact had not moved.
+- **Supersedes:** the comparison-coordinate portion of “2026-08-13 — Homing and strike motion have local encoder safety bounds”; explicit save rather than per-home flash writing remains unchanged.
+- **Affects:** `src/strike.c`, `include/strike.h`, `src/persist.c`, `protocol.md`, and `docs/parameters.md`.

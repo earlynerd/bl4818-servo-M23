@@ -72,8 +72,10 @@ today's local date, then the date is updated (atomic write). Delete the file
 to re-arm everyone. `arrival_delay_s` (default `60`) waits after the first
 detection before playing, allowing time to walk from the Wi-Fi boundary to the
 door. Pending greetings do not block later network scans and do not require a
-sleeping phone to answer every scan. `active_hours` (e.g. `"06:30-19:00"`,
-wraps past midnight) suppresses playback outside working hours.
+sleeping phone to answer every scan. When several greetings are ready together,
+`greeting_gap_s` (default `1`) adds a pause after each completed chime before
+the next one starts. `active_hours` (e.g. `"06:30-19:00"`, wraps past midnight)
+suppresses playback outside working hours.
 
 ## Defining a song
 

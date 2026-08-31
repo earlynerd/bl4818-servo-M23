@@ -69,6 +69,7 @@ DEFAULT_CONFIG = ROOT / "welcome_config.json"
 DEFAULT_STATE = ROOT / "welcome_state.json"
 DEFAULT_BASE_URL = "http://127.0.0.1:8765"
 DEFAULT_ARRIVAL_DELAY_S = 60.0
+DEFAULT_GREETING_GAP_S = 1.0
 IS_WINDOWS = platform.system() == "Windows"
 
 _MAC_RE = re.compile(r"([0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}")
@@ -576,6 +577,17 @@ def cmd_watch(args: argparse.Namespace) -> int:
         print("error: arrival_delay_s/--delay must be a finite, non-negative "
               "number.", file=sys.stderr)
         return 1
+    gap_value = cfg.get("greeting_gap_s", DEFAULT_GREETING_GAP_S)
+    try:
+        greeting_gap_s = float(gap_value)
+    except (TypeError, ValueError):
+        print("error: greeting_gap_s must be a number of seconds.",
+              file=sys.stderr)
+        return 1
+    if not math.isfinite(greeting_gap_s) or greeting_gap_s < 0:
+        print("error: greeting_gap_s must be a finite, non-negative number.",
+              file=sys.stderr)
+        return 1
     base_url = cfg.get("server", DEFAULT_BASE_URL)
     try:
         active = parse_active_hours(cfg.get("active_hours"))
@@ -592,7 +604,8 @@ def cmd_watch(args: argparse.Namespace) -> int:
           f"ring server {base_url}")
     print(f"[welcome] {len(cfg['people'])} people in roster"
           + (f", active hours {cfg['active_hours']}" if active else "")
-          + f", arrival delay {arrival_delay_s:g}s.  Ctrl-C to stop.")
+          + f", arrival delay {arrival_delay_s:g}s"
+          + f", greeting gap {greeting_gap_s:g}s.  Ctrl-C to stop.")
 
     try:
         while True:
@@ -624,12 +637,16 @@ def cmd_watch(args: argparse.Namespace) -> int:
                     for name, person in due:
                         pending_arrivals[name] = (person, retry_at)
                 else:
+                    played_in_batch = False
                     for name, person in due:
+                        if played_in_batch and greeting_gap_s:
+                            time.sleep(greeting_gap_s)
                         print(f"[{ts}] {name} arrival delay elapsed -> greeting")
                         if play_person_song(client, person, pitches, log=print):
                             state[name] = today
                             save_state(state_path, state)
                             pending_arrivals.pop(name, None)
+                            played_in_batch = True
                         else:
                             pending_arrivals[name] = (
                                 person, time.monotonic() + interval)

@@ -4,6 +4,8 @@
 #include <stdint.h>
 
 void persist_init(void);
+/* Complete startup restoration after polarity selection and encoder_poll(). */
+void persist_restore_calibration(void);
 int32_t persist_save_runtime(void);
 int32_t persist_clear(void);
 uint8_t persist_is_valid(void);

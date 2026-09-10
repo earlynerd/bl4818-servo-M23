@@ -127,7 +127,8 @@ int32_t strike_get_homing_duty(void);
 int32_t strike_get_mute_brake_ms(void);
 int32_t strike_get_mute_press_ma(void);
 int32_t strike_get_mute_engage_offset(void);
-void strike_restore_calibration(int32_t drum_position, int32_t home_position);
+/* Restore absolute contact reference after the first startup encoder poll. */
+void strike_restore_calibration(uint16_t drum_angle);
 void strike_restore_drum_angle(uint16_t angle);
 void strike_shift_position_reference(int32_t delta);
 

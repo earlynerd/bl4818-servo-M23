@@ -111,7 +111,8 @@ command.
 
 `STOP` immediately disables motor drive, aborts any active strike/homing
 sequence, and clears the learned-homed runtime flag. A successful `STRIKE_HOME`
-is therefore required before the next strike. With ACK reply mode,
+is therefore required before the next strike. STOP preserves any latched motor
+fault; only `CLEAR_FAULT` releases that lockout. With ACK reply mode,
 `STRIKE_HOME` returns `REJECT_NOT_READY` while another sequence is active,
 `REJECT_FAULT` on motor fault, and `INVALID_ARGUMENT` when homing is disabled
 (`homing_duty == 0`). `OK` means homing started, not that it has finished.
@@ -134,9 +135,19 @@ reference exists. A change of 1,024 counts (22.5 degrees) or more sets the non-f
 threshold clears the warning. `SAVE_SETTINGS` can persist the calibration for
 comparison after reboot; when invoked during an idle position hold, firmware
 briefly disables that hold around the blocking flash write and resumes it
-afterward. Version 3 and 4 settings remain readable but do not contain this raw
-angle, so the first home after migrating those records establishes the baseline
-without issuing a shift warning; the next `SAVE_SETTINGS` writes version 5.
+afterward. Version 6 saves the absolute drum-contact angle and `home_offset`;
+the old continuous drum/home coordinate fields are reserved and written as zero.
+After polarity selection and the first encoder reading, startup locates the
+nearest equivalent absolute home and reconstructs the runtime coordinates.
+Restoration marks the calibration valid but does not enable motor drive.
+The single-turn encoder cannot recover a previous multi-turn count.
+
+Versions 3 through 5 remain readable. Version 5's absolute contact angle is
+used directly; older records can recover it from their saved logical zero and
+drum position. Records with neither physical reference load tuning but require
+one fresh home before strikes. The next `SAVE_SETTINGS` writes version 6;
+older firmware cannot read version 6 records. Flash page locations and wire
+commands are unchanged.
 
 ### STRIKE_EX Articulation Types
 

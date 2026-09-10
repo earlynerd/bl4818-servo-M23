@@ -771,6 +771,16 @@ class RingClientV2:
         if self.trace:
             print(f"  [{label}] {data.hex(' ').upper()}")
 
+    def _recv_before(self, deadline: float) -> bytes:
+        """Receive within one command deadline, including skipped frames."""
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RingTimeout("reply deadline expired")
+        payload = self._recv_frame(timeout_ms=max(1, int(remaining * 1000)))
+        if time.monotonic() >= deadline:
+            raise RingTimeout("reply deadline expired")
+        return payload
+
     def _print_unexpected_reply(self, context: str, payload: bytes) -> None:
         print(
             "  [unexpected-reply] "
@@ -785,9 +795,8 @@ class RingClientV2:
             deadline = time.monotonic() + self.timeout_ms / 1000.0
             skipped: list[bytes] = []
             while True:
-                remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
                 try:
-                    payload = self._recv_frame(timeout_ms=remaining_ms)
+                    payload = self._recv_before(deadline)
                 except RingTimeout as exc:
                     skipped_text = ", ".join(item.hex(" ") for item in skipped)
                     raise RingTimeout(
@@ -857,9 +866,8 @@ class RingClientV2:
         expected_cmd = None if address is None else (CMD_STATUS_BASE | address)
         skipped: list[bytes] = []
         while True:
-            remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
             try:
-                payload = self._recv_frame(timeout_ms=remaining_ms)
+                payload = self._recv_before(deadline)
             except RingTimeout as exc:
                 expected = (
                     "any status reply"
@@ -888,9 +896,8 @@ class RingClientV2:
         skipped: list[bytes] = []
 
         while True:
-            remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
             try:
-                payload = self._recv_frame(timeout_ms=remaining_ms)
+                payload = self._recv_before(deadline)
             except RingTimeout as exc:
                 raise RingTimeout(_format_timeout_context(
                     f"timeout waiting for ACK reply addr={address} "
@@ -975,9 +982,8 @@ class RingClientV2:
         expected_cmd = CMD_STATUS_BASE | address
         skipped: list[bytes] = []
         while True:
-            remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
             try:
-                payload = self._recv_frame(timeout_ms=remaining_ms)
+                payload = self._recv_before(deadline)
             except RingTimeout as exc:
                 raise RingTimeout(_format_timeout_context(
                     f"timeout waiting for config addr={address} "
@@ -1171,9 +1177,8 @@ class RingClientV2:
             remaining_s = deadline - time.monotonic()
             if remaining_s <= 0:
                 break
-            remaining_ms = max(1, int(remaining_s * 1000))
             try:
-                payload = self._recv_frame(timeout_ms=remaining_ms)
+                payload = self._recv_before(deadline)
             except RingTimeout:
                 break
             cmd = payload[0] if payload else 0
@@ -1233,9 +1238,8 @@ class RingClientV2:
         expected_cmd = CMD_STATUS_BASE | address
         skipped: list[bytes] = []
         while True:
-            remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
             try:
-                payload = self._recv_frame(timeout_ms=remaining_ms)
+                payload = self._recv_before(deadline)
             except RingTimeout as exc:
                 raise RingTimeout(_format_timeout_context(
                     f"timeout waiting for strike status addr={address} "
@@ -1261,9 +1265,8 @@ class RingClientV2:
         expected_cmd = CMD_STATUS_BASE | address
         skipped: list[bytes] = []
         while True:
-            remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
             try:
-                payload = self._recv_frame(timeout_ms=remaining_ms)
+                payload = self._recv_before(deadline)
             except RingTimeout as exc:
                 raise RingTimeout(_format_timeout_context(
                     f"timeout waiting for strike timing addr={address} "
@@ -1293,9 +1296,8 @@ class RingClientV2:
         expected_cmd = CMD_STATUS_BASE | address
         skipped: list[bytes] = []
         while True:
-            remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
             try:
-                payload = self._recv_frame(timeout_ms=remaining_ms)
+                payload = self._recv_before(deadline)
             except RingTimeout as exc:
                 raise RingTimeout(_format_timeout_context(
                     f"timeout waiting for timing status addr={address} "

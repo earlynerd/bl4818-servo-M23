@@ -22,16 +22,17 @@
  * untouched page, and the device boots cleanly with prior settings.
  *
  * The linker carves out both pages in PERSIST (see m2003.ld).  The record
- * Version 5 appends the raw absolute drum-contact angle used by the home-shift
- * warning. Versions 3 and 4 remain readable; their missing absolute-angle
- * reference is learned by the next successful home and stored on the next save.
+ * Version 6 stores absolute contact angle plus home clearance, not runtime
+ * coordinates. The two legacy position words remain reserved for layout
+ * compatibility. Older records migrate when an absolute reference is available.
  */
 
 #define PERSIST_PAGE_COUNT   2u
 #define PERSIST_REGION_BASE  (FMC_APROM_BASE + FMC_APROM_SIZE - \
                               PERSIST_PAGE_COUNT * FMC_FLASH_PAGE_SIZE)
 #define PERSIST_MAGIC        0x31545350UL  /* "PST1" */
-#define PERSIST_VERSION      5u
+#define PERSIST_VERSION      6u
+#define PERSIST_VERSION_V5   5u
 #define PERSIST_VERSION_V4   4u
 #define PERSIST_VERSION_V3   3u
 
@@ -52,8 +53,8 @@ typedef struct {
      * bit is just absent so autodetect runs once and re-saves. */
     uint8_t  encoder_csn_assert_level;
     uint8_t  reserved0;
-    int32_t strike_drum_position;
-    int32_t strike_home_position;
+    int32_t strike_drum_position;  /* legacy v3-v5 only; zero in v6 */
+    int32_t strike_home_position;  /* legacy v3-v5 only; zero in v6 */
     int32_t strike_home_offset;
     int32_t strike_coast_distance;
     int32_t strike_homing_duty;
@@ -136,7 +137,7 @@ typedef struct {
 typedef char persist_record_alignment_check[
     (sizeof(persist_record_t) % sizeof(uint32_t) == 0u) ? 1 : -1];
 
-typedef char persist_record_v5_layout_check[
+typedef char persist_record_v5_v6_layout_check[
     (sizeof(persist_record_t) == 96u &&
      offsetof(persist_record_t, crc) == 90u) ? 1 : -1];
 
@@ -152,6 +153,8 @@ typedef char persist_record_fits_page[
     (sizeof(persist_record_t) <= FMC_FLASH_PAGE_SIZE) ? 1 : -1];
 
 static uint8_t  persist_valid;
+static uint8_t  restore_calibration_pending;
+static uint16_t restore_drum_angle;
 static uint8_t  current_page;
 static uint32_t current_seq;
 
@@ -170,7 +173,7 @@ static uint8_t persist_record_is_valid(const persist_record_t *record)
 {
     if (record->magic != PERSIST_MAGIC)
         return 0u;
-    if (record->version == PERSIST_VERSION)
+    if (record->version == PERSIST_VERSION || record->version == PERSIST_VERSION_V5)
         return (persist_crc(record) == record->crc) ? 1u : 0u;
     if (record->version == PERSIST_VERSION_V4) {
         const persist_record_v4_t *v4 = (const persist_record_v4_t *)record;
@@ -211,13 +214,29 @@ static void persist_apply_record(const persist_record_t *record)
     if ((record->flags & PERSIST_FLAG_CSN_POLARITY_VALID) != 0u)
         encoder_set_csn_polarity(record->encoder_csn_assert_level);
 
-    if ((record->flags & PERSIST_FLAG_STRIKE_CAL_VALID) != 0u)
-        strike_restore_calibration(record->strike_drum_position,
-                                   record->strike_home_position);
-
-    if (record->version >= PERSIST_VERSION &&
-        (record->flags & PERSIST_FLAG_STRIKE_ANGLE_VALID) != 0u)
+    restore_calibration_pending = 0u;
+    if (record->version >= PERSIST_VERSION_V5 &&
+        (record->flags & PERSIST_FLAG_STRIKE_ANGLE_VALID) != 0u) {
+        restore_drum_angle = record->strike_drum_angle;
         strike_restore_drum_angle(record->strike_drum_angle);
+        restore_calibration_pending =
+            (record->flags & PERSIST_FLAG_STRIKE_CAL_VALID) != 0u;
+    } else if (record->version < PERSIST_VERSION &&
+               (record->flags & (PERSIST_FLAG_ZERO_VALID | PERSIST_FLAG_STRIKE_CAL_VALID)) ==
+               (PERSIST_FLAG_ZERO_VALID | PERSIST_FLAG_STRIKE_CAL_VALID)) {
+        /* Legacy logical motor position = -(angle - zero), modulo one turn. */
+        restore_drum_angle = (uint16_t)((uint32_t)record->zero_angle -
+                                       (uint32_t)record->strike_drum_position) & 0x3FFFu;
+        restore_calibration_pending = 1u;
+    }
+}
+
+void persist_restore_calibration(void)
+{
+    if (restore_calibration_pending) {
+        strike_restore_calibration(restore_drum_angle);
+        restore_calibration_pending = 0u;
+    }
 }
 
 static void persist_capture_runtime(persist_record_t *record, uint32_t sequence)
@@ -238,14 +257,10 @@ static void persist_capture_runtime(persist_record_t *record, uint32_t sequence)
         record->encoder_csn_assert_level = encoder_get_csn_polarity();
     }
 
-    if (strike_is_homed()) {
+    if (strike_is_homed() && strike_has_drum_angle()) {
         record->flags |= PERSIST_FLAG_STRIKE_CAL_VALID;
-        record->strike_drum_position = strike_get_drum_position();
-        record->strike_home_position = strike_get_home_position();
-        if (strike_has_drum_angle()) {
-            record->flags |= PERSIST_FLAG_STRIKE_ANGLE_VALID;
-            record->strike_drum_angle = strike_get_drum_angle();
-        }
+        record->flags |= PERSIST_FLAG_STRIKE_ANGLE_VALID;
+        record->strike_drum_angle = strike_get_drum_angle();
     }
 
     record->strike_home_offset = strike_get_home_offset();
@@ -336,6 +351,8 @@ void persist_init(void)
     uint8_t v1 = persist_record_is_valid(r1);
     const persist_record_t *use = NULL;
 
+    restore_calibration_pending = 0u;
+
     if (v0 && v1) {
         /* Signed wraparound-safe compare — whichever seq is 'ahead' wins. */
         if ((int32_t)(r1->sequence - r0->sequence) > 0) {
@@ -388,6 +405,7 @@ int32_t persist_clear(void)
     int32_t status_b = persist_erase_page(1);
 
     persist_valid = 0u;
+    restore_calibration_pending = 0u;
     current_page = 0u;
     current_seq  = 0u;
 

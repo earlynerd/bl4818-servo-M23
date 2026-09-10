@@ -580,19 +580,34 @@ void strike_shift_position_reference(int32_t delta)
     irq_restore(irq_state);
 }
 
-void strike_restore_calibration(int32_t drum_pos, int32_t home_pos)
+void strike_restore_calibration(uint16_t drum_angle)
 {
     uint32_t irq_state = irq_save();
+    uint16_t home_angle;
+    int32_t delta;
 
-    if (homing_duty == 0)
+    if (homing_duty == 0 || motor_get_state() == MOTOR_FAULT)
     {
         irq_restore(irq_state);
         return;
     }
 
-    drum_position = drum_pos;
-    home_position = home_pos;
     drum_dir = (homing_duty > 0) ? 1 : -1;
+    drum_absolute_angle = drum_angle & (ENCODER_COUNTS_PER_REV - 1u);
+    drum_absolute_angle_valid = 1u;
+
+    /* The encoder runs opposite to motor coordinates. Locate the saved
+     * absolute home nearest the current rotor angle, then derive contact
+     * from the configured clearance. No previous boot's turn count survives. */
+    home_angle = (uint16_t)((int32_t)drum_absolute_angle + drum_dir * home_offset) &
+                 (ENCODER_COUNTS_PER_REV - 1u);
+    delta = (int32_t)home_angle - (int32_t)encoder_get_angle();
+    if (delta > (int32_t)(ENCODER_COUNTS_PER_REV / 2u))
+        delta -= ENCODER_COUNTS_PER_REV;
+    else if (delta < -(int32_t)(ENCODER_COUNTS_PER_REV / 2u))
+        delta += ENCODER_COUNTS_PER_REV;
+    home_position = get_pos() - delta;
+    drum_position = home_position + drum_dir * home_offset;
     calibration_valid = 1;
     homed = 1;
     state = STRIKE_IDLE;

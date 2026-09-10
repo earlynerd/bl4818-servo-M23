@@ -107,6 +107,22 @@ counts (22.5 degrees) or more from the previous known absolute-encoder
 calibration raises an advisory status warning. Use `SAVE_SETTINGS` after a
 known-good home to make that comparison reference survive reboot; firmware
 safely pauses and resumes the idle position hold around the flash write.
+Saved calibration uses the absolute contact angle plus home clearance. Startup
+reads the encoder and rebuilds the runtime targets, so a different power-up
+angle does not change the physical home. Restoration alone does not enable
+the motor. STOP preserves latched faults until an explicit fault clear.
+
+## Software regression checks
+
+Run `python -m unittest discover -s tests -v` for the host-side tests, including
+lost-reply cleanup and command deadlines under unrelated bus traffic.
+With a native GCC in PATH, `python tests/test_firmware_native.py` also executes
+the production motor, strike, PID, and settings-record code against simulated
+peripherals. It covers reboot coordinates across encoder wrap, both directions,
+legacy calibration migration, and fault lockouts. The ARM cross-compiler can
+build firmware but cannot execute these native tests on Windows; the test is
+explicitly skipped when native GCC is unavailable. Physical flash writes,
+encoder communication, and motor motion still require bench validation.
 
 ## First-device validation
 

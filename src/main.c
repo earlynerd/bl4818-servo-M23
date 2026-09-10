@@ -219,8 +219,18 @@ int main(void)
     /* Auto-detect SSI CSn polarity if it isn't already known.  Probes both
      * polarities and validates via the MT6701 frame CRC; the right polarity
      * passes uniquely.  On success, save so future boots skip the probe. */
-    if (!encoder_has_csn_polarity()) {
-        if (encoder_autodetect_csn_polarity())
+    {
+        uint8_t learned_polarity = 0u;
+
+        if (!encoder_has_csn_polarity())
+            learned_polarity = encoder_autodetect_csn_polarity();
+        if (encoder_has_csn_polarity()) {
+            encoder_poll();
+            persist_restore_calibration();
+        }
+        /* Capture only after restoring calibration so autodetection does not
+         * overwrite a valid saved home with the startup unhomed state. */
+        if (learned_polarity)
             (void)persist_save_runtime();
     }
 

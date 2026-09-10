@@ -46,6 +46,8 @@ from ring_bus import (
     StrikeStatus,
     RingError,
     RingTimeout,
+    CommandAck,
+    REPLY_MODE_ACK,
     auto_detect_port,
     DEFAULT_BAUD,
     STRIKE_PARAM_HOME_OFFSET,
@@ -593,8 +595,11 @@ def main() -> int:
         trace=args.trace,
     )
 
+    opened = False
+    completed = False
     try:
         client.open()
+        opened = True
 
         try:
             count = client.enumerate()
@@ -607,6 +612,7 @@ def main() -> int:
             duties = [150, 250, 350, 500, 700, -150, -250, -350, -500, -700]
             measure_ff(client, args.address, duties,
                        settle_s=1.0, sample_s=0.5)
+            completed = True
             return 0
 
         if args.strike is not None:
@@ -632,6 +638,7 @@ def main() -> int:
 
             if not args.no_plot:
                 plot_strike(samples, t_strike, strike_info, title)
+            completed = True
             return 0
 
         pid = tuple(args.pid) if args.pid else None
@@ -669,6 +676,7 @@ def main() -> int:
         if not args.no_plot:
             plot_step(samples, t_step, title, position_target=args.position)
 
+        completed = True
         return 0
 
     except RingError as exc:
@@ -676,13 +684,20 @@ def main() -> int:
         return 1
     except KeyboardInterrupt:
         print("\nCancelled — stopping motor...")
-        try:
-            client.stop(args.address)
-        except Exception:
-            pass
         return 130
     finally:
-        client.close()
+        try:
+            if opened and not completed:
+                # A lost reply does not mean the drive missed the command.
+                # Attempt STOP before releasing the port on every failed run.
+                try:
+                    ack = client.stop(args.address, reply_mode=REPLY_MODE_ACK)
+                    if isinstance(ack, CommandAck) and not ack.accepted:
+                        raise RingError(f"STOP rejected: {ack.result_name}")
+                except Exception as exc:
+                    print(f"WARNING: motor stop could not be confirmed: {exc}", file=sys.stderr)
+        finally:
+            client.close()
 
 
 if __name__ == "__main__":

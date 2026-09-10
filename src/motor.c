@@ -511,7 +511,9 @@ void motor_stop(void)
     brake_stage = 0;
     brake_engaged = 0;
     reset_current_protection_state();
-    state = MOTOR_IDLE;
+    /* STOP removes drive but only CLEAR_FAULT may release a fault latch. */
+    if (state != MOTOR_FAULT)
+        state = MOTOR_IDLE;
     irq_restore(irq_state);
 }
 

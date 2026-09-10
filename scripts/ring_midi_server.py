@@ -88,6 +88,7 @@ import threading
 import time
 import traceback
 import uuid
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 from urllib.parse import unquote, urlparse
@@ -290,6 +291,43 @@ class BusHealth:
             }
 
 
+class BusLock:
+    """Exclusive serial access; waiting commands take precedence over polls."""
+
+    def __init__(self):
+        self._condition = threading.Condition()
+        self._busy = False
+        self._waiting = 0
+
+    def __enter__(self):
+        with self._condition:
+            self._waiting += 1
+            try:
+                self._condition.wait_for(lambda: not self._busy)
+                self._busy = True
+            finally:
+                self._waiting -= 1
+        return self
+
+    def __exit__(self, *exc):
+        with self._condition:
+            self._busy = False
+            self._condition.notify_all()
+
+    @contextmanager
+    def poll(self):
+        """Try one low-priority transaction without queuing behind bus work."""
+        with self._condition:
+            acquired = not self._busy and not self._waiting
+            if acquired:
+                self._busy = True
+        try:
+            yield acquired
+        finally:
+            if acquired:
+                self.__exit__()
+
+
 class Bridge:
     """Thread-safe wrapper around RingClientV2."""
 
@@ -300,7 +338,11 @@ class Bridge:
         # higher and let the caller override for very busy setups.
         self.client = RingClientV2(port=port, baudrate=baud, timeout_ms=timeout_ms, trace=trace)
         self.client.open()
-        self.lock = threading.Lock()
+        self.lock = BusLock()
+        self._status_lock = threading.Lock()
+        self._status_poll_lock = threading.Lock()
+        self._status_cache: dict[int, tuple[dict, float | None]] = {}
+        self._status_generation = 0
         # Set for the complete updater transaction. HTTP handlers reject new
         # ring work while it is set, and Player.play checks it independently so
         # a queued playback request cannot begin as the applications restart.
@@ -326,8 +368,93 @@ class Bridge:
 
     def enumerate(self) -> int:
         with self.lock:
-            self.count = self.client.enumerate()
+            self.reset_status_cache(self.client.enumerate())
         return self.count
+
+    def reset_status_cache(self, count: int) -> None:
+        """Discard old address identities after enumeration or firmware update."""
+        with self._status_lock:
+            self.count = count
+            self._status_generation += 1
+            self._status_cache.clear()
+
+    def _polling_paused(self) -> bool:
+        return self.maintenance.is_set() or (
+            self.player is not None and self.player.is_playing()
+        )
+
+    @staticmethod
+    def _unknown_status() -> dict:
+        return {
+            "homed": False, "home_shift_warning": False,
+            "home_offset": None, "coast_distance": None, "homing_duty": None,
+            "fault": None, "fault_name": None,
+            "motor_state": None, "motor_state_name": None,
+        }
+
+    def _poll_status(self, address: int, generation: int, *, motor_details: bool) -> bool:
+        """Refresh one slot, yielding even before an optional motor-status query.
+
+        Cached data has a separate lock so HTTP readers never wait for serial
+        I/O. A transaction already on the wire must finish before a strike can
+        use the connection; neither polls nor commands can preempt that reply.
+        """
+        if self._polling_paused():
+            return False
+        with self.lock.poll() as acquired:
+            if not acquired or self._polling_paused():
+                return False
+            with self._status_lock:
+                if generation != self._status_generation:
+                    return False
+            try:
+                s = self._query_strike_timed(address)
+                slot = {
+                    "homed": bool(s.homed),
+                    "home_shift_warning": s.home_shift_warning,
+                    "home_offset": s.home_offset,
+                    "coast_distance": s.coast_distance,
+                    "homing_duty": s.homing_duty,
+                    # Fault entry invalidates homing in firmware. Only query
+                    # full motor status when that additional detail is needed.
+                    "fault": 0 if s.homed else None,
+                    "fault_name": "NONE" if s.homed else None,
+                    "motor_state": None, "motor_state_name": None,
+                }
+                observed = time.monotonic()
+            except Exception as exc:
+                with self._status_lock:
+                    previous, observed = self._status_cache.get(
+                        address, (self._unknown_status(), None)
+                    )
+                    self._status_cache[address] = (
+                        {**previous, "status_error": str(exc)}, observed
+                    )
+                return False
+            with self._status_lock:
+                self._status_cache[address] = (slot, observed)
+
+        if motor_details and not s.homed:
+            # Recheck playback and command waiters between the two transactions.
+            if self._polling_paused():
+                return False
+            with self.lock.poll() as acquired:
+                if not acquired or self._polling_paused():
+                    return False
+                with self._status_lock:
+                    if generation != self._status_generation:
+                        return False
+                try:
+                    motor = self._query_motor_timed(address)
+                    slot = {**slot, "fault": motor.fault,
+                            "fault_name": motor.fault_name,
+                            "motor_state": motor.state,
+                            "motor_state_name": motor.state_name}
+                except Exception as exc:
+                    slot = {**slot, "status_error": str(exc)}
+                with self._status_lock:
+                    self._status_cache[address] = (slot, observed)
+        return True
 
     def _record_bus_exc(self, address: int, exc: Exception) -> None:
         """Classify a failed bus transaction into the BusHealth buckets.
@@ -365,79 +492,63 @@ class Bridge:
         self.health.record_ok(address, (time.monotonic() - t0) * 1_000_000)
         return status
 
-    def status(self) -> dict:
-        with self.lock:
-            count = self.count
-            homed: list[bool] = []
-            slots: list[dict] = []
+    def _refresh_status_cache(self, *, motor_details: bool) -> set[int]:
+        # Coalesce overlapping HTTP sweeps without queuing more serial work.
+        if not self._status_poll_lock.acquire(blocking=False):
+            return set()
+        try:
+            with self._status_lock:
+                count = self.count
+                generation = self._status_generation
+            refreshed = set()
             for addr in range(count):
-                try:
-                    s = self._query_strike_timed(addr)
-                    homed.append(bool(s.homed))
-                    slot = {
-                        "homed": bool(s.homed),
-                        "home_shift_warning": s.home_shift_warning,
-                        "home_offset": s.home_offset,
-                        "coast_distance": s.coast_distance,
-                        "homing_duty": s.homing_duty,
-                        # Fault entry invalidates strike homing in firmware,
-                        # so a homed slot cannot simultaneously be faulted.
-                        # Avoid doubling healthy-ring status traffic; only
-                        # ask for the full motor status when homing is absent.
-                        "fault": 0 if s.homed else None,
-                        "fault_name": "NONE" if s.homed else None,
-                        "motor_state": None,
-                        "motor_state_name": None,
-                    }
-                    if not s.homed:
-                        try:
-                            motor = self._query_motor_timed(addr)
-                            slot.update({
-                                "fault": motor.fault,
-                                "fault_name": motor.fault_name,
-                                "motor_state": motor.state,
-                                "motor_state_name": motor.state_name,
-                            })
-                        except Exception as exc:
-                            slot["status_error"] = str(exc)
-                    last_timing = self.strike_timing.get(addr)
-                    if last_timing is not None:
-                        slot["last_timing"] = last_timing
-                    slots.append(slot)
-                except Exception:
-                    homed.append(False)
-                    slots.append({
-                        "homed": False,
-                        "home_shift_warning": False,
-                        "home_offset": None,
-                        "coast_distance": None,
-                        "homing_duty": None,
-                        "fault": None,
-                        "fault_name": None,
-                        "motor_state": None,
-                        "motor_state_name": None,
-                        "status_error": "strike status unavailable",
-                    })
-        return {"count": count, "homed": homed, "slots": slots}
+                if self._poll_status(addr, generation, motor_details=motor_details):
+                    refreshed.add(addr)
+                if self._polling_paused():
+                    break
+            with self._status_lock:
+                if generation != self._status_generation:
+                    refreshed.clear()
+            return refreshed
+        finally:
+            self._status_poll_lock.release()
+
+    def status(self) -> dict:
+        with self._status_lock:
+            generation = self._status_generation
+        refreshed = self._refresh_status_cache(motor_details=True)
+        with self._status_lock:
+            # An enumeration may have changed address identities mid-sweep.
+            if generation != self._status_generation:
+                refreshed.clear()
+            count = self.count
+            now = time.monotonic()
+            slots = []
+            for addr in range(count):
+                value, observed = self._status_cache.get(
+                    addr, (self._unknown_status(), None)
+                )
+                slot = {**value,
+                        "status_cached": addr not in refreshed,
+                        "status_age_ms": None if observed is None else
+                            max(0, int((now - observed) * 1000))}
+                if observed is None:
+                    slot.setdefault("status_error", "status not yet available")
+                last_timing = self.strike_timing.get(addr)
+                if last_timing is not None:
+                    slot["last_timing"] = last_timing
+                slots.append(slot)
+        return {"count": count, "homed": [slot["homed"] for slot in slots],
+                "slots": slots,
+                "status_deferred": any(slot["status_cached"] for slot in slots)}
 
     def probe_bus(self) -> dict:
-        """Run one query_strike round across every enumerated address purely to
-        exercise the link and feed BusHealth, then return the health snapshot.
-        Used by the browser's bus-health monitor to keep a steady per-address
-        sampling cadence while the ring is otherwise idle (organic traffic —
-        strikes, status polls — feeds the same counters; this just guarantees
-        coverage when nothing else is happening). Failures are swallowed: the
-        point is to *measure* drops, not propagate them.
+        """Probe only while idle, sharing results with the status cache.
 
-        Takes the ring lock per-address rather than around the whole sweep, so
-        a concurrent strike or keyboard tap only ever waits behind a single
-        query — not the full round, which matters on a ring with many devices."""
-        for addr in range(self.count):
-            with self.lock:
-                try:
-                    self._query_strike_timed(addr)
-                except Exception:
-                    pass
+        Playback uses existing strike traffic for bus-health measurements.
+        Polls never queue behind a command or hold the bus across a sweep.
+        """
+        self._refresh_status_cache(motor_details=False)
         return self.health.snapshot()
 
     def strike(self, address: int, current_ma: int) -> dict:
@@ -740,7 +851,7 @@ class Bridge:
             # that often clears whatever transient parser state caused
             # the missed reply.
             try:
-                self.count = self.client.enumerate()
+                self.reset_status_cache(self.client.enumerate())
             except RingError:
                 raise first_exc
             return self.client.strike_home(addr, reply_mode=REPLY_MODE_ACK)
@@ -1064,6 +1175,11 @@ class Player:
         a = abs(value)
         if a > bag["maxAbs"]:
             bag["maxAbs"] = a
+
+    def is_playing(self) -> bool:
+        """Cheap playback gate for background bus polling."""
+        with self._control_lock:
+            return self._thread is not None and self._thread.is_alive()
 
     def status(self) -> dict:
         """Snapshot of what the worker is currently playing. `elapsed_ms` and
@@ -1614,7 +1730,7 @@ class FirmwareUpdateManager:
                     broadcast_all=True,
                     progress=self._update_progress,
                 )
-                self.bridge.count = result["count"]
+                self.bridge.reset_status_cache(result["count"])
             with self._lock:
                 self._state.update({
                     "busy": False,

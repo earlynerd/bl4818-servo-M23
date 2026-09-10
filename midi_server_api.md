@@ -164,16 +164,20 @@ need direct ring access.
 
 ### `GET /api/status`
 
-What's on the ring right now.
+Latest observed ring state. Refreshes while idle; uses cached readings during
+server playback or bus contention.
 
 **Response (200):**
 ```json
 {
   "count": 5,
   "homed": [true, true, false, true, true],
+  "status_deferred": false,
   "slots": [
     {
       "homed": true,
+      "status_cached": false,
+      "status_age_ms": 12,
       "home_shift_warning": false,
       "fault": 0,
       "fault_name": "NONE",
@@ -197,6 +201,25 @@ slot since the bridge started. To preserve ring bandwidth, healthy homed slots
 do not receive a second full motor query: their fault is known to be `NONE`
 because firmware invalidates homing on every fault. Unhomed slots are queried
 for exact `fault`, `fault_name`, `motor_state`, and `motor_state_name` values.
+
+Status polling releases the bus after every transaction, including before an
+unhomed slot's optional motor-status query. Waiting commands take priority.
+During server playback, no status queries are sent. Overlapping status/probe
+requests return cached data instead of queuing another sweep.
+
+- `status_deferred`: at least one slot could not be fully refreshed for this
+  request (busy bus, playback, another sweep, or a failed strike-status query).
+- Per-slot `status_cached`: this request did not fully refresh that slot.
+- Per-slot `status_age_ms`: elapsed time since its last successful strike-status
+  read, or `null` if none exists. Supplemental motor details may be unavailable.
+- Per-slot `status_error`: last query failure, or an explanation that no reading
+  exists yet. A failure retains the previous reading and its original age.
+
+Treat `homed` and fault values as last-known observations, not live guarantees.
+For homing/recovery completion, require a fresh result without `status_error`.
+Re-enumeration and firmware updates discard cached address identities. Cached
+responses do not trigger background retries; request status again while idle
+for a fresh sweep. The browser marks cached/unavailable state explicitly.
 
 ### `GET /api/pitches`
 
@@ -776,13 +799,14 @@ are in **microseconds**; the drop-rate denominator is `n` (every attempt).
 
 ### `POST /api/bus-health/probe`
 
-Run one `query_strike` round across every enumerated address purely to exercise
-the link and feed the health counters, then return the same snapshot shape as
-`GET /api/bus-health`. The browser monitor calls this once a second (only while
-idle — it auto-pauses during playback, where live strikes feed the same
-counters) so an intermittent fault keeps showing up even when the ring isn't
-otherwise busy. Locks the ring per-address, so a concurrent strike only ever
-waits behind a single query.
+When idle, attempt one `query_strike` round across the enumerated addresses to
+feed health counters and the shared status cache, then return the same snapshot
+shape as `GET /api/bus-health`. The server suppresses these queries during
+playback, even if another browser or integration requests a probe. Waiting
+commands take priority between queries; busy slots are skipped, and overlapping
+status/probe requests do not queue another sweep. A concurrent strike can still
+wait for the one query already on the wire. The browser monitor requests probes
+once a second while idle; playback uses health samples from existing strikes.
 
 **Request body:** none.
 

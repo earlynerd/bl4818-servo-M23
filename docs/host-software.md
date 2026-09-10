@@ -56,6 +56,19 @@ notes. Isolated notes retain timed acknowledgments. The browser follows the
 server's playback state through completion and never cancels a song merely
 because its nominal wall-clock duration elapsed.
 
+Status refreshes and bus-health probes yield to playback on the server, even
+when requested from another browser or an integration. During playback they
+use cached status and existing strike traffic rather than adding bus queries.
+While idle, polls release the bus after each transaction; waiting commands
+take priority, and overlapping status/probe requests share the cache instead
+of queuing more sweeps. A query already on the wire must still finish or time
+out before a command can use the connection.
+
+The player labels cached or unavailable state and shows its age in the state
+tooltip. Refresh while idle for current readings. Homing/recovery completion
+checks require fresh status. This change runs entirely on the host; it adds no
+encoder checks, control-loop work, or firmware protocol fields.
+
 **Hardware validation, 2026-08-03:** on the 14-actuator handpan, chord impacts
 were reported as nearly perfectly synchronized. Removing chord reply waits also
 let rapid layered melodies retain their intended following notes instead of

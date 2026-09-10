@@ -627,6 +627,10 @@ class FirmwareUpdateManagerTests(unittest.TestCase):
                 self.player = FakePlayer()
                 self.count = 3
 
+            def reset_status_cache(self, count):
+                self.count = count
+                self.cache_reset = True
+
         bridge = FakeFirmwareBridge()
         manager = FirmwareUpdateManager(bridge)
         image = prepare_image(
@@ -678,6 +682,7 @@ class FirmwareUpdateManagerTests(unittest.TestCase):
         self.assertFalse(bridge.maintenance.is_set())
         self.assertEqual(state["phase"], "complete")
         self.assertEqual(state["result"]["addresses"], [0, 1, 2])
+        self.assertTrue(bridge.cache_reset)
 
 
 if __name__ == "__main__":

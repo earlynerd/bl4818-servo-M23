@@ -1026,7 +1026,7 @@ async function refreshStatus() {
       // bucket. The first in-session strike on this slot will seed the EMA.
       if (S.slots[i] && S.slots[i].last_timing) S.strikeTiming[i] = S.slots[i].last_timing;
     }
-    setConn(true, `${S.count} device(s) on ring`);
+    setConn(true, `${S.count} device(s) on ring${j.status_deferred ? " · cached state" : ""}`);
     rebuildMappingIfNeeded();
     renderMapTable();
     if (S.cfgSlot >= 0 && S.cfgSlot < S.count) {
@@ -1314,13 +1314,19 @@ function renderMapTable() {
     const homed = !!S.homed[i];
     const slot = S.slots[i] || {};
     const faulted = Number(slot.fault) > 0;
-    const stateText = faulted
+    let stateText = faulted
       ? `FAULT: ${escapeHtml(slot.fault_name || slot.fault)}`
       : homed ? (slot.home_shift_warning ? "HOMED ⚠" : "HOMED")
         : (slot.motor_state_name === "RUN" ? "HOMING" : "—");
-    const stateTitle = faulted
+    let stateTitle = faulted
       ? ` title="Motor fault ${escapeHtml(slot.fault_name || slot.fault)} — use Recover faults"`
       : slot.home_shift_warning ? ` title="Home moved significantly from the persisted calibration"` : "";
+    if (slot.status_cached || slot.status_error) {
+      const age = slot.status_age_ms == null ? "No reading yet"
+        : `Last reading ${(slot.status_age_ms / 1000).toFixed(1)} seconds ago`;
+      stateText += slot.status_error ? " (unavailable)" : " (cached)";
+      stateTitle = ` title="${escapeHtml(age + (slot.status_error ? ": " + slot.status_error : "; refresh when idle for current state"))}"`;
+    }
     const noteTitle = pitch == null ? "" : ` title="${midiName(pitch)}"`;
     const trimPct = Math.round((S.trim[i] ?? 1.0) * 100);
     h += `<tr>
@@ -1482,8 +1488,12 @@ async function pollStatusUntil(predicate, opts = {}) {
   const intervals = opts.intervals ?? [400, 600, 900, 1400, 2000, 2500];
   for (const ms of intervals) {
     await new Promise(r => setTimeout(r, ms));
-    try { await refreshStatus(); } catch {}
-    if (predicate()) return true;
+    try {
+      const status = await refreshStatus();
+      // Cached pre-command state must not count as completed homing/recovery.
+      if (status && !status.status_deferred &&
+          !(status.slots || []).some(slot => slot.status_error) && predicate()) return true;
+    } catch {}
   }
   return false;
 }

@@ -235,3 +235,10 @@ When a decision is reversed or superseded, append a new entry rather than rewrit
 - **Why:** Without an explicit logical zero, the continuous position origin is the arbitrary rotor position at power-up. Persisting that boot-relative coordinate caused false first-home warnings even when the physical drum contact had not moved.
 - **Supersedes:** the comparison-coordinate portion of “2026-08-13 — Homing and strike motion have local encoder safety bounds”; explicit save rather than per-home flash writing remains unchanged.
 - **Affects:** `src/strike.c`, `include/strike.h`, `src/persist.c`, `protocol.md`, and `docs/parameters.md`.
+
+## 2026-09-06 — Pico ring master for turntable control
+
+- **Decision:** Keep the motor application unchanged and provide an Arduino Stream ring-master library plus an Arduino-Pico turntable example.
+- **Why:** The Pico can read the speed pot and ramp commands while the existing motor firmware retains encoder feedback and protection. The client waits for matched ACKs, does not retry motion automatically, and distinguishes command acceptance from physical motion. Host-link-loss stopping remains unsupported by the motor firmware.
+- **Supersedes:** (initial)
+- **Affects:** `libraries/BL4818Ring`, application ring-bus clients.

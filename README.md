@@ -6,6 +6,14 @@ The actuators use modified BL4818 motor-controller hardware, a Nuvoton M2003
 microcontroller, hall sensing, and an MT6701 absolute encoder to move a mallet
 with controlled timing and force.
 
+This is the second generation of the
+[Tongue Drum Music Robot](https://hackaday.io/project/194584-tongue-drum-music-robot).
+The first machine used ten brushed DC motors, printed clocksprings, and one
+central ESP32; its firmware remains in the
+[RobotDrum repository](https://github.com/earlynerd/RobotDrum). This generation
+replaces those open-loop, spring-return channels with modular closed-loop
+brushless servos on a shared power/data ring.
+
 The system is in active use: roughly 35 actuators have been built, and the
 firmware plus MIDI player/server are working well. The software is much closer
 to production-ready than the replication documentation, so this repository
@@ -15,8 +23,16 @@ than a turn-key kit.
 
 ## Watch and listen
 
-This project makes much more sense with sound. Select the image or the link
-below to hear ten actuators perform on a handpan-style tongue drum.
+This project makes much more sense with sound. These short performances show
+the current 14-actuator instrument from several useful angles:
+
+- **[Full-ring performance and millisecond timing overview](https://www.instagram.com/sly.vester/reel/DYtgoHPu89_/)**
+- **[Minecraft theme on the complete instrument](https://www.instagram.com/sly.vester/reel/Db12a67uSeY/)**
+- **[Performance on a Hamsa handpan](https://www.instagram.com/sly.vester/reel/DaqXpGyupEj/)**
+- **[Overhead view of the synchronized mallets](https://www.instagram.com/sly.vester/reel/DaG4R6Ovw2a/)**
+
+For a stable, account-free copy, the repository also contains a 56-second
+sound-enabled performance by ten actuators:
 
 **[▶ Play the 56-second performance video with sound](docs/video/handpan_video_h264.mp4)**
 

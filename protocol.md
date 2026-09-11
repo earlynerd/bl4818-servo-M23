@@ -3,6 +3,10 @@
 Binary framing protocol for the BL4818 motor driver ring bus.
 Up to 16 devices, single master, 250 kbaud UART.
 
+For an embedded Arduino/Pico master, see
+[`BL4818Ring`](libraries/BL4818Ring/README.md), which implements enumeration,
+compact-ACK commands and status decoding against this application protocol.
+
 ## Packet Structure
 
 ```

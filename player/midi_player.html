@@ -27,6 +27,16 @@
   .pill:hover { border-color: var(--accent); color: var(--text); }
   .pill.active { background: var(--accent-dim); border-color: var(--accent); color: var(--accent-bright); }
   .pill:disabled { opacity: 0.4; cursor: default; }
+  .transpose-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .transpose-controls select { background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 5px; }
+  .transpose-info { font-size: 12px; color: var(--text-muted); line-height: 1.5; margin-top: 8px; }
+  .transpose-voices { display: grid; gap: 8px; margin-top: 8px; max-height: 340px; overflow: auto; }
+  .voice-row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; border-left:4px solid var(--voice-color); padding:6px 8px; }
+  .voice-row label { flex:1; min-width:200px; }
+  .voice-row .voice-toggle { flex:0 0 auto; min-width:0; }
+  .voice-description { flex:0 0 100%; order:-1; overflow-wrap:anywhere; }
+  .voice-row .pill[aria-pressed="true"] { outline:2px solid var(--voice-color); }
+  .transpose-voices label { display: flex; align-items: center; gap: 6px; font-size: 12px; }
   .panel { background: var(--surface-alt); border-radius: 6px; padding: 14px; border: 1px solid var(--border); }
 
   .header { border-bottom: 1px solid var(--border); padding: 18px 28px; display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
@@ -111,9 +121,9 @@
   .piano-label .addr { color: var(--text-dim); }
   .piano-grid { flex: 1; overflow-x: auto; position: relative; }
   .note-bar { position: absolute; border-radius: 2px; transition: opacity 0.1s; }
-  .note-bar.unmapped { background: var(--text-dim) !important; opacity: 0.25 !important; }
+  .note-bar.unmapped { outline:1px dashed var(--text-muted); opacity: 0.4 !important; }
   .note-bar.fallback { box-shadow: inset 0 0 0 1px rgba(232,184,80,0.55); }
-  .note-bar.suppressed { opacity: 0.18 !important; background: var(--text-dim) !important; }
+  .note-bar.suppressed { opacity: 0.18 !important; }
   .note-bar.fired { box-shadow: 0 0 0 1px var(--accent-bright); }
   .progress-bar { height: 4px; background: var(--border); border-radius: 2px; }
   .progress-fill { height: 100%; background: var(--accent); border-radius: 2px; transition: width 0.05s linear; }
@@ -319,7 +329,7 @@
         <span id="tempoDisplay" style="font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--accent);min-width:62px;text-align:right">1.00x</span>
         <button class="pill" id="tempoResetBtn" style="padding:4px 8px;font-size:11px">1x</button>
       </div>
-      <p style="font-size:11px;color:var(--text-dim);margin-top:6px">Playback speed multiplier. No note trimming — every note-on fires.</p>
+      <p style="font-size:11px;color:var(--text-dim);margin-top:6px">Playback speed multiplier. Transposed pieces also check the 50 ms minimum gap between hits on each mallet.</p>
     </div>
 
     <div class="panel">
@@ -404,6 +414,30 @@
         </div>
       </div>
       <div id="progressContainer" class="progress-bar" style="display:none"><div id="progressFill" class="progress-fill" style="width:0%"></div></div>
+      <div class="panel" id="transposePanel">
+        <div class="transpose-controls">
+          <button class="pill" id="transposeBtn" type="button" disabled>Transpose</button>
+          <label for="transposeMode">Fit</label>
+          <select id="transposeMode">
+            <option value="strict">Transpose only</option>
+            <option value="fold" selected>Transpose + octave folding</option>
+            <option value="adapt">Also substitute missing notes</option>
+          </select>
+          <button class="pill" id="restoreMidiBtn" type="button" disabled>Restore original</button>
+        </div>
+        <p class="transpose-info" id="transposeTarget"></p>
+        <p class="transpose-info" id="transposeSummary" aria-live="polite">Original notes. Click Transpose to fit this file to the instrument.</p>
+        <details open style="margin-top:8px">
+          <summary style="cursor:pointer;font-size:12px;color:var(--text-muted)">Inspect tracks and choose what to transpose</summary>
+          <p class="transpose-info">Show hides/shows original source notes immediately, using track colors. Include chooses what to transpose and applies only on Transpose. Channel 10 starts excluded as General MIDI drums.</p>
+          <div class="transpose-voices" id="transposeVoices"></div>
+          <div class="transpose-controls" style="margin-top:8px">
+            <button class="pill" type="button" id="arrangementViewBtn" onclick="previewMidiVoice(null)" disabled>Arrangement · mallet colors</button>
+            <button class="pill" type="button" id="stopAuditionBtn" onclick="stopVoiceAudition()" disabled>Stop computer audition</button>
+          </div>
+          <p class="transpose-info" id="voicePreviewStatus" aria-live="polite">Preview isolates original source notes, without changing inclusion or drum playback. Audition plays a synthetic excerpt on this computer only.</p>
+        </details>
+      </div>
       <div class="piano-roll-toolbar">
         <span class="label" style="margin:0">Piano Roll</span>
         <div class="piano-roll-controls">
@@ -591,6 +625,7 @@
   </div>
 </div>
 
+<script src="midi_transpose.js"></script>
 <script>
 // ─── Config ──────────────────────────────────────────────────
 const API_BASE = ""; // same-origin (the Python bridge serves this page)
@@ -654,6 +689,7 @@ const S = {
   rollAutoScale: true,
   rollRowHeight: 22,
   playing: false,
+  playStarting: false,
   timeouts: [],
   animFrame: null,
   startWall: 0,
@@ -773,6 +809,7 @@ function renderFirmware(state) {
   const artifact = state && state.artifact;
   const updating = !!(state && state.busy && state.operation === "update");
   S.firmwareUpdating = updating;
+  refreshTransposeControls();
 
   const phase = document.getElementById("firmwarePhase");
   phase.textContent = state ? state.phase : "offline";
@@ -1029,6 +1066,7 @@ async function refreshStatus() {
     setConn(true, `${S.count} device(s) on ring${j.status_deferred ? " · cached state" : ""}`);
     rebuildMappingIfNeeded();
     renderMapTable();
+    refreshTransposeControls();
     if (S.cfgSlot >= 0 && S.cfgSlot < S.count) {
       refreshCfgModalValues();
       refreshCfgTiming();
@@ -1773,6 +1811,7 @@ function parseMidiFile(buf) {
   const tpb = d.getUint16(12);
   if (format > 1) throw new Error(`MIDI Format ${format} is not supported`);
   if (tpb & 0x8000) throw new Error("SMPTE timing not supported");
+  if (!tpb) throw new Error("MIDI ticks per beat must be positive");
 
   // First pass: collect tempo map from any track that has tempo meta events.
   // Each entry: { tick, usPerBeat }.
@@ -1840,6 +1879,8 @@ function parseMidiFile(buf) {
 
   // Second pass: collect note-ons (with durations) across all tracks.
   const events = [];
+  const trackNames = [];
+  const trackInstruments = [];
   off = 14;
   for (let t = 0; t < ntrks; t++) {
     if (off + 8 > buf.byteLength) break;
@@ -1848,9 +1889,9 @@ function parseMidiFile(buf) {
     let pos = off + 8;
     const end = pos + tlen;
     let tick = 0, running = 0;
-    // Per-track pending map: pitch -> index into events[]. Per-track so
-    // that two tracks playing the same pitch concurrently don't collide.
+    // Match within each track AND channel, including Type 0 multichannel files.
     const pending = {};
+    const programs = {};
     while (pos < end) {
       let delta = 0;
       while (pos < end) { const b = d.getUint8(pos++); delta = (delta << 7) | (b & 0x7f); if (!(b & 0x80)) break; }
@@ -1858,9 +1899,12 @@ function parseMidiFile(buf) {
       if (pos >= end) break;
       let status = d.getUint8(pos);
       if (status === 0xff) {
-        pos++; pos++; // type
+        pos++;
+        const type = d.getUint8(pos++);
         let len = 0;
         while (pos < end) { const b = d.getUint8(pos++); len = (len << 7) | (b & 0x7f); if (!(b & 0x80)) break; }
+        if (type === 0x03) trackNames[t] = new TextDecoder().decode(new Uint8Array(buf, pos, len));
+        if (type === 0x04) trackInstruments[t] = new TextDecoder().decode(new Uint8Array(buf, pos, len));
         pos += len;
         continue;
       }
@@ -1874,27 +1918,31 @@ function parseMidiFile(buf) {
       if (status < 0x80) status = running; else { running = status; pos++; }
       const cmd = status & 0xf0;
       if (cmd === 0x90 || cmd === 0x80) {
+        const channel = status & 0x0f;
         const pitch = d.getUint8(pos++);
         const vel = d.getUint8(pos++);
+        const key = `${channel}:${pitch}`;
         const nowMs = tickToMs(tick);
         const isOn = (cmd === 0x90 && vel > 0);
         if (isOn) {
           // If a previous on for this pitch never got a matching off,
           // close it at the new on time so durations don't overlap.
-          if (pending[pitch] !== undefined) {
-            const prev = events[pending[pitch]];
+          if (pending[key] !== undefined) {
+            const prev = events[pending[key]];
             if (prev.durMs === 0) prev.durMs = Math.max(0, nowMs - prev.timeMs);
           }
-          pending[pitch] = events.length;
-          events.push({ pitch, vel, timeMs: nowMs, durMs: 0 });
-        } else if (pending[pitch] !== undefined) {
-          const ev = events[pending[pitch]];
+          pending[key] = events.length;
+          events.push({ pitch, vel, timeMs: nowMs, durMs: 0, track: t, channel, program: programs[channel] ?? null });
+        } else if (pending[key] !== undefined) {
+          const ev = events[pending[key]];
           ev.durMs = Math.max(0, nowMs - ev.timeMs);
-          delete pending[pitch];
+          delete pending[key];
         }
       } else if (cmd === 0xa0 || cmd === 0xb0 || cmd === 0xe0) {
         pos += 2;
-      } else if (cmd === 0xc0 || cmd === 0xd0) {
+      } else if (cmd === 0xc0) {
+        programs[status & 0x0f] = d.getUint8(pos++);
+      } else if (cmd === 0xd0) {
         pos += 1;
       } else {
         pos += 2;
@@ -1903,31 +1951,261 @@ function parseMidiFile(buf) {
     off = end;
   }
   events.sort((a, b) => a.timeMs - b.timeMs);
+  for (const e of events) e.trackName = trackNames[e.track] || `Track ${e.track + 1}`;
+  for (const e of events) e.instrumentName = trackInstruments[e.track] || "";
   return { events, tpb, format, ntrks };
 }
 
 // ─── Composition handling ───────────────────────────────────
 function loadFromMIDI(buf, filename) {
   hideMessages();
+  if (S.playStarting) { showError("Wait for playback to start before opening another file"); return false; }
   try {
     const { events } = parseMidiFile(buf);
     if (!events.length) throw new Error("No note-ons found in file");
-    const maxMs = events.length ? events[events.length - 1].timeMs + 50 : 0;
+    const maxMs = events.reduce((end, e) => Math.max(end, e.timeMs + Math.max(50, e.durMs)), 0);
     const name = filename.replace(/\.[^.]+$/, "").replace(/[_-]/g, " ");
+    if (S.playing) stopPlayback();
+    stopVoiceAudition();
     S.composition = {
       title: name,
       events,
+      originalEvents: events,
+      transposition: null,
       maxMs,
     };
     S.loadedMidiBuf = buf;
     S.loadedMidiName = filename;
     S.loadedFromLibrary = false;
+    document.getElementById("transposeMode").value = "fold";
+    renderTransposeVoices();
     if (typeof updateSaveToLibraryBtn === "function") updateSaveToLibraryBtn();
     showComposition();
     showSuccess(`Loaded "${name}" — ${events.length} note-ons over ${(maxMs/1000).toFixed(1)}s`);
+    return true;
   } catch (e) {
     showError("MIDI parse error: " + e.message);
+    return false;
   }
+}
+
+function transposeMappingKey() {
+  return JSON.stringify([S.count, S.mapping.slice(0, S.count)]);
+}
+
+function transpositionIsStale() {
+  const applied = S.composition && S.composition.transposition;
+  return !!applied && applied.mappingKey !== transposeMappingKey();
+}
+
+function selectedTransposeVoices() {
+  return new Set([...document.querySelectorAll("[data-transpose-voice]:checked")]
+    .map(input => input.dataset.transposeVoice));
+}
+
+function midiVoiceKey(e) { return `${e.track}:${e.channel}`; }
+
+function midiVoiceColor(e) {
+  return `hsl(${((e.track || 0) * 137.508 + (e.channel || 0) * 47) % 360},65%,65%)`;
+}
+
+function midiVoiceInstrument(e) {
+  if (e.channel === 9) return "GM percussion";
+  if (e.instrumentName) return e.instrumentName;
+  if (e.program == null) return "Instrument unspecified";
+  const families = ["Piano", "Chromatic percussion", "Organ", "Guitar", "Bass", "Strings", "Ensemble", "Brass", "Reed", "Pipe", "Synth lead", "Synth pad", "Synth effects", "Ethnic", "Percussive", "Sound effects"];
+  return `${families[Math.floor(e.program / 8)]} (GM program ${e.program + 1})`;
+}
+
+function sourceMidiVoices(events) {
+  const voices = new Map();
+  for (const e of events) {
+    const key = midiVoiceKey(e);
+    if (!voices.has(key)) voices.set(key, { ...e, count: 0, low: e.pitch, high: e.pitch, instruments: new Set() });
+    const v = voices.get(key);
+    v.count++; v.low = Math.min(v.low, e.pitch); v.high = Math.max(v.high, e.pitch);
+    v.instruments.add(midiVoiceInstrument(e));
+  }
+  return voices;
+}
+
+function previewMidiVoice(key) {
+  if (!S.composition || S.playing || S.playStarting || S.firmwareUpdating) return;
+  stopVoiceAudition();
+  S.composition.previewVoice = key;
+  S.composition.visibleVoices = key == null ? null : new Set([key]);
+  const voice = sourceMidiVoices(S.composition.originalEvents).get(key);
+  document.getElementById("voicePreviewStatus").textContent = voice
+    ? `Source preview: ${voice.trackName} · ch ${voice.channel + 1} · ${voice.count} notes · ${midiName(voice.low)}–${midiName(voice.high)}. Original pitches; inclusion and drum playback unchanged.`
+    : "Arrangement view · mallet colors restored. All arrangement notes are shown. Include choices and drum playback are unchanged.";
+  document.querySelectorAll("[data-preview-voice]").forEach(button =>
+    button.setAttribute("aria-pressed", String(button.dataset.previewVoice === key)));
+  refreshVoiceViewControls();
+  renderPianoRoll();
+  if (voice) {
+    const first = S.composition.originalEvents.find(e => midiVoiceKey(e) === key);
+    document.getElementById("pianoGrid").scrollLeft = Math.max(0, first.timeMs / 1000 * 80 - 40);
+  }
+}
+
+function refreshVoiceViewControls() {
+  const c = S.composition;
+  const busy = S.playing || S.playStarting || S.firmwareUpdating;
+  document.getElementById("arrangementViewBtn").disabled = !c || !c.visibleVoices || busy;
+  document.getElementById("stopAuditionBtn").disabled = !voiceAudition;
+  document.querySelectorAll("[data-show-voice]").forEach(input => {
+    input.disabled = busy;
+    input.checked = !c || !c.visibleVoices || c.visibleVoices.has(input.dataset.showVoice);
+  });
+}
+
+function setMidiVoiceVisible(key, visible) {
+  const c = S.composition;
+  if (!c || S.playing || S.playStarting || S.firmwareUpdating) return;
+  stopVoiceAudition();
+  if (!c.visibleVoices) c.visibleVoices = new Set(sourceMidiVoices(c.originalEvents).keys());
+  if (visible) c.visibleVoices.add(key); else c.visibleVoices.delete(key);
+  c.previewVoice = null;
+  document.querySelectorAll("[data-preview-voice]").forEach(button => button.setAttribute("aria-pressed", "false"));
+  document.getElementById("voicePreviewStatus").textContent = `Source inspection · track colors · ${c.visibleVoices.size} voices shown. Show only affects this view; Include controls transposition. Use Arrangement to restore mallet colors.`;
+  refreshVoiceViewControls();
+  renderPianoRoll();
+}
+
+let voiceAudition = null;
+function stopVoiceAudition() {
+  if (!voiceAudition) return;
+  const audition = voiceAudition;
+  voiceAudition = null;
+  refreshVoiceViewControls();
+  clearTimeout(audition.timer);
+  audition.context.close().catch(() => {});
+  document.getElementById("voicePreviewStatus").textContent = "Audition stopped. Source preview and inclusion are unchanged.";
+}
+
+async function auditionMidiVoice(key) {
+  if (!S.composition || S.playing || S.playStarting || S.firmwareUpdating) return;
+  previewMidiVoice(key);
+  const Audio = window.AudioContext || window.webkitAudioContext;
+  if (!Audio) { showError("Audio preview is not supported in this browser. Visual preview is still available."); return; }
+  const notes = S.composition.originalEvents.filter(e => midiVoiceKey(e) === key);
+  if (!notes.length) return;
+  const context = new Audio();
+  const audition = { context, timer: null };
+  voiceAudition = audition;
+  refreshVoiceViewControls();
+  try {
+    await context.resume();
+    if (voiceAudition !== audition) return;
+    const start = context.currentTime + 0.05;
+    const first = notes[0].timeMs;
+    const excerpt = notes.filter(e => e.timeMs - first < 20000).slice(0, 512);
+    let end = 0;
+    for (const e of excerpt) {
+      const offset = (e.timeMs - first) / 1000;
+      const duration = Math.min(1, Math.max(0.08, e.durMs / 1000));
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+      oscillator.type = "sine";
+      oscillator.frequency.value = 440 * Math.pow(2, (e.pitch - 69) / 12);
+      gain.gain.setValueAtTime(0, start + offset);
+      gain.gain.linearRampToValueAtTime(0.035 * e.vel / 127, start + offset + 0.008);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + offset + duration);
+      oscillator.connect(gain); gain.connect(context.destination);
+      oscillator.start(start + offset); oscillator.stop(start + offset + duration);
+      end = Math.max(end, offset + duration);
+    }
+    document.getElementById("voicePreviewStatus").textContent = `Auditioning ${notes[0].trackName} · ch ${notes[0].channel + 1}: first ${end.toFixed(1)}s from its first note (${excerpt.length} notes). Synthetic pitches on computer only, not original instrument sounds. Inclusion unchanged.`;
+    audition.timer = setTimeout(() => {
+      if (voiceAudition === audition) stopVoiceAudition();
+    }, (end + 0.1) * 1000);
+  } catch (error) {
+    if (voiceAudition === audition) stopVoiceAudition();
+    showError("Could not audition track: " + error.message);
+  }
+}
+
+function renderTransposeVoices() {
+  const voices = sourceMidiVoices(S.composition.originalEvents);
+  const container = document.getElementById("transposeVoices");
+  container.innerHTML = [...voices].map(([key, e]) =>
+    `<div class="voice-row" style="--voice-color:${midiVoiceColor(e)}">` +
+    `<label class="voice-toggle"><input type="checkbox" data-show-voice="${key}" checked onchange="setMidiVoiceVisible('${key}', this.checked)">Show</label>` +
+    `<label class="voice-toggle"><input type="checkbox" data-transpose-voice="${key}" ${e.channel === 9 ? "" : "checked"}>Include</label>` +
+    `<span class="voice-description">${escapeHtml(e.trackName)} · ch ${e.channel + 1} · ${escapeHtml([...e.instruments].join(", "))} · ${e.count} notes · ${midiName(e.low)}–${midiName(e.high)}</span>` +
+    `<button type="button" class="pill" data-preview-voice="${key}" aria-pressed="false" onclick="previewMidiVoice('${key}')">Solo view</button>` +
+    `<button type="button" class="pill" data-audition-voice="${key}" onclick="auditionMidiVoice('${key}')">Audition</button></div>`).join("");
+  document.getElementById("voicePreviewStatus").textContent = "Arrangement view · mallet colors. Use Show or Solo view to inspect source tracks; Include chooses what to transpose. Audition plays on this computer only.";
+  container.querySelectorAll("[data-transpose-voice]").forEach(input =>
+    input.addEventListener("change", refreshTransposeControls));
+}
+
+function refreshTransposeControls() {
+  refreshVoiceViewControls();
+  const c = S.composition;
+  const ready = typeof MidiTranspose !== "undefined";
+  const busy = S.playing || S.playStarting || S.firmwareUpdating;
+  const target = ready ? MidiTranspose.targetPitches(S.mapping, S.count) : [];
+  document.getElementById("transposeBtn").disabled = !c || busy || !target.length;
+  document.getElementById("restoreMidiBtn").disabled = !c || !c.transposition || busy;
+  document.getElementById("transposeMode").disabled = busy;
+  document.querySelectorAll("[data-transpose-voice]").forEach(input => { input.disabled = busy; });
+  document.querySelectorAll("[data-preview-voice], [data-audition-voice]").forEach(button => { button.disabled = busy; });
+  document.getElementById("transposeTarget").textContent = !ready
+    ? "Transpose component unavailable. Restart the MIDI server and reload this page."
+    : target.length ? `Instrument: ${target.map(midiName).join(", ")}`
+      : "Connect and enumerate the instrument, then assign its pitches.";
+  if (!c) return;
+  const applied = c.transposition;
+  const summary = document.getElementById("transposeSummary");
+  if (!applied) {
+    summary.textContent = "Original notes. Click Transpose to fit this file to the instrument.";
+  } else {
+    const counts = applied.counts;
+    const schedule = buildSchedule(c.events, getTempoScale());
+    const merged = schedule.filter(e => e.suppressed && e.suppressedReason !== "restrike").length;
+    const restrikes = schedule.filter(e => e.suppressedReason === "restrike").length;
+    const played = schedule.filter(e => e.slot >= 0 && !e.suppressed).length;
+    const pending = applied.mode !== document.getElementById("transposeMode").value ||
+      applied.voiceKeys !== JSON.stringify([...selectedTransposeVoices()].sort());
+    const change = transpositionIsStale()
+      ? " Instrument mapping changed: transpose again or restore before playing."
+      : pending ? " Options changed: click Transpose to apply." : "";
+    summary.textContent = `Applied ${applied.shift >= 0 ? "+" : ""}${applied.shift} semitones · ` +
+      `${counts.exact} exact · ${counts.folded} octave moves · ${counts.substituted} substitutions · ` +
+      `${counts.unmapped} unplayable · ${applied.excluded} excluded by track · ` +
+      `${merged} merged · ${restrikes} omitted under 50 ms · ${played} playable at ${getTempoScale().toFixed(2)}x.` + change;
+  }
+  if (typeof updateSaveToLibraryBtn === "function") updateSaveToLibraryBtn();
+}
+
+function applyTransposition() {
+  if (!S.composition || S.playing || S.playStarting || S.firmwareUpdating) return;
+  previewMidiVoice(null);
+  hideMessages();
+  try {
+    if (typeof MidiTranspose === "undefined") throw new Error("Restart the MIDI server and reload the page");
+    const voices = selectedTransposeVoices();
+    const result = MidiTranspose.findBest(S.composition.originalEvents,
+      MidiTranspose.targetPitches(S.mapping, S.count), {
+        mode: document.getElementById("transposeMode").value, voices, tempoScale: getTempoScale(),
+      });
+    S.composition.events = result.events;
+    S.composition.transposition = { ...result, mappingKey: transposeMappingKey(),
+      voiceKeys: JSON.stringify([...voices].sort()) };
+    showComposition();
+  } catch (e) {
+    showError("Transposition could not be applied: " + e.message);
+  }
+}
+
+function restoreOriginalMidi() {
+  if (!S.composition || S.playing || S.playStarting || S.firmwareUpdating) return;
+  previewMidiVoice(null);
+  S.composition.events = S.composition.originalEvents;
+  S.composition.transposition = null;
+  hideMessages();
+  showComposition();
 }
 
 function pitchToSlot(pitch) {
@@ -1949,7 +2227,10 @@ function pitchIsFallback(pitch) {
 // cluster and tag the others as suppressed.
 const DEDUP_WINDOW_MS = 5;
 function buildSchedule(events, tempoScale = 1.0) {
-  const out = events.map(e => ({ ...e, slot: pitchToSlot(e.pitch), suppressed: false }));
+  const connectedMapping = S.mapping.slice(0, S.count);
+  const out = events.map(e => ({ ...e, slot: e.transposeKind
+    ? (e.transposeKind === "unmapped" ? -1 : connectedMapping.indexOf(e.pitch))
+    : pitchToSlot(e.pitch), suppressed: false }));
   // event.timeMs is in the file's original time domain; playback divides it
   // by tempoScale. Convert the real-time collision window back into that
   // original domain before comparing notes.
@@ -1965,7 +2246,7 @@ function buildSchedule(events, tempoScale = 1.0) {
       winnerBySlot[e.slot] = e;
     }
   }
-  return out;
+  return events.some(e => e.transposeKind) ? MidiTranspose.enforceRestrike(out, tempoScale) : out;
 }
 
 function showComposition() {
@@ -1979,12 +2260,15 @@ function showComposition() {
   // Build the post-routing, post-dedup schedule. Counts and visualization
   // both work off this so the user sees exactly what will fire.
   c.scheduled = buildSchedule(c.events, getTempoScale());
-  let mapped = 0, rerouted = 0, dropped = 0, merged = 0;
+  let mapped = 0, rerouted = 0, dropped = 0, merged = 0, restrikes = 0;
   const counts = new Map();
   for (const e of c.scheduled) {
     counts.set(e.pitch, (counts.get(e.pitch) || 0) + 1);
     if (e.slot < 0) { dropped++; continue; }
-    if (e.suppressed) { merged++; continue; }
+    if (e.suppressed) {
+      if (e.suppressedReason === "restrike") restrikes++; else merged++;
+      continue;
+    }
     if (pitchIsFallback(e.pitch)) rerouted++; else mapped++;
   }
   const distinctPitches = counts.size;
@@ -1997,10 +2281,12 @@ function showComposition() {
   document.getElementById("statsBar").innerHTML =
     `<span>mapped: ${mapped}</span><span>rerouted: ${rerouted}</span>` +
     `<span>merged: ${merged}</span><span>dropped: ${dropped}</span>` +
+    (c.transposition ? `<span>restrike omissions: ${restrikes}</span>` : "") +
     `<span>pitches: ${[...counts.keys()].sort((a,b)=>a-b).map(p => `${midiName(p)}(${counts.get(p)})`).join(" ")}</span>`;
 
   renderFallbackTable(counts);
   renderPianoRoll();
+  refreshTransposeControls();
 }
 
 // Fallback (unmapped pitch) routing UI. Lists every pitch in the composition
@@ -2009,6 +2295,11 @@ function showComposition() {
 function renderFallbackTable(counts) {
   const panel = document.getElementById("fallbackPanel");
   const tbody = document.getElementById("fallbackTableBody");
+  if (S.composition && S.composition.transposition) {
+    panel.style.display = "none";
+    tbody.innerHTML = "";
+    return;
+  }
   const directPitches = new Set(S.mapping.filter(p => p != null));
   const unmapped = [...counts.keys()].filter(p => !directPitches.has(p)).sort((a, b) => a - b);
   if (unmapped.length === 0) { panel.style.display = "none"; tbody.innerHTML = ""; return; }
@@ -2058,7 +2349,10 @@ function renderPianoRoll() {
   const grid = document.getElementById("pianoGrid");
   const labelsEl = document.getElementById("pianoLabels");
 
-  const sched = c.scheduled || c.events;
+  const sourcePreview = c.visibleVoices != null;
+  const sched = sourcePreview
+    ? c.originalEvents.filter(e => c.visibleVoices.has(midiVoiceKey(e)))
+    : (c.scheduled || c.events);
 
   // Y axis: chromatic, one row per semitone across the union of mapped
   // pitches and pitches that appear in the song. Mapped pitches read like
@@ -2158,7 +2452,8 @@ function renderPianoRoll() {
     const slot = e.slot != null ? e.slot : pitchToSlot(e.pitch);
     const dropped = slot < 0;
     const fb = !dropped && pitchIsFallback(e.pitch);
-    const color = dropped ? "var(--text-dim)" : (SLOT_COLORS[slot] || "var(--accent)");
+    const color = sourcePreview ? midiVoiceColor(e)
+      : dropped ? "var(--text-dim)" : (SLOT_COLORS[slot] || "var(--accent)");
 
     const velFrac = Math.max(0.15, Math.min(1, (e.vel || 0) / 127));
     const barHeightPct = (0.2 + velFrac * 0.8) * rh;
@@ -2166,14 +2461,17 @@ function renderPianoRoll() {
     const opacity = 0.4 + velFrac * 0.55;
 
     const classes = ["note-bar"];
-    if (dropped) classes.push("unmapped");
-    if (fb) classes.push("fallback");
-    if (e.suppressed) classes.push("suppressed");
+    if (!sourcePreview && dropped) classes.push("unmapped");
+    if (!sourcePreview && fb) classes.push("fallback");
+    if (!sourcePreview && e.suppressed) classes.push("suppressed");
 
     const arrow = fb ? ` (rerouted -> addr ${slot})` : "";
-    const tail = e.suppressed ? ` · merged` : (dropped ? ` · dropped` : "");
+    const tail = e.suppressed ? (e.suppressedReason === "restrike" ? " · omitted: under 50 ms" : " · merged") : (dropped ? ` · dropped` : "");
     const dest = slot >= 0 ? ` -> addr ${slot}` : "";
-    h += `<div class="${classes.join(" ")}" title="${midiName(e.pitch)} v${e.vel} @ ${(e.timeMs/1000).toFixed(2)}s · ${(e.durMs/1000).toFixed(2)}s${dest}${arrow}${tail}" style="left:${x}px;width:${widthPx}px;top:calc(${barTopPct}% + 1px);height:calc(${barHeightPct}% - 2px);background:${color};opacity:${opacity};z-index:5"></div>`;
+    const source = e.transposeKind ? ` · original ${midiName(e.originalPitch)} · ${e.transposeKind}` : "";
+    const identity = `${e.trackName || `Track ${e.track + 1}`} · ch ${e.channel + 1} · ${midiVoiceInstrument(e)}`;
+    const detail = sourcePreview ? " · source preview (not drum playback)" : `${dest}${arrow}${tail}${source}`;
+    h += `<div class="${classes.join(" ")}" title="${escapeHtml(identity)} · ${midiName(e.pitch)} v${e.vel} @ ${(e.timeMs/1000).toFixed(2)}s · ${(e.durMs/1000).toFixed(2)}s${detail}" style="left:${x}px;width:${widthPx}px;top:calc(${barTopPct}% + 1px);height:calc(${barHeightPct}% - 2px);background:${color};opacity:${opacity};z-index:5"></div>`;
   }
   h += `</div>`;
   grid.innerHTML = h;
@@ -2253,6 +2551,7 @@ function stopPlayback(reason = "user") {
   S.timeouts = [];
   if (S.animFrame) cancelAnimationFrame(S.animFrame);
   S.playing = false;
+  refreshTransposeControls();
   S.scheduleMasterMa = 0;
   document.getElementById("playBtn").textContent = "▶ Play";
   document.getElementById("playBtn").classList.remove("playing");
@@ -2317,12 +2616,19 @@ function stopPlayPolling() {
 }
 
 async function play() {
+  stopVoiceAudition();
+  if (S.playStarting) return;
   if (S.firmwareUpdating) {
     showError("Firmware update in progress");
     return;
   }
   if (!S.composition) return;
   if (S.playing) { stopPlayback(); return; }
+  previewMidiVoice(null);
+  if (transpositionIsStale()) {
+    showError("The instrument mapping changed. Click Transpose again or Restore original before playing.");
+    return;
+  }
   hideMessages();
 
   const c = S.composition;
@@ -2361,6 +2667,8 @@ async function play() {
   S.scale = scale;
   S.scheduleMasterMa = cur;
 
+  S.playStarting = true;
+  refreshTransposeControls();
   try {
     const r = await fetch(API_BASE + "/api/play", {
       method: "POST",
@@ -2382,9 +2690,13 @@ async function play() {
     showError("Play failed: " + e.message);
     S.scheduleMasterMa = 0;
     return;
+  } finally {
+    S.playStarting = false;
+    refreshTransposeControls();
   }
 
   S.playing = true;
+  refreshTransposeControls();
   document.getElementById("playBtn").textContent = "■ Stop";
   document.getElementById("playBtn").classList.add("playing");
   document.getElementById("progressContainer").style.display = "block";
@@ -2430,6 +2742,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (e.dataTransfer.files[0]) readMidiFile(e.dataTransfer.files[0]);
   });
   fi.addEventListener("change", () => { if (fi.files[0]) readMidiFile(fi.files[0]); });
+  document.getElementById("transposeBtn").addEventListener("click", applyTransposition);
+  document.getElementById("restoreMidiBtn").addEventListener("click", restoreOriginalMidi);
+  document.getElementById("transposeMode").addEventListener("change", refreshTransposeControls);
 
   function readMidiFile(file) {
     const r = new FileReader();
@@ -2703,8 +3018,8 @@ document.addEventListener("DOMContentLoaded", async () => {
         throw new Error(err.error || ("HTTP " + r.status));
       }
       const buf = await r.arrayBuffer();
+      if (!loadFromMIDI(buf, path.split("/").pop())) return false;
       librarySelectedPath = path;
-      loadFromMIDI(buf, path.split("/").pop());
       // loadFromMIDI sets loadedFromLibrary=false by default; mark it after
       // so "Save current" knows this came from the library already.
       S.loadedFromLibrary = true;
@@ -2789,6 +3104,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Exposed at module scope so loadFromMIDI() can call it after each load.
   window.updateSaveToLibraryBtn = function() {
     const hasBuf = !!S.loadedMidiBuf;
+    librarySaveBtn.textContent = S.composition && S.composition.transposition ? "Save original" : "Save current";
     librarySaveBtn.disabled = !(libraryConfigured && hasBuf && !S.loadedFromLibrary);
     if (!hasBuf) {
       librarySaveBtn.title = "Load a MIDI file first";
@@ -2798,7 +3114,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       librarySaveBtn.title = "Library not configured";
     } else {
       const where = libraryCwd ? `library/${libraryCwd}` : "the library folder";
-      librarySaveBtn.title = `Copy "${S.loadedMidiName}" into ${where}`;
+      librarySaveBtn.title = `Copy original MIDI "${S.loadedMidiName}" into ${where}. Transposition applies only to this playback view.`;
     }
   };
 

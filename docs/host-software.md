@@ -46,6 +46,76 @@ The server owns the serial port; do not run another ring client against the same
 port while it is active. The local pitch mapping is written to `mapping.json`.
 The file is machine/instrument state and is ignored by Git.
 
+### Transpose an imported MIDI
+
+Files open with their original pitches. Click **Transpose**, above the piano
+roll, to choose and apply the best uniform shift for the pitches assigned to
+the enumerated instrument. Each click starts from the original imported notes.
+
+- **Transpose only** keeps intervals and leaves unavailable notes unplayable.
+- **Transpose + octave folding** (the initial button option) also moves notes
+  into available octaves of the same pitch class.
+- **Also substitute missing notes** permits nearby pitch-class substitutions.
+
+Open **Tracks to include when transposing** to choose voices. Track and channel
+identities are retained, including multichannel Type 0 files. Channel 10 is
+initially unchecked as the General MIDI percussion channel; enable it explicitly
+for files that use that channel melodically. Changing options or selections
+does nothing to the notes until **Transpose** is clicked.
+
+Each track/channel row shows its note count, pitch range, and instrument metadata
+(or GM family/program number when present). Controls sit directly below each
+track description, rather than at the far right of a wide screen. **Show**
+checkboxes immediately hide/show source voices; **Include** remains a separate
+transposition choice. **Solo view** isolates that voice's
+original source notes in the piano roll and scrolls to its first note, even if
+the voice is unchecked or excluded from the current adaptation. Track/channel
+colors match the note bars during source inspection; hover a note for its source
+identity and velocity. **Arrangement · mallet colors** returns to the current
+original/transposed playback view, restores all arrangement notes and the
+original mallet color scheme, and resets Show checkboxes. The arrangement button
+is disabled when that view is already active; Stop computer audition is disabled
+when no audition is running.
+Previewing never changes the Include checkboxes or the robot playback schedule.
+
+**Audition** plays a synthetic sine-tone excerpt on the computer only, beginning
+at that voice's first note and limited to 20 seconds of note starts or 512 notes
+(plus at most one second of decay). It is a melody/rhythm aid, not a GM soundfont
+or a drum command; percussion is also rendered as pitches. **Stop audition**,
+switching preview, opening a valid file, transposing/restoring, or starting drum
+playback stops the audition. Drum playback returns the roll to arrangement view.
+
+The result reports the shift, exact matches, octave moves, substitutions,
+unplayable notes, track exclusions, merged hits, and restrike omissions. The piano
+roll shows the transformed pitches; note tooltips retain the original pitch.
+Timing, tempo changes, durations, and velocities are retained. For transposed
+playback, the existing 5 ms simultaneous-hit merge keeps the loudest hit, then
+later hits less than 50 ms after the previous retained hit on a mallet are
+omitted. This check uses the selected playback speed and the rounded millisecond
+schedule; notes are never delayed to make them fit. The 50 ms value is an
+instrument guideline, not a measurement of physical impact timing.
+
+**Restore original** returns to the imported notes and existing manual fallback
+routing. Transposed playback uses the instrument's exact pitch map instead of
+saved fallback routes. A changed instrument mapping requires transposing again
+or restoring before playback. Transpose and restore are disabled during playback.
+
+Adaptation applies only to the current playback view. Opening any file, including
+the next library track, starts from its original notes. **Save original** copies
+the unchanged source MIDI to the library; this feature does not export a rewritten
+MIDI file or change the instrument's pitch assignments. Restart the MIDI server
+and reload the page after installing this change so it can serve the new
+`player/midi_transpose.js` asset.
+
+Software validation: `node --test tests/test_midi_transpose.cjs` exercises the
+fitting engine, MIDI import/restore, tempo and channel handling, collision rules,
+and the schedule submitted to a simulated server. Run the existing playback
+suite with `py -m unittest discover -s tests -p test_ring_playback.py`. Browser
+checks use an isolated simulated instrument; musical quality and physical
+playback of adapted files still require listening on the instrument.
+
+### Playback and status
+
 The HTTP API, payloads, timing compensation, and integration examples are
 documented in `midi_server_api.md`.
 

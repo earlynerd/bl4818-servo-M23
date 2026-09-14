@@ -235,3 +235,10 @@ When a decision is reversed or superseded, append a new entry rather than rewrit
 - **Why:** Without an explicit logical zero, the continuous position origin is the arbitrary rotor position at power-up. Persisting that boot-relative coordinate caused false first-home warnings even when the physical drum contact had not moved.
 - **Supersedes:** the comparison-coordinate portion of “2026-08-13 — Homing and strike motion have local encoder safety bounds”; explicit save rather than per-home flash writing remains unchanged.
 - **Affects:** `src/strike.c`, `include/strike.h`, `src/persist.c`, `protocol.md`, and `docs/parameters.md`.
+
+## 2026-09-13 — MIDI transposition is an explicit, reversible player action
+
+- **Decision:** Imported and library MIDI files retain their original pitches until **Transpose** is clicked. Each application fits the original events to the enumerated instrument's configured pitches, with selectable octave folding, optional pitch substitutions, and track/channel inclusion. **Restore original** reinstates the original events; source bytes and instrument mappings are preserved.
+- **Why:** Automatic fitting on open would alter already arranged pieces. Exact pitch sets, rather than scale names or range alone, govern compatibility.
+- **Tradeoffs:** Transposed schedules merge simultaneous hits and omit later same-mallet hits under the 50 ms guideline at the chosen speed. Manual fallback routes are bypassed; a changed instrument map requires reapplication. Saving to the library retains the source MIDI; adaptation is not persisted or exported.
+- **Affects:** Browser MIDI import, piano roll, scheduling, and `docs/host-software.md`. Server dispatch and firmware protocols are unchanged.

@@ -1868,15 +1868,21 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
-        if self.path in ("/player.html", "/looper.html"):
-            html_path = PLAYER_HTML if self.path == "/player.html" else LOOPER_HTML
+        player_assets = {
+            "/player.html": PLAYER_HTML,
+            "/looper.html": LOOPER_HTML,
+            "/midi_transpose.js": ROOT / "player" / "midi_transpose.js",
+        }
+        if self.path in player_assets:
+            asset_path = player_assets[self.path]
             try:
-                data = html_path.read_bytes()
+                data = asset_path.read_bytes()
             except FileNotFoundError:
-                self._json(500, {"error": f"Missing {html_path}"})
+                self._json(500, {"error": f"Missing {asset_path}"})
                 return
             self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
+            content_type = "text/javascript" if self.path.endswith(".js") else "text/html"
+            self.send_header("Content-Type", f"{content_type}; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))
             self._cors()
             self.end_headers()

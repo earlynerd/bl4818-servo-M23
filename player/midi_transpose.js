@@ -34,28 +34,11 @@ const MidiTranspose = (() => {
     return { pitch: Math.max(0, Math.min(127, shifted)), kind: "unmapped", distance: 0 };
   }
 
-  // Count against the integer milliseconds actually sent to the scheduler.
-  function restrikeCount(events, lookup, tempoScale) {
-    const previous = new Map();
-    let collisions = 0;
-    for (const e of events) {
-      const mapped = lookup.get(e.pitch);
-      if (mapped.kind === "unmapped") continue;
-      const ms = Math.round(e.timeMs / tempoScale);
-      const last = previous.get(mapped.pitch);
-      if (last !== undefined && ms - last < MIN_GAP_MS) collisions++;
-      else previous.set(mapped.pitch, ms);
-    }
-    return collisions;
-  }
-
   function findBest(events, pitches, options = {}) {
     const mode = options.mode ?? "fold";
     if (!MODES.includes(mode)) throw new Error("Unknown transposition mode");
     const target = targetPitches(pitches, pitches.length);
     if (!target.length) throw new Error("Assign pitches to connected actuators first");
-    const tempoScale = options.tempoScale ?? 1;
-    if (!Number.isFinite(tempoScale) || tempoScale <= 0) throw new Error("Invalid tempo");
     const selected = events.filter(e => !options.voices || options.voices.has(voiceKey(e)))
       .slice().sort((a, b) => a.timeMs - b.timeMs);
     if (!selected.length) throw new Error("Select at least one track with notes");
@@ -74,14 +57,13 @@ const MidiTranspose = (() => {
         counts[mapped.kind] += count;
         distance += mapped.distance * count;
       }
-      const collisions = restrikeCount(selected, lookup, tempoScale);
-      // Preserve pitch classes first, then register; use collisions and travel
-      // to break ties. An already fitting piece prefers a zero shift.
+      // Preserve pitch classes first, then register and minimize travel.
+      // Timing and playback speed do not influence the chosen transposition.
       const score = [counts.unmapped + counts.substituted, counts.unmapped,
-        -counts.exact, collisions, distance, Math.abs(shift), shift];
+        -counts.exact, distance, Math.abs(shift), shift];
       const better = !best || score.some((value, i) =>
         value < best.score[i] && score.slice(0, i).every((v, j) => v === best.score[j]));
-      if (better) best = { shift, counts, collisions, lookup, score };
+      if (better) best = { shift, counts, lookup, score };
     }
     return {
       shift: best.shift,

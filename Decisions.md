@@ -242,3 +242,17 @@ When a decision is reversed or superseded, append a new entry rather than rewrit
 - **Why:** Automatic fitting on open would alter already arranged pieces. Exact pitch sets, rather than scale names or range alone, govern compatibility.
 - **Tradeoffs:** Transposed schedules merge simultaneous hits and omit later same-mallet hits under the 50 ms guideline at the chosen speed. Manual fallback routes are bypassed; a changed instrument map requires reapplication. Saving to the library retains the source MIDI; adaptation is not persisted or exported.
 - **Affects:** Browser MIDI import, piano roll, scheduling, and `docs/host-software.md`. Server dispatch and firmware protocols are unchanged.
+
+## 2026-09-15 — Transposition ranking excludes mallet timing
+
+- **Decision:** Remove the estimated same-mallet collision count from candidate ranking. Retain the existing ordered pitch-fit, exact-match, movement, and shift preferences; the chosen shift is independent of note timing and playback speed.
+- **Why:** Closely spaced notes should not cause a less desirable octave placement when pitch fit is equal.
+- **Supersedes:** The collision tie-breaker in the initial MIDI transposition implementation. The separate 50 ms playback restrike handling remains unchanged.
+- **Affects:** `player/midi_transpose.js`, the browser Transpose action, and `docs/host-software.md`.
+
+## 2026-09-19 — Multiple serial rings share one MIDI player clock
+
+- **Decision:** Add repeatable `--ring NAME=PORT,COUNT` configurations, fixed global slots, independent serial bridges and per-ring playback workers on one monotonic timeline. Keep wire addresses/protocol and single-ring `-p` behavior unchanged. Global MIDI-time chords retain no-reply dispatch across ring boundaries.
+- **Why:** Each ring supports at most 16 actuators; additional adapters expand the instrument without making one ring's reply timeout stall another ring's schedule.
+- **Tradeoffs:** Expected counts pin slot offsets; mismatched discovery blocks new playback. Named-ring mappings and browser slot settings are bound to the configured layout. Equal-size physical ring swaps require operator care. Actual cross-ring impact alignment remains a bench gate. Firmware updates stay in single-ring maintenance mode.
+- **Affects:** `scripts/ring_fleet.py`, `scripts/ring_midi_server.py`, player/looper ring labels, `docs/host-software.md`, and `midi_server_api.md`.

@@ -45,6 +45,18 @@ test('octave folding keeps pitch classes and missing notes stay explicit', () =>
   assert.equal(transpose.mapPitch(58, 0, pan, 'adapt').kind, 'exact');
 });
 
+test('pitch fitting does not change octave placement to avoid closely spaced notes', () => {
+  // Both 0 and -12 give two exact matches and one octave fold. Previously,
+  // the closely spaced final two notes made -12 win at 1x, despite moving
+  // the whole piece farther from its original register.
+  for (const times of [[0, 100, 120], [0, 400, 480], [0, 40, 48]]) {
+    const input = events([60, 72, 84]).map((e, i) => ({ ...e, timeMs: times[i] }));
+    const result = transpose.findBest(input, [60, 72]);
+    assert.equal(result.shift, 0);
+    assert.deepEqual(result.events.map(e => e.pitch), [60, 72, 72]);
+  }
+});
+
 test('all chromatic notes expose substitutions; actual instrument defines the scale', () => {
   const input = events(Array.from({ length: 12 }, (_, i) => 60 + i));
   const fold = transpose.findBest(input, drum);

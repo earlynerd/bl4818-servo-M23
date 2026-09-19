@@ -629,10 +629,10 @@
 <script>
 // ─── Config ──────────────────────────────────────────────────
 const API_BASE = ""; // same-origin (the Python bridge serves this page)
-const STORAGE_KEY = "robotdrum.mapping.v1";
-const STORAGE_KEY_TRIM = "robotdrum.trim.v1";
+let STORAGE_KEY = "robotdrum.mapping.v1";
+let STORAGE_KEY_TRIM = "robotdrum.trim.v1";
 const STORAGE_KEY_VEL = "robotdrum.velfloor.v1";
-const STORAGE_KEY_FB = "robotdrum.fallback.v1";
+let STORAGE_KEY_FB = "robotdrum.fallback.v1";
 const STORAGE_KEY_KBD = "robotdrum.kbd.v1";
 const STORAGE_KEY_COMP = "robotdrum.comp.v1";
 const STORAGE_KEY_LIB = "robotdrum.library.v1"; // library UI prefs: shuffle/autoplay/sort/favOnly
@@ -862,7 +862,7 @@ function renderFirmware(state) {
   document.getElementById("firmwareVersion").disabled = !!(state && state.busy);
   document.getElementById("firmwareBuildBtn").disabled = !!(state && state.busy);
   document.getElementById("firmwareUpdateBtn").disabled =
-    !!(state && state.busy) || !artifact;
+    !!(state && state.busy) || !artifact || (state && state.update_supported === false);
   for (const id of [
     "homeBtn", "recoverBtn", "cancelBtn", "stopMotorsBtn", "enumBtn", "arpBtn",
     "refreshStatusBtn", "busProbeBtn", "busResetBtn"
@@ -1063,7 +1063,9 @@ async function refreshStatus() {
       // bucket. The first in-session strike on this slot will seed the EMA.
       if (S.slots[i] && S.slots[i].last_timing) S.strikeTiming[i] = S.slots[i].last_timing;
     }
-    setConn(true, `${S.count} device(s) on ring${j.status_deferred ? " · cached state" : ""}`);
+    const ringCount = Array.isArray(j.rings) ? j.rings.length : 1;
+    const ready = !j.rings || j.rings.every(r => r.ready);
+    setConn(ready, `${S.count} device(s) · ${ringCount} ring(s)${!ready ? " · check rings" : j.status_deferred ? " · cached state" : ""}`);
     rebuildMappingIfNeeded();
     renderMapTable();
     refreshTransposeControls();
@@ -1208,6 +1210,13 @@ function loadMapping() {
 async function fetchServerMapping() {
   try {
     const j = await api("GET", "/api/mapping");
+    if (j.context) {
+      STORAGE_KEY = "robotdrum.mapping.v1." + j.context;
+      STORAGE_KEY_TRIM = "robotdrum.trim.v1." + j.context;
+      STORAGE_KEY_FB = "robotdrum.fallback.v1." + j.context;
+      S.trim = loadTrim();
+      S.fallback = loadFallback();
+    }
     if (j && Array.isArray(j.mapping)) {
       return j.mapping.map(v => (Number.isInteger(v) ? v : null));
     }
@@ -1368,7 +1377,7 @@ function renderMapTable() {
     const noteTitle = pitch == null ? "" : ` title="${midiName(pitch)}"`;
     const trimPct = Math.round((S.trim[i] ?? 1.0) * 100);
     h += `<tr>
-      <td><span class="swatch" style="background:${color}"></span>${i}</td>
+      <td><span class="swatch" style="background:${color}"></span>${i}${slot.ring ? `<small style="display:block;font-size:9px" title="${escapeHtml(slot.port)}">${escapeHtml(slot.ring)}:${slot.local_address}</small>` : ""}</td>
       <td><input type="number" min="0" max="127" step="1" data-slot="${i}" value="${pitch == null ? "" : pitch}" placeholder="—"${noteTitle}></td>
       <td class="${homed && !faulted ? 'homed' : 'unhomed'}"${stateTitle}>${stateText}</td>
       <td style="white-space:nowrap">
@@ -1451,6 +1460,7 @@ function openCfgModal(slot) {
   target.options[0].textContent = `Selected actuator (addr ${slot})`;
   swatch.style.background = SLOT_COLORS[slot] || "var(--text-muted)";
   title.textContent = `Strike Config — addr ${slot}`;
+  if (S.slots[slot]?.ring) title.textContent += ` · ${S.slots[slot].ring}:${S.slots[slot].local_address}`;
   meta.textContent = `pitch ${pitch == null ? "— (unmapped)" : `${midiName(pitch)} (${pitch})`}`;
   document.getElementById("cfgStatus").textContent = "changes apply live";
   document.getElementById("cfgStatus").style.color = "var(--text-dim)";
@@ -2188,7 +2198,7 @@ function applyTransposition() {
     const voices = selectedTransposeVoices();
     const result = MidiTranspose.findBest(S.composition.originalEvents,
       MidiTranspose.targetPitches(S.mapping, S.count), {
-        mode: document.getElementById("transposeMode").value, voices, tempoScale: getTempoScale(),
+        mode: document.getElementById("transposeMode").value, voices,
       });
     S.composition.events = result.events;
     S.composition.transposition = { ...result, mappingKey: transposeMappingKey(),

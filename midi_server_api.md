@@ -2,7 +2,7 @@
 
 `scripts/ring_midi_server.py` is the host-side bridge between the ring bus
 and anything that wants to make the actuators play music or notification
-chimes. It owns the serial port, exposes a small REST surface over HTTP,
+chimes. It owns one or more serial ports, exposes a small REST surface over HTTP,
 and serves the browser-based player UI as a side benefit.
 
 This document is the integration reference for that REST surface.
@@ -19,6 +19,7 @@ endpoints are documented for completeness and for the browser player.
 ```
 python scripts/ring_midi_server.py
 python scripts/ring_midi_server.py -p COM7 --http-port 8765
+python scripts/ring_midi_server.py --ring pan=COM7,14 --ring drum=COM8,10
 ```
 
 Common flags:
@@ -26,6 +27,7 @@ Common flags:
 | Flag                  | Default       | Purpose                                                                |
 |-----------------------|---------------|------------------------------------------------------------------------|
 | `-p`, `--port`        | auto-detect   | Serial port for the ring bus                                           |
+| `--ring`             | (none)        | Repeat `NAME=PORT,COUNT` for named rings; each expected count is 1–16; exclusive with `-p` |
 | `--baud`              | 250000        | Ring baud rate                                                         |
 | `--host`              | `127.0.0.1`   | HTTP bind host. Set to `0.0.0.0` to expose on the LAN                  |
 | `--http-port`         | 8765          | HTTP bind port                                                         |
@@ -83,7 +85,42 @@ not need to keep the connection open.
 
 ### Mapping: slot ↔ pitch
 
-The physical ring has N actuators ("slots", addressed 0..N-1). The
+In named-ring mode all API `address`, `addresses`, `slot`, and `muted` fields
+refer to **global slots**, formed by concatenating configured rings in CLI
+order. For `pan=COM7,14` followed by `drum=COM8,10`, global slot 14 routes to
+local address 0 on COM8. Local wire addresses remain 0–15; no firmware change
+is required. Both canonical and pitch-style `/api/play` span rings.
+
+`GET /api/status` adds `rings: [{name, port, offset, count, expected_count,
+ready}]`; each slot adds `ring`, `port`, `local_address`, and global `address`.
+The top-level `count` stays at the configured total after failed discovery;
+unavailable slots have `homed: false` and `status_error`. New playback requires
+all rings enumerated at their expected counts. `/api/enumerate` stops playback
+before discovery and reports errors without changing global slot positions.
+
+`GET /api/mapping` additionally returns `context` (an opaque layout identifier
+in named-ring mode, null otherwise). Named-ring mappings use
+`mapping-rings.json`, require exactly the configured number of entries, and
+return all-null slots if no matching layout is saved. Browser slot settings
+are namespaced by `context`. Reload clients when changing the server layout.
+Duplicate pitches resolve to the first slot; canonical address events can
+target duplicate-pitch actuators separately.
+
+Independent playback workers share a monotonic start time, cancellation, live
+scaling, mute set and aggregate playback statistics. Each adapter retains its
+own serial lock and latency estimates. No-reply chords are identified from
+the complete song, even when only one note of a chord falls on a ring. Other
+rings continue if one ring times out; cancellation joins every worker before
+sending cancels concurrently across rings. This does not guarantee a specific
+cross-adapter physical timing tolerance.
+
+`GET /api/firmware` adds `update_supported: false` in named-ring mode;
+`POST /api/firmware/update` returns 409 there. Use the existing `-p PORT`
+maintenance workflow for one ring at a time. See
+[`docs/host-software.md`](docs/host-software.md#multiple-rings-on-one-server)
+for setup and validation limits.
+
+In single-ring mode, the physical ring has N actuators ("slots", addressed 0..N-1). The
 mapping is a list of `slots.length` entries where each entry is either
 a MIDI pitch number (0-127) or `null` (slot disabled / not used in this
 song). It's persisted to `mapping.json` at the project root, so it

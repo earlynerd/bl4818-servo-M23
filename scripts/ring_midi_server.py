@@ -2,10 +2,9 @@
 """
 HTTP bridge between a browser-based MIDI player and the ring bus.
 
-Owns the serial port, exposes a tiny REST surface, and serves the static
-player HTML. The browser handles MIDI parsing, scheduling, and the
-pitch -> address mapping; this process just forwards strike commands to
-the ring at the moment they arrive.
+Owns one or more serial ports, exposes a REST surface, and serves the player
+HTML. The browser parses MIDI and maps pitches to global slots; this process
+schedules playback on a shared clock with independent workers per ring.
 
 Endpoints
 ---------
@@ -74,6 +73,7 @@ Usage
 -----
     python scripts/ring_midi_server.py
     python scripts/ring_midi_server.py -p COM7 --http-port 8765
+    python scripts/ring_midi_server.py --ring pan=COM7,14 --ring drum=COM8,10
 
 Then open http://localhost:8765/ in Chrome.
 """
@@ -114,6 +114,7 @@ from ring_bus import (
 )
 from firmware_image import image_metadata, prepare_image
 from ring_bootload import update_ring
+from ring_fleet import RingFleet, parse_ring_specs
 
 
 STRIKE_PARAM_BY_NAME = {
@@ -348,6 +349,7 @@ class Bridge:
         # a queued playback request cannot begin as the applications restart.
         self.maintenance = threading.Event()
         self.count: int = 0
+        self.expected_count: int | None = None
         # Per-address cache of the most recent compact strike-timing snapshot
         # we've seen, keyed by ring address. Populated by ACK_TIMED piggyback
         # on strike replies and by explicit /api/strike-timing polls. Each
@@ -377,6 +379,14 @@ class Bridge:
             self.count = count
             self._status_generation += 1
             self._status_cache.clear()
+        expected = getattr(self, "expected_count", None)
+        if expected is not None:
+            self.strike_timing.clear()
+            self.latency = LatencyTracker()
+        if expected is not None and count not in (0, expected):
+            self.count = 0
+            self.strike_timing.clear()
+            raise RuntimeError(f"expected {expected} actuators, discovered {count}")
 
     def _polling_paused(self) -> bool:
         return self.maintenance.is_set() or (
@@ -843,6 +853,9 @@ class Bridge:
         return results
 
     def _strike_home_with_retry(self, addr: int):
+        expected = getattr(self, "expected_count", None)
+        if expected is not None and self.count != expected:
+            raise RuntimeError("ring count changed during home; re-enumerate")
         try:
             return self.client.strike_home(addr, reply_mode=REPLY_MODE_ACK)
         except RingTimeout as first_exc:
@@ -854,14 +867,17 @@ class Bridge:
                 self.reset_status_cache(self.client.enumerate())
             except RingError:
                 raise first_exc
+            expected = getattr(self, "expected_count", None)
+            if expected is not None and self.count != expected:
+                raise RuntimeError("ring count changed during home retry; re-enumerate")
             return self.client.strike_home(addr, reply_mode=REPLY_MODE_ACK)
 
-    def cancel_all(self) -> dict:
+    def cancel_all(self, *, stop_playback: bool = True) -> dict:
         # Stop the playback worker first so it can't fire a new strike
         # between our cancel calls. player.cancel() blocks on the worker's
         # join, which only takes one strike RTT to return (the worker
         # checks the stop event between strikes and at every wait).
-        if self.player is not None:
+        if stop_playback and self.player is not None:
             self.player.cancel()
         results: list[dict] = []
         with self.lock:
@@ -1094,8 +1110,8 @@ def motif_events_to_canonical(
 
 
 class Player:
-    """Single playback engine: schedule of canonical events fired by one
-    worker thread off the bridge's monotonic clock. Both the motif HTTP API
+    """Single playback engine: canonical events fired by independent ring
+    workers off a shared monotonic clock. Both the motif HTTP API
     (calendar/Slack-style notification chimes) and the browser song player
     route through this — they differ only in how they shape their input
     before calling play(), not in how dispatch works.
@@ -1283,6 +1299,8 @@ class Player:
         with self._play_lock:
             if self.bridge.maintenance.is_set():
                 raise RuntimeError("firmware update in progress")
+            if hasattr(self.bridge, "validate_playback"):
+                self.bridge.validate_playback()
             self._stop_and_join()
             with self._control_lock:
                 self._stop_event = threading.Event()
@@ -1336,8 +1354,9 @@ class Player:
             self._stop_event.set()
             thread = self._thread
         if thread is not None and thread.is_alive() and thread is not threading.current_thread():
-            # 2s is generous: the worker only blocks on serial round-trips
-            # (~1-2 ms each) and on its own stop_event.wait().
+            # The coordinator joins every ring worker; serial operations are
+            # bounded by the configured timeout. Refuse preemption if any
+            # worker still owns an in-flight transaction after this deadline.
             thread.join(timeout=2.0)
         if thread is not None and thread.is_alive():
             raise RuntimeError("previous playback worker did not stop within 2 seconds")
@@ -1354,7 +1373,7 @@ class Player:
             return (
                 not stop.is_set()
                 and self._id == play_id
-                and self._thread is threading.current_thread()
+                and self._stop_event is stop
             )
 
     def _note_dispatch_result(self, result: dict | None, *, transport_error: bool = False) -> None:
@@ -1392,11 +1411,37 @@ class Player:
                 self._fold_stat(bag, float(impact) - previous_prediction_ms)
 
     def _run(self, events: list[dict], stop: threading.Event, play_id: str) -> None:
-        t0 = self._started_monotonic
+        # Every lane shares the same origin and playback controls, but a serial
+        # timeout on one USB adapter cannot delay another adapter's schedule.
+        lane_for = getattr(self.bridge, "playback_lane", lambda address: 0)
+        lanes: dict[int, list[dict]] = {}
         chord_addresses: dict[int, set[int]] = {}
+        for ev in events:
+            lanes.setdefault(lane_for(ev["address"]), []).append(ev)
+            chord_addresses.setdefault(ev["t_ms"], set()).add(ev["address"])
+        if len(lanes) <= 1:
+            self._run_lane(events, stop, play_id, chord_addresses)
+            return
+        workers = []
+        try:
+            for lane, lane_events in lanes.items():
+                worker = threading.Thread(
+                    target=self._run_lane,
+                    args=(lane_events, stop, play_id, chord_addresses),
+                    name=f"player-{play_id}-ring-{lane}", daemon=True,
+                )
+                worker.start()
+                workers.append(worker)
+        finally:
+            # The coordinator remains alive until every lane exits. Existing
+            # cancel/preemption joins therefore fence all serial workers.
+            for worker in workers:
+                worker.join()
+
+    def _run_lane(self, events, stop, play_id, chord_addresses):
+        t0 = self._started_monotonic
         dispatch_events: list[dict] = []
         for ev in events:
-            chord_addresses.setdefault(ev["t_ms"], set()).add(ev["address"])
             planned_comp_ms = self.bridge.latency.compensation_ms(
                 ev["address"], ev["nominal_current_ma"]
             )
@@ -1409,7 +1454,6 @@ class Player:
         )
 
         pending = list(dispatch_events)
-        dispatched = 0
         while pending:
             first = pending.pop(0)
             group = [first]
@@ -1433,7 +1477,6 @@ class Player:
                 candidate_index += 1
 
             is_chord = len(chord_addresses[first["t_ms"]]) > 1
-            dispatched += len(group)
 
             target = t0 + first["trigger_ms"] / 1000.0
             remaining = target - time.monotonic()
@@ -1448,7 +1491,7 @@ class Player:
             with self._control_lock:
                 scale = self._master_scale
                 muted = set(self._muted)
-                self._cursor = dispatched
+                self._cursor += len(group)
 
             active: list[dict] = []
             previous_predictions: dict[int, float | None] = {}
@@ -1501,9 +1544,6 @@ class Player:
                 elif result.get("result_name") in ("NO-ACK", "SENT_NO_ACK"):
                     self._last_prediction_ms.pop(addr, None)
 
-        with self._control_lock:
-            self._cursor = len(events)
-
 
 class FirmwareUpdateManager:
     """Asynchronous build + ring update state owned by the MIDI server.
@@ -1537,7 +1577,11 @@ class FirmwareUpdateManager:
         with self._lock:
             # Everything exposed in _state is JSON-shaped. This gives callers
             # a detached snapshot without sharing nested progress/result maps.
-            return json.loads(json.dumps(self._state))
+            state = json.loads(json.dumps(self._state))
+        state["update_supported"] = getattr(self.bridge, "firmware_update_supported", True)
+        if not state["update_supported"]:
+            state["message"] = "Firmware updates: restart with -p PORT for one ring at a time"
+        return state
 
     def _begin(self, operation: str, phase: str, message: str) -> None:
         with self._lock:
@@ -1673,6 +1717,8 @@ class FirmwareUpdateManager:
             self._fail(exc, log_text)
 
     def start_update(self, expected_crc32: int) -> dict:
+        if not getattr(self.bridge, "firmware_update_supported", True):
+            raise RuntimeError("firmware updates require single-ring mode (-p PORT)")
         expected = int(expected_crc32)
         with self._lock:
             artifact = self._state.get("artifact")
@@ -1930,7 +1976,8 @@ class Handler(BaseHTTPRequestHandler):
 
         if self.path == "/api/mapping":
             try:
-                self._json(200, {"mapping": self.bridge.load_mapping()})
+                self._json(200, {"mapping": self.bridge.load_mapping(),
+                                 "context": getattr(self.bridge, "mapping_context", None)})
             except Exception as exc:
                 traceback.print_exc()
                 self._json(500, {"error": str(exc)})
@@ -2479,6 +2526,8 @@ class Handler(BaseHTTPRequestHandler):
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("-p", "--port", help="Serial port (default: auto-detect)")
+    ap.add_argument("--ring", action="append", default=[], metavar="NAME=PORT,COUNT",
+                    help="Named ring and expected size; repeat for multiple USB adapters")
     ap.add_argument("--baud", type=int, default=DEFAULT_BAUD, help=f"Baud rate (default: {DEFAULT_BAUD})")
     ap.add_argument("--host", default="127.0.0.1", help="HTTP bind host (default: 127.0.0.1)")
     ap.add_argument("--http-port", type=int, default=8765, help="HTTP bind port (default: 8765)")
@@ -2500,6 +2549,12 @@ def main(argv: list[str] | None = None) -> int:
                          "1.0 = velocity ignored; 0.0 = soft notes barely strike. "
                          "Matches the browser's DEFAULT_VEL_FLOOR.")
     args = ap.parse_args(argv)
+    if args.ring and args.port:
+        ap.error("use either --ring or -p/--port")
+    try:
+        ring_specs = parse_ring_specs(args.ring)
+    except ValueError as exc:
+        ap.error(str(exc))
 
     library_dir: Path | None = None
     if args.library_dir:
@@ -2508,20 +2563,29 @@ def main(argv: list[str] | None = None) -> int:
             print(f"--library-dir {library_dir} is not a directory", file=sys.stderr)
             return 1
 
-    port = args.port or auto_detect_port()
-    if not port:
+    port = args.port or (None if ring_specs else auto_detect_port())
+    if not port and not ring_specs:
         print("No serial port found; pass -p/--port", file=sys.stderr)
         return 1
 
-    print(f"Opening {port} at {args.baud} baud (rx timeout {args.timeout_ms} ms)")
-    bridge = Bridge(port=port, baud=args.baud, timeout_ms=args.timeout_ms, trace=args.trace)
-    bridge.player = Player(bridge)
+    bridge = None
     try:
+        if ring_specs:
+            bridge = RingFleet(ring_specs, Bridge, baud=args.baud,
+                               timeout_ms=args.timeout_ms, trace=args.trace,
+                               mapping_file=ROOT / "mapping-rings.json")
+        else:
+            print(f"Opening {port} at {args.baud} baud (rx timeout {args.timeout_ms} ms)")
+            bridge = Bridge(port=port, baud=args.baud, timeout_ms=args.timeout_ms, trace=args.trace)
+        bridge.player = Player(bridge)
         count = bridge.enumerate()
-        print(f"Enumerated {count} device(s) on the ring")
+        print(f"Enumerated {count} device(s) across {len(ring_specs) or 1} ring(s)")
+        for spec, offset in zip(ring_specs, getattr(bridge, "offsets", [])):
+            print(f"  {spec.name}: {spec.port}, slots {offset}..{offset + spec.count - 1}")
     except Exception as exc:
         print(f"Enumeration failed: {exc}", file=sys.stderr)
-        bridge.close()
+        if bridge is not None:
+            bridge.close()
         return 2
 
     Handler.bridge = bridge

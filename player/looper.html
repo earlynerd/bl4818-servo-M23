@@ -389,10 +389,10 @@
 <script>
 // ─── Shared config (same keys as midi_player.html so calibration carries over) ───
 const API_BASE = "";
-const STORAGE_KEY_MAP = "robotdrum.mapping.v1";
-const STORAGE_KEY_TRIM = "robotdrum.trim.v1";
+let STORAGE_KEY_MAP = "robotdrum.mapping.v1";
+let STORAGE_KEY_TRIM = "robotdrum.trim.v1";
 const STORAGE_KEY_VEL = "robotdrum.velfloor.v1";
-const STORAGE_KEY_FB = "robotdrum.fallback.v1";
+let STORAGE_KEY_FB = "robotdrum.fallback.v1";
 const STORAGE_KEY_COMP = "robotdrum.comp.v1";
 const STORAGE_KEY_CURRENT = "robotdrum.looper.current.v1"; // master mA, looper-local
 const STORAGE_KEY_PROJECT = "robotdrum.looper.project.v1";
@@ -534,6 +534,11 @@ function loadMapping() {
 async function fetchServerMapping() {
   try {
     const j = await api("GET", "/api/mapping");
+    if (j.context) {
+      STORAGE_KEY_MAP = "robotdrum.mapping.v1." + j.context;
+      STORAGE_KEY_TRIM = "robotdrum.trim.v1." + j.context;
+      STORAGE_KEY_FB = "robotdrum.fallback.v1." + j.context;
+    }
     if (j && Array.isArray(j.mapping)) {
       return j.mapping.map(v => (Number.isInteger(v) ? v : null));
     }
@@ -696,7 +701,9 @@ async function refreshStatus() {
       LP.mapping.push(DEFAULT_MAPPING[LP.mapping.length] ?? null);
     }
     while (LP.trim.length < LP.count) LP.trim.push(1.0);
-    setConn(true, `${LP.count} device(s) on ring`);
+    const ringCount = Array.isArray(j.rings) ? j.rings.length : 1;
+    const ready = !j.rings || j.rings.every(r => r.ready);
+    setConn(ready, `${LP.count} device(s) · ${ringCount} ring(s)${ready ? "" : " · check rings"}`);
     renderMappingSummary();
     renderKbdPiano();
   } catch (e) {
@@ -722,7 +729,8 @@ function renderMappingSummary() {
     const state = faulted
       ? ` ⚠ ${escapeHtml(slot.fault_name || `fault ${slot.fault}`)}`
       : slot.home_shift_warning ? " ⚠ home shifted" : homed ? "" : " ⚠ not homed";
-    h += `<div class="row ${homedCls}"><span class="swatch" style="background:${color}"></span>addr ${i}: ${pitchTxt}${state}</div>`;
+    const location = slot.ring ? ` (${escapeHtml(slot.ring)}:${slot.local_address})` : "";
+    h += `<div class="row ${homedCls}"><span class="swatch" style="background:${color}"></span>addr ${i}${location}: ${pitchTxt}${state}</div>`;
   }
   el.innerHTML = h;
 }

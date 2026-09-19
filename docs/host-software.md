@@ -46,11 +46,70 @@ The server owns the serial port; do not run another ring client against the same
 port while it is active. The local pitch mapping is written to `mapping.json`.
 The file is machine/instrument state and is ignored by Git.
 
+### Multiple rings on one server
+
+The wire protocol supports **16 actuators per ring**, addressed 0–15. Use
+independent USB serial adapters to expand beyond that limit:
+
+```powershell
+py scripts/ring_midi_server.py --ring pan=COM7,14 --ring drum=COM8,10
+```
+
+Each `--ring NAME=PORT,COUNT` declares a name, serial port, and expected actuator
+count (1–16). Repeat it for each ring; do not combine it with `-p`. Each adapter
+connects to its own complete ring. The server verifies every count before
+starting; all opened ports close if startup fails. Existing `-p COM7` operation
+is unchanged.
+
+The example exposes one 24-slot instrument at `http://127.0.0.1:8765/`: slots
+0–13 are `pan:0` through `pan:13`, and slots 14–23 are `drum:0` through
+`drum:9`. The player and looper show ring/local-address labels. Assign pitches
+in the same mapping table, then home and play as usual. Home, recovery, tuning,
+save, stop and cancel route to the selected global slots; fleet operations run
+independently across adapters. Server-dispatched schedules and live current/mute
+controls use one player. Duplicate mapped pitches still resolve to the first mapped slot;
+use explicit slot-addressed events to strike both instruments on the same pitch.
+
+Each ring has its own serial lock, latency estimates and playback worker, with
+the same monotonic start time. A reply timeout on one ring does not hold up
+another ring's notes. Chords retain the existing no-reply dispatch, including
+chords spanning rings. USB/OS scheduling and mechanical variation still affect
+actual impact alignment; this is not hardware clock synchronization.
+
+Named-ring mappings are saved in `mapping-rings.json`, separately from the
+single-ring `mapping.json`. Ring order, name, port and expected count form the
+mapping identity; changing them starts with unassigned pitches. Trim and fallback
+routes in the browser use a separate cache per layout. Reload browser tabs after
+changing server configuration. Keep adapters assigned to the same physical
+rings: equal-size swapped rings cannot be identified from enumeration alone.
+
+Re-enumeration stops playback. A wrong count leaves that ring unavailable,
+preserves all global slot positions, and blocks a new song until discovery
+succeeds. A disconnected ring during playback reports transport failures while
+other rings continue. Stop/cancel reports per-slot failures; an unreachable
+adapter cannot acknowledge a stop. Firmware updates remain a single-ring
+operation: close the multi-ring server and use `-p PORT` for the ring to update.
+
+Software checks: `py -m unittest discover -s tests -p test_ring_fleet.py`
+simulates 14+10 actuators and checks routing, HTTP pitch playback, concurrent
+dispatch, failure isolation, live controls, cancellation and mapping identity.
+`node --test tests/test_ring_fleet_ui.cjs` checks player/looper ring labels,
+layout-specific browser settings, and the firmware update button in a DOM simulation.
+Multi-adapter physical playback and cross-ring impact timing still require bench
+validation; these tests do not open serial ports or move motors.
+
 ### Transpose an imported MIDI
 
 Files open with their original pitches. Click **Transpose**, above the piano
 roll, to choose and apply the best uniform shift for the pitches assigned to
 the enumerated instrument. Each click starts from the original imported notes.
+
+Candidates are ranked by fewest substituted or unplayable notes, then fewest
+unplayable notes, most exact matches, least folding/substitution movement,
+smallest absolute shift, and finally a downward shift to break equal ties.
+Each criterion only breaks ties in the preceding criteria. Note timing,
+same-mallet collisions, and playback speed do not affect the chosen shift;
+restrike handling is applied separately when building the playback schedule.
 
 - **Transpose only** keeps intervals and leaves unavailable notes unplayable.
 - **Transpose + octave folding** (the initial button option) also moves notes

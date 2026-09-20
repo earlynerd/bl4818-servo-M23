@@ -27,6 +27,12 @@
   .pill:hover { border-color: var(--accent); color: var(--text); }
   .pill.active { background: var(--accent-dim); border-color: var(--accent); color: var(--accent-bright); }
   .pill:disabled { opacity: 0.4; cursor: default; }
+  .pitch-dialog { margin: auto; color: var(--text); }
+  .pitch-dialog:not([open]) { display: none; }
+  .pitch-dialog::backdrop { background: rgba(0,0,0,0.65); }
+  .pitch-dialog select { width: 100%; padding: 10px; background: var(--surface-alt); color: var(--text); border: 1px solid var(--border); }
+  .pitch-dialog .pill { min-height: 44px; }
+  .pitch-actions { display: flex; gap: 8px; flex-wrap: wrap; }
   .transpose-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .transpose-controls select { background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 5px; }
   .transpose-info { font-size: 12px; color: var(--text-muted); line-height: 1.5; margin-top: 8px; }
@@ -266,6 +272,7 @@
 
     <div class="panel">
       <label class="label">Pitch → Address Mapping</label>
+      <button class="pill" id="detectPitchBtn" style="margin-bottom:10px">Detect pitches with microphone…</button>
       <table class="map-table" id="mapTable">
         <thead>
           <tr><th>Addr</th><th>Pitch</th><th>State</th><th>Trim</th><th></th></tr>
@@ -625,7 +632,27 @@
   </div>
 </div>
 
+<dialog id="pitchDialog" class="modal pitch-dialog" aria-labelledby="pitchTitle">
+  <div class="modal-header">
+    <h3 id="pitchTitle">Detect a mallet's pitch</h3>
+    <button class="modal-close" id="pitchClose" aria-label="Close microphone detection">×</button>
+  </div>
+  <p>Place the microphone near the instrument. Measure one note at a time in a quiet room. Audio stays on this device.</p>
+  <label>Mallet<select id="pitchSlot"></select></label>
+  <label>Microphone<select id="pitchMic"><option value="">System default microphone</option></select></label>
+  <p style="color:var(--text-muted)">Strike &amp; detect uses the current master level and this mallet's trim. Home the mallet first. Listen only lets you tap its note by hand.</p>
+  <div class="pitch-actions">
+    <button class="pill" id="pitchStrike">Strike &amp; detect</button>
+    <button class="pill" id="pitchListen">Listen only</button>
+    <button class="pill" id="pitchCancel" disabled>Stop listening</button>
+  </div>
+  <output id="pitchReading" style="font-size:30px;color:var(--accent-bright)" aria-live="polite">—</output>
+  <p id="pitchStatus" role="status" style="min-height:3em;line-height:1.5"></p>
+  <div class="pitch-actions"><button class="pill" id="pitchApply" disabled>Assign detected pitch</button></div>
+  <p style="font-size:12px;color:var(--text-muted)">Phone microphone access needs a trusted HTTPS address. On the server PC, localhost works. Reference: A4 = 440 Hz; detection range 80–1500 Hz.</p>
+</dialog>
 <script src="midi_transpose.js"></script>
+<script src="pitch_detector.js"></script>
 <script>
 // ─── Config ──────────────────────────────────────────────────
 const API_BASE = ""; // same-origin (the Python bridge serves this page)
@@ -971,6 +998,7 @@ function updateLatencyEma(slot, currentMa, metrics) {
 // timing piggybacked on it; we cache that into S.strikeTiming[slot] for
 // the cfg modal to display without paying for a separate query.
 function strikeAsync(addr, currentMa, label) {
+  if (S.pitchOpen) return;
   if (S.firmwareUpdating) return;
   // The ACK we're about to receive carries metrics for the *previous*
   // completed strike on this slot, not for the strike we're sending now.
@@ -2084,6 +2112,7 @@ function stopVoiceAudition() {
 }
 
 async function auditionMidiVoice(key) {
+  if (S.pitchOpen) return;
   if (!S.composition || S.playing || S.playStarting || S.firmwareUpdating) return;
   previewMidiVoice(key);
   const Audio = window.AudioContext || window.webkitAudioContext;
@@ -2616,6 +2645,7 @@ function stopPlayPolling() {
 }
 
 async function play() {
+  if (S.pitchOpen) return;
   stopVoiceAudition();
   if (S.playStarting) return;
   if (S.firmwareUpdating) {
@@ -3655,5 +3685,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   startBusHealthMonitor();
 });
 </script>
+<script src="pitch_assignment.js"></script>
 </body>
 </html>

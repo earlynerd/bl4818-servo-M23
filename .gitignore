@@ -41,6 +41,8 @@ pcb/interface/interface-backups/
 # Host-side runtime state. The MIDI player creates mapping.json after the
 # actuator-to-note mapping is configured in the browser.
 mapping.json
+# Local HTTPS certificate and private key directory (never served as assets).
+certs/
 **/.midi_library.json
 
 # OS metadata

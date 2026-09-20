@@ -46,6 +46,117 @@ The server owns the serial port; do not run another ring client against the same
 port while it is active. The local pitch mapping is written to `mapping.json`.
 The file is machine/instrument state and is ignored by Git.
 
+### Assign pitches with a microphone
+
+Restart the MIDI server after installing this version, then reload the player.
+Under **Pitch → Address Mapping**, open **Detect pitches with microphone**.
+Select the mallet to measure, then choose:
+
+- **Strike & detect**: allow microphone access and remain quiet while background
+  sound is measured. The selected, homed mallet strikes once using the existing
+  master current and its trim. There are no automatic repeat strikes.
+- **Listen only**: after the prompt, tap that mallet's note by hand. This sends
+  no motion commands and works before homing.
+
+The result shows the note/octave, frequency, MIDI number and cents relative to
+A4 = 440 Hz. **Assign detected pitch** saves it to the existing shared mapping;
+detection alone does not change assignments. Select another mallet to continue.
+The microphone selector lists available inputs after permission has been granted.
+All audio processing happens in the browser; audio is neither uploaded nor saved.
+
+Keep the instrument quiet before each measurement and the page in the foreground.
+Stop listening, closing the dialog, or hiding the page releases the microphone.
+Stopping listening cannot retract a strike already sent. Normal keyboard strikes,
+computer audition and playback in this page are blocked while the dialog is open.
+Use one operator/browser during calibration; this first version does not reserve
+the instrument against commands from other clients.
+
+The detector covers 80–1500 Hz. It waits for a new sound above the background,
+skips the impact transient, and requires agreement across at least six audio
+windows. Weak, noisy or clipped signals may be rejected. Results more than 35
+cents from the nearest semitone require a retry/tuning check before assignment.
+Overtones, missing fundamentals and other ringing notes can still cause octave
+errors: check against known notes during initial trials. Stability is not proof
+of the correct fundamental. Full-ring automatic scanning is deferred until
+microphone measurements have been verified on the actual instrument.
+
+#### Desktop and phone access
+
+On the server PC, open `http://localhost:8765/` (adjust for `--http-port`).
+Browsers allow microphone access on localhost without HTTPS. A phone opening
+`http://192.168.x.x:8765/` needs trusted HTTPS instead; that phone's `localhost`
+would refer to the phone, not the instrument server.
+[Browser microphone requirements](https://developer.mozilla.org/en-US/docs/Web/API/MediaDevices/getUserMedia).
+
+For a home-LAN trial, the server now supports direct HTTPS using
+`--tls-cert` and `--tls-key`. Without these options, existing HTTP behavior is
+unchanged. With them, the selected `--http-port` serves HTTPS only, including
+both the page and API. Invalid or incomplete certificate options fail before
+the serial port is opened. Certificate issuance/renewal is managed separately.
+
+One development setup uses **mkcert**, installed from its official distribution.
+Choose a stable LAN IP for the instrument computer. In the example below,
+**replace `192.168.1.50` and `COM7` with your actual server address and serial port**:
+
+```powershell
+mkcert -install
+New-Item -ItemType Directory -Force certs
+mkcert -cert-file certs/player.pem -key-file certs/player-key.pem localhost 127.0.0.1 192.168.1.50
+py scripts/ring_midi_server.py -p COM7 --host 192.168.1.50 --tls-cert certs/player.pem --tls-key certs/player-key.pem
+```
+
+Install and trust the `rootCA.pem` certificate from `mkcert -CAROOT` on the phone,
+then visit `https://192.168.1.50:8765/` on the home Wi-Fi. On iOS, installing
+the profile and enabling full certificate trust are separate steps. Android
+certificate installation varies by version/browser. Verify the page opens
+without a certificate warning before using the microphone. Transfer only the
+public CA certificate, never `rootCA-key.pem` or the server's private key.
+`certs/` is ignored by Git and is not exposed by the server's asset routes.
+Allow the chosen port through the server firewall only from your trusted LAN.
+[mkcert setup and mobile trust](https://github.com/FiloSottile/mkcert#mobile-devices).
+
+Pi-hole can optionally resolve a local name such as `drum.home.arpa` to the
+instrument computer. Include that exact name when generating the certificate.
+Local DNS/Unbound does not itself supply certificate trust. No domain purchase
+or VPS is required for this local approach. No trust-store or firewall changes
+are made by the player or this code update.
+
+An alternative that avoids manually trusting a certificate is **Tailscale Serve**:
+
+1. Install Tailscale on the server computer and phone, and connect both to your
+   private Tailscale network. The server can also be a Raspberry Pi.
+2. Keep the MIDI server on its default `127.0.0.1` bind address and start it normally.
+3. On that server computer, run `tailscale serve --bg http://127.0.0.1:8765`.
+   Follow its setup link if HTTPS needs enabling.
+4. Open the HTTPS address printed by Tailscale on the phone, allow its microphone,
+   and keep the page open while measuring. Serve forwards both the page and API,
+   so there is no mixed HTTP/HTTPS connection to configure.
+
+This uses the phone's microphone while the server still owns the serial cable.
+Serve makes the site reachable inside your Tailscale network; restrict access to
+the intended operators because the player controls hardware and has no separate
+login. No public hosting, purchased domain, or router port forwarding is needed.
+Use **Serve**, not public Funnel. To remove this specific background listener,
+use `tailscale serve --https=443 off` (check `tailscale serve status` first if
+you already use Serve for other services).
+[Tailscale Serve setup](https://tailscale.com/docs/features/tailscale-serve),
+[command reference](https://tailscale.com/docs/reference/tailscale-cli/serve).
+
+An existing **WireGuard VPS** can also proxy HTTPS to an instrument computer,
+once that computer joins the VPN or is reachable through a configured VPN
+gateway. Proxy both the page and API and keep player access limited to operators
+on the VPN. A hostname you control with a publicly trusted certificate avoids
+installing a private root on the phone; DNS-based certificate validation can
+keep the web listener private. DNS-provider integration, VPN routing, and any
+existing Pi-hole web-port use need checking before deployment. See
+[Caddy automatic HTTPS and DNS validation](https://caddyserver.com/docs/automatic-https#dns-challenge).
+
+Software checks: `node --test tests/test_pitch_detection.cjs tests/test_midi_transpose.cjs`
+and `python -m unittest discover -s tests -p test_ring_playback.py`.
+HTTPS and asset routing checks: `python -m unittest discover -s tests -p test_pitch_https.py`.
+Generated-tone and simulated-browser tests do not establish acoustic reliability
+on the drum or compatibility with a particular phone/microphone.
+
 ### Transpose an imported MIDI
 
 Files open with their original pitches. Click **Transpose**, above the piano

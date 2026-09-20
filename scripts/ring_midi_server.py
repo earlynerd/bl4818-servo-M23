@@ -82,6 +82,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import ssl
 import subprocess
 import sys
 import threading
@@ -1872,6 +1873,8 @@ class Handler(BaseHTTPRequestHandler):
             "/player.html": PLAYER_HTML,
             "/looper.html": LOOPER_HTML,
             "/midi_transpose.js": ROOT / "player" / "midi_transpose.js",
+            "/pitch_detector.js": ROOT / "player" / "pitch_detector.js",
+            "/pitch_assignment.js": ROOT / "player" / "pitch_assignment.js",
         }
         if self.path in player_assets:
             asset_path = player_assets[self.path]
@@ -2476,12 +2479,26 @@ class Handler(BaseHTTPRequestHandler):
             self._json(500, {"error": str(exc)})
 
 
+def make_tls_context(cert: str | None, key: str | None) -> ssl.SSLContext | None:
+    """Validate HTTPS configuration before opening the hardware connection."""
+    if not cert and not key:
+        return None
+    if not cert or not key:
+        raise ValueError("--tls-cert and --tls-key must be supplied together")
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.load_cert_chain(certfile=cert, keyfile=key)
+    return context
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("-p", "--port", help="Serial port (default: auto-detect)")
     ap.add_argument("--baud", type=int, default=DEFAULT_BAUD, help=f"Baud rate (default: {DEFAULT_BAUD})")
     ap.add_argument("--host", default="127.0.0.1", help="HTTP bind host (default: 127.0.0.1)")
     ap.add_argument("--http-port", type=int, default=8765, help="HTTP bind port (default: 8765)")
+    ap.add_argument("--tls-cert", help="PEM certificate chain for optional HTTPS on --http-port")
+    ap.add_argument("--tls-key", help="PEM private key for --tls-cert (both options required)")
     ap.add_argument("--timeout-ms", type=int, default=1000,
                     help="Per-frame RX timeout in ms (default: 1000). Bump higher if you see"
                          " transient 'timeout waiting for frame' errors during homing.")
@@ -2500,6 +2517,12 @@ def main(argv: list[str] | None = None) -> int:
                          "1.0 = velocity ignored; 0.0 = soft notes barely strike. "
                          "Matches the browser's DEFAULT_VEL_FLOOR.")
     args = ap.parse_args(argv)
+
+    try:
+        tls_context = make_tls_context(args.tls_cert, args.tls_key)
+    except (ValueError, OSError) as exc:
+        print(f"HTTPS configuration failed: {exc}", file=sys.stderr)
+        return 1
 
     library_dir: Path | None = None
     if args.library_dir:
@@ -2531,8 +2554,23 @@ def main(argv: list[str] | None = None) -> int:
         STRIKE_MA_MIN, min(STRIKE_MA_MAX, int(args.motif_current_ma))
     )
     Handler.default_vel_floor = max(0.0, min(1.0, float(args.motif_vel_floor)))
-    server = ThreadingHTTPServer((args.host, args.http_port), Handler)
-    url = f"http://{args.host}:{args.http_port}/"
+    server = None
+    try:
+        server = ThreadingHTTPServer((args.host, args.http_port), Handler)
+        if tls_context is not None:
+            # Defer handshakes to request threads; an idle TLS client must not
+            # block acceptance of subsequent control requests.
+            server.socket = tls_context.wrap_socket(
+                server.socket, server_side=True, do_handshake_on_connect=False
+            )
+    except OSError as exc:
+        print(f"Web server startup failed: {exc}", file=sys.stderr)
+        if server is not None:
+            server.server_close()
+        bridge.close()
+        return 1
+    scheme = "https" if tls_context is not None else "http"
+    url = f"{scheme}://{args.host}:{args.http_port}/"
     print(f"Serving {PLAYER_HTML.name} at {url}")
     print(f"Looper UI available at {url}looper.html")
     if library_dir is not None:

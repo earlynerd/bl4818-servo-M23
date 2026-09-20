@@ -242,3 +242,10 @@ When a decision is reversed or superseded, append a new entry rather than rewrit
 - **Why:** Automatic fitting on open would alter already arranged pieces. Exact pitch sets, rather than scale names or range alone, govern compatibility.
 - **Tradeoffs:** Transposed schedules merge simultaneous hits and omit later same-mallet hits under the 50 ms guideline at the chosen speed. Manual fallback routes are bypassed; a changed instrument map requires reapplication. Saving to the library retains the source MIDI; adaptation is not persisted or exported.
 - **Affects:** Browser MIDI import, piano roll, scheduling, and `docs/host-software.md`. Server dispatch and firmware protocols are unchanged.
+
+## 2026-09-19 — Microphone pitch assignment starts with one reviewed mallet
+
+- **Decision:** Detect one selected mallet through browser-local microphone processing, using either one explicit strike at the existing current/trim or a manual tap. A stable estimate becomes a proposed pitch; only Assign persists it through the existing mapping API. Capture ends on completion, cancellation, dialog closure or page hiding. No audio is uploaded or stored.
+- **Why:** Isolated notes associate an acoustic measurement with a known actuator while keeping octave mistakes reviewable. Existing motion, homing, transport and firmware behavior are preserved.
+- **Tradeoffs:** Detection is bounded to 80–1500 Hz and A4=440; stability does not establish the true fundamental. Full-ring scanning awaits acoustic trials. Calibration has no cross-client reservation. Desktop localhost works immediately; phones require trusted HTTPS. Optional server TLS accepts externally managed certificates, with private reverse proxies also supported; certificate trust and VPN setup remain deployment work.
+- **Affects:** Browser player, static asset routes and `docs/host-software.md`.

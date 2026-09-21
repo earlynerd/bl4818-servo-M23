@@ -57,6 +57,51 @@ Select the mallet to measure, then choose:
   master current and its trim. There are no automatic repeat strikes.
 - **Listen only**: after the prompt, tap that mallet's note by hand. This sends
   no motion commands and works before homing.
+- **Detect all mallets**: scans the enumerated mallets in address order with one
+  microphone session. The first strike uses the master/trim settings captured
+  when the pass starts. If no new strike is heard within 1.8 seconds after the
+  command is acknowledged, or sound produces no stable pitch within 3 seconds,
+  it retries that same mallet once with up to 20% extra
+  current, capped at 200 mA extra and 3000 mA total. This never changes saved
+  master/trim settings; a zero-current setting remains zero. If the microphone
+  overloads, the retry uses the original current instead of increasing it.
+
+The scan pauses 0.6–1.5 seconds after a measurement, then measures a new local
+background reference instead of waiting for silence. Each assignment still
+requires a new rise above that reference and a stable pitch. Steady street noise
+or continuing ringdown alone cannot trigger another reading.
+
+Readiness is checked before every attempt. A healthy cached status up to two
+seconds old is accepted; unavailable/stale status is checked up to three times,
+200 ms apart, on the same mallet. This browser's background bus probe pauses
+while the pitch dialog is open. A mallet becomes unresolved only after both
+acoustic attempts fail; the scan then continues to the next mallet. This includes
+noise that triggers an onset but never yields a usable pitch. Unavailable
+readiness, unhomed/faulted motors, rejected commands, connection errors and
+instrument-count changes stop the pass instead of silently skipping forward.
+The affected row shows the actual failure reason. Missing command acknowledgment
+never triggers another strike.
+
+If microphone frames stop arriving, a wall-clock watchdog attempts to resume
+audio once after 0.75 seconds and reports a microphone interruption after three
+seconds without fresh audio. This also covers a frozen audio clock while the
+browser still reports audio as running. It does not issue another strike while
+the microphone is stalled. Audio-analysis exceptions are shown immediately.
+These bounds require the browser's JavaScript timers to be running; hiding the
+page still cancels the scan.
+
+Use **Stop scan** to stop future strikes while retaining completed readings.
+**Retry unresolved** measures only the remaining mallets, after you let the
+instrument become quiet again. You can also select any mallet and use the
+single-note controls to replace its proposed reading. Closing the dialog discards
+unsaved proposals. Keeping the page in the foreground is required.
+
+Review the results, including any duplicate-pitch warnings, then choose
+**Save N detected pitches**. Only successful readings replace entries; unresolved
+mallets and any mapping entries outside the enumerated ring are preserved.
+The player checks the saved map before writing and reports confirmation failures
+without claiming success. Use one operator at a time; this is not an atomic
+cross-client calibration reservation.
 
 The result shows the note/octave, frequency, MIDI number and cents relative to
 A4 = 440 Hz. **Assign detected pitch** saves it to the existing shared mapping;
@@ -77,8 +122,20 @@ windows. Weak, noisy or clipped signals may be rejected. Results more than 35
 cents from the nearest semitone require a retry/tuning check before assignment.
 Overtones, missing fundamentals and other ringing notes can still cause octave
 errors: check against known notes during initial trials. Stability is not proof
-of the correct fundamental. Full-ring automatic scanning is deferred until
-microphone measurements have been verified on the actual instrument.
+of the correct fundamental. On 2026-09-20 the user reported perfect single-note
+recognition using a mobile microphone across two different drums. Full-ring
+trials then exposed excessive ringdown waits and cached-status skips. The revised
+noise-adaptive timing, readiness handling and bounded stronger retry are covered
+by simulated audio/workflow tests; the changes still need a physical scan trial.
+
+Microphone-based volume normalization is a proposed next step, not part of this
+release. A useful first version would hold microphone position and input gain
+fixed, compare repeated strikes over the same post-impact recording window, then
+verify proposed per-mallet trims with another pass. Browser audio processing must
+be checked, since requested AGC/noise-suppression settings may not be available.
+Measured recording level is relative, not calibrated sound-pressure level or
+proof of equal perceived loudness. The current trims are browser-local; mobile
+calibration intended for desktop playback would also require shared persistence.
 
 #### Desktop and phone access
 

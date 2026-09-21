@@ -249,3 +249,31 @@ When a decision is reversed or superseded, append a new entry rather than rewrit
 - **Why:** Isolated notes associate an acoustic measurement with a known actuator while keeping octave mistakes reviewable. Existing motion, homing, transport and firmware behavior are preserved.
 - **Tradeoffs:** Detection is bounded to 80–1500 Hz and A4=440; stability does not establish the true fundamental. Full-ring scanning awaits acoustic trials. Calibration has no cross-client reservation. Desktop localhost works immediately; phones require trusted HTTPS. Optional server TLS accepts externally managed certificates, with private reverse proxies also supported; certificate trust and VPN setup remain deployment work.
 - **Affects:** Browser player, static asset routes and `docs/host-software.md`.
+
+## 2026-09-20 — Full-ring microphone mapping uses one cancellable capture
+
+- **Decision:** Add an explicit all-mallet scan with one microphone session, frozen pass currents, fresh readiness checks, and a quiet interval referenced to the original noise floor. Preserve completed proposals on stop, allow unresolved-only retries, and save reviewed successes while retaining unresolved mappings.
+- **Why:** The user reported reliable mobile recognition on two drums; sequential capture removes repeated operator actions without changing the proven pitch estimator or firmware.
+- **Tradeoffs:** No automatic current increases or retry strikes. Acoustic failures may continue after quiet; command/connection failures stop. Hiding the page cancels capture. One operator is required; no cross-client reservation is introduced. Volume normalization remains a proposed follow-up requiring fixed microphone geometry, audio-processing checks, measured trim verification and shared trim persistence.
+- **Supersedes:** The full-ring scan deferral in the 2026-09-19 microphone decision.
+- **Affects:** `player/pitch_detector.js`, `player/pitch_assignment.js`, `player/midi_player.html`, and the host software guide.
+
+## 2026-09-20 — Pitch scans adapt to background noise and retry silent strikes
+
+- **Decision:** Limit inter-measurement settling to 0.6–1.5 seconds and require a new onset against a rolling pre-strike reference. Accept healthy cached readiness up to two seconds old; retry unavailable status three times on the same mallet. After 1.8 seconds without an audible onset following acknowledgment, retry once at up to 20% / 200 mA extra, capped at 3000 mA, without changing trims. Only exhausted silent attempts advance unresolved; readiness, command or unclear-audio failures stop for intervention.
+- **Why:** Mobile trials encountered city noise, long ringdown waits and spurious cached-status skips. The user requested bounded stronger retries and no arbitrary skipping.
+- **Supersedes:** Original-noise-floor settling and no automatic retry/current increase in “Full-ring microphone mapping uses one cancellable capture.”
+- **Affects:** Browser pitch capture, scan workflow, background probe scheduling and `docs/host-software.md`. Firmware and transport remain unchanged.
+
+## 2026-09-20 — Acoustic retry covers noise-triggered onsets
+
+- **Decision:** Retry the same mallet once after either 1.8 seconds without onset or 3 seconds without a stable pitch, then mark unresolved and continue. Overloaded audio retries at original current; other missed/unclear readings use the bounded increase. Actual readiness/command failures stop with their reason retained in the affected row.
+- **Why:** The user reported scans stopping on missed notes with only “Stopped before completion” shown. Background noise can trigger onset without a usable note, so onset alone cannot classify a failed capture as fatal.
+- **Supersedes:** The unclear-audio stop rule in “Pitch scans adapt to background noise and retry silent strikes.”
+- **Affects:** Browser pitch detector and scan feedback; `docs/host-software.md`.
+
+## 2026-09-20 — Stalled microphone capture has an independent watchdog
+
+- **Decision:** Check wall-clock time before the fresh-audio gate. Try one audio resume after 0.75 seconds without fresh frames, and stop with a specific microphone error after three seconds if it cannot recover. Reject analysis exceptions through the capture promise and require recent running audio before dispatching a strike.
+- **Why:** The user reported the scan remaining at the heard-strike message. A frozen or interrupted audio clock bypassed normal timeout checks until the 25-second fallback; a simulated freeze reproduced this path.
+- **Affects:** `player/pitch_detector.js` and the host software guide. Healthy-input acoustic retry timing and reviewed mapping saves remain as specified above.

@@ -33,6 +33,8 @@
   .pitch-dialog select { width: 100%; padding: 10px; background: var(--surface-alt); color: var(--text); border: 1px solid var(--border); }
   .pitch-dialog .pill { min-height: 44px; }
   .pitch-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  #pitchScanResults { overflow-wrap: anywhere; }
+  #pitchScanResults td { white-space: normal; }
   .transpose-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .transpose-controls select { background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 5px; }
   .transpose-info { font-size: 12px; color: var(--text-muted); line-height: 1.5; margin-top: 8px; }
@@ -637,7 +639,7 @@
     <h3 id="pitchTitle">Detect a mallet's pitch</h3>
     <button class="modal-close" id="pitchClose" aria-label="Close microphone detection">×</button>
   </div>
-  <p>Place the microphone near the instrument. Measure one note at a time in a quiet room. Audio stays on this device.</p>
+  <p>Keep the microphone still near the instrument and measure one note at a time. Audio stays on this device.</p>
   <label>Mallet<select id="pitchSlot"></select></label>
   <label>Microphone<select id="pitchMic"><option value="">System default microphone</option></select></label>
   <p style="color:var(--text-muted)">Strike &amp; detect uses the current master level and this mallet's trim. Home the mallet first. Listen only lets you tap its note by hand.</p>
@@ -649,6 +651,16 @@
   <output id="pitchReading" style="font-size:30px;color:var(--accent-bright)" aria-live="polite">—</output>
   <p id="pitchStatus" role="status" style="min-height:3em;line-height:1.5"></p>
   <div class="pitch-actions"><button class="pill" id="pitchApply" disabled>Assign detected pitch</button></div>
+  <hr style="border:0;border-top:1px solid var(--border)">
+  <h4>Map all mallets</h4>
+  <p>Measure each mallet with a short pause between notes. Missed or unclear notes get one retry, a little harder (up to 20% extra, capped at 200 mA extra). An overloaded microphone never increases the strike. Master level and trims stay unchanged. Review the results before saving.</p>
+  <div class="pitch-actions">
+    <button class="pill" id="pitchScanStart">Detect all mallets</button>
+    <button class="pill" id="pitchScanStop" disabled>Stop scan</button>
+    <button class="pill" id="pitchScanRetry" disabled>Retry unresolved</button>
+    <button class="pill" id="pitchScanSave" disabled>Save detected pitches</button>
+  </div>
+  <div id="pitchScanResults" hidden></div>
   <p style="font-size:12px;color:var(--text-muted)">Phone microphone access needs a trusted HTTPS address. On the server PC, localhost works. Reference: A4 = 440 Hz; detection range 80–1500 Hz.</p>
 </dialog>
 <script src="midi_transpose.js"></script>
@@ -1144,7 +1156,7 @@ function renderBusHealth(snap) {
     totBad += (b.timeouts || 0) + (b.crc_errors || 0) + (b.errors || 0);
   }
   meta.textContent = `${addrs.length} dev · ${totN} txns · ${totBad} bad · ${since}` +
-    (S.busProbe ? (S.playing ? " · probe paused" : " · probing") : " · probe off");
+    (S.busProbe ? (S.playing || S.pitchOpen ? " · probe paused" : " · probing") : " · probe off");
 
   const toMs = us => (us / 1000);
   let html = `<div style="display:grid;${BUS_COLS};gap:4px;font-size:9px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.5px">` +
@@ -1191,7 +1203,7 @@ async function busHealthTick() {
   if (S.firmwareUpdating) return;
   try {
     let snap;
-    if (S.busProbe && !S.playing && S.count > 0) {
+    if (S.busProbe && !S.playing && !S.pitchOpen && S.count > 0) {
       const r = await fetch(API_BASE + "/api/bus-health/probe", { method: "POST" });
       snap = r.ok ? await r.json() : null;
     } else {

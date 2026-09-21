@@ -96,7 +96,11 @@
 
   function abortError() { return new DOMException('Listening cancelled', 'AbortError'); }
 
-  async function listen({ signal, deviceId, onReady = async () => {}, onProgress = () => {} }) {
+  async function listen({ signal, deviceId, onReady = async () => {}, onProgress = () => {},
+                          steps = 1, sequence = false, acousticRetries = 0,
+                          onPrepare = async () => {}, onResult = () => {} }) {
+    if (!Number.isInteger(steps) || steps < 1 || steps > 256) throw new Error('Invalid scan length.');
+    if (![0, 1].includes(acousticRetries)) throw new Error('Invalid acoustic retry limit.');
     if (!globalThis.isSecureContext) {
       throw new Error('Microphone access needs HTTPS on your phone. On this PC, open http://localhost:8765 (or your configured port).');
     }
@@ -110,6 +114,7 @@
       clearInterval(timer);
       clearTimeout(deadline);
       stream?.getTracks().forEach(track => track.stop());
+      stream = null;
       source?.disconnect();
       analyser?.disconnect();
       mute?.disconnect();
@@ -146,62 +151,165 @@
       analyser.connect(mute);
       mute.connect(context.destination);
       const samples = new Float32Array(analyser.fftSize);
-      return await new Promise((resolve, reject) => {
-        rejectCapture = reject;
-        const noise = [], frames = [];
-        let phase = 'baseline', armedAt = 0, onset = 0, lastAudioTime = -1;
-        let acknowledged = false, candidate = null, clipping = false;
-        const started = performance.now();
-        const finish = () => { if (acknowledged && candidate) resolve(candidate); };
-        stream.getAudioTracks()[0].addEventListener('ended', () => reject(new Error('Microphone disconnected.')));
-        deadline = setTimeout(() => reject(new Error('Microphone or strike timed out. Check the connection and retry.')), 15000);
-        onProgress('Measuring background sound… keep quiet for a moment.');
-        timer = setInterval(() => {
-          if (signal.aborted) return;
-          if (context.state !== 'running' || context.currentTime === lastAudioTime) return;
-          lastAudioTime = context.currentTime;
-          const now = performance.now();
-          analyser.getFloatTimeDomainData(samples);
-          const amplitude = level(samples.subarray(samples.length - 1024));
-          if (phase === 'baseline') {
-            // Let the analyser fill before measuring the noise floor.
-            if (now - started > 250) noise.push(amplitude.rms);
-            if (now - started < 850) return;
-            phase = 'armed';
-            armedAt = now;
-            onProgress('Listening for a new strike…');
-            Promise.resolve().then(onReady).then(() => { acknowledged = true; finish(); }, reject);
-            return;
-          }
-          if (now - armedAt > 8000) {
-            reject(new Error(clipping ? 'Microphone is overloaded. Move it farther away or reduce its input gain, then retry.'
-              : 'No clear, stable note. Let the drum become quiet, move the microphone closer, and retry.'));
-            return;
-          }
-          if (!onset) {
-            if (amplitude.rms > Math.max(0.004, median(noise) * 3)) {
-              onset = now;
-              onProgress('Heard the strike. Measuring the ringing note…');
-            }
-            return;
-          }
-          // Wait until the whole analysis window is past the impact transient.
-          if (now - onset < 100 + 1000 * samples.length / context.sampleRate) return;
-          clipping ||= level(samples).clipped > 0.01;
-          const estimateFrame = estimate(samples, context.sampleRate);
-          if (estimateFrame && estimateFrame.rms > Math.max(0.001, median(noise) * 1.5)) {
-            frames.push(estimateFrame);
-            candidate = consensus(frames);
-            if (candidate) finish();
-          } else {
-            frames.length = 0;
-          }
-        }, 60);
+      // Keep the same microphone and AudioContext across the entire scan.
+      // Re-measure the background before each strike. A new rise above that
+      // reference is required even when the previous note is still audible.
+      const noise = [], results = [];
+      const track = stream.getAudioTracks()[0];
+      let disconnected = false;
+      track.addEventListener('ended', () => {
+        disconnected = true;
+        rejectCapture?.(new Error('Microphone disconnected.'));
       });
+      for (let index = 0; index < steps; index++) {
+        if (signal.aborted) throw abortError();
+        if (disconnected) throw new Error('Microphone disconnected.');
+        let result;
+        let measurementActive = true;
+        try {
+          result = await new Promise((resolve, reject) => {
+            rejectCapture = reject;
+            const frames = [], recent = [];
+            let phase = index === 0 ? 'baseline' : 'settling';
+            let armedAt = 0, onset = 0, lastAudioTime = -1, acknowledgedAt = 0;
+            let attempt = 0, floor = 0;
+            let acknowledged = false, candidate = null, clipping = false;
+            const started = performance.now();
+            let lastFrameAt = started, resumeAttempted = false, resumeFailure = null;
+            const finish = () => { if (acknowledged && candidate) resolve(candidate); };
+            const arm = () => {
+              const stronger = attempt > 0 && !clipping;
+              phase = 'preparing';
+              onset = 0;
+              acknowledged = false;
+              candidate = null;
+              clipping = false;
+              frames.length = 0;
+              onProgress(attempt ? (stronger ? 'No clear note. Trying this mallet once more, a little harder…'
+                : 'Microphone overloaded. Retrying this mallet without increasing the strike…') : 'Listening for a new strike…', index);
+              Promise.resolve().then(() => onPrepare(index, attempt)).then(() => {
+                if (signal.aborted || !measurementActive) throw abortError();
+                if (context.state !== 'running' || performance.now() - lastFrameAt >= 1000) {
+                  throw new Error('Microphone stopped delivering audio. Reopen detection before striking again.');
+                }
+                phase = 'armed';
+                armedAt = performance.now();
+                floor = median(recent);
+                return onReady(index, attempt, stronger);
+              }).then(() => { acknowledged = true; acknowledgedAt = performance.now(); finish(); }, reject);
+            };
+            deadline = setTimeout(() => reject(new Error('Microphone or strike timed out. Check the connection and retry.')), 25000);
+            onProgress(index === 0 ? 'Measuring background sound… keep quiet for a moment.'
+              : 'Waiting for the previous note to fade…', index);
+            timer = setInterval(() => {
+              try {
+                if (signal.aborted) return;
+                const now = performance.now();
+                // Wall-clock checks must run even when Web Audio is interrupted
+                // or its clock stops. Otherwise the UI sits on the last onset.
+                if (phase === 'armed' && now - armedAt > 8000) {
+                  reject(new Error(!acknowledged ? 'Strike acknowledgment timed out. Check the connection before retrying.'
+                    : clipping ? 'Microphone is overloaded. Move it farther away or reduce its input gain, then retry.'
+                    : 'No clear, stable note. Move the microphone closer and retry.'));
+                  return;
+                }
+                if (context.state !== 'running' || context.currentTime === lastAudioTime) {
+                  if (now - lastFrameAt >= 3000) {
+                    reject(new Error('Microphone stopped delivering audio. Reopen detection and keep this page in the foreground.' +
+                      (resumeFailure ? ` Audio could not resume: ${resumeFailure.message}` : '')));
+                  } else if (now - lastFrameAt >= 750 && !resumeAttempted) {
+                    resumeAttempted = true;
+                    onProgress('Microphone paused. Resuming audio…', index);
+                    Promise.resolve(context.resume()).catch(error => { resumeFailure = error; });
+                  }
+                  return;
+                }
+                lastAudioTime = context.currentTime;
+                lastFrameAt = now;
+                analyser.getFloatTimeDomainData(samples);
+                const amplitude = level(samples.subarray(samples.length - 1024));
+                recent.push(amplitude.rms);
+                if (recent.length > 5) recent.shift();
+                if (phase === 'baseline') {
+                  // Let the analyser fill before measuring the noise floor.
+                  if (now - started > 250) noise.push(amplitude.rms);
+                  if (now - started < 850) return;
+                  arm();
+                  return;
+                }
+                if (phase === 'settling') {
+                  // Do not wait for city noise or long drum decay to disappear.
+                  // The rolling reference at arm() prevents that continuing sound
+                  // alone from being treated as another mallet's strike.
+                  if (now - started >= 600 &&
+                      (median(recent) <= Math.max(0.004, median(noise) * 1.8) || now - started >= 1500)) arm();
+                  return;
+                }
+                if (phase === 'preparing') return;
+                clipping ||= amplitude.clipped > 0.01;
+                const onsetThreshold = Math.max(0.004, floor * 1.8, floor + 0.002);
+                const silent = !onset && !clipping && amplitude.rms <= onsetThreshold;
+                // Noise can trigger an onset without yielding a usable pitch.
+                // Both silence and unclear audio exhaust acoustic retries on this
+                // slot; neither is a command/connection failure.
+                if (sequence && acknowledged && !candidate &&
+                    now - acknowledgedAt >= (silent ? 1800 : 3000)) {
+                  if (attempt < acousticRetries) {
+                    attempt++;
+                    arm();
+                  } else {
+                    const reason = clipping ? 'Microphone overloaded; move it farther away.' : silent
+                      ? 'No new strike heard above the background; move the microphone closer.'
+                      : 'No stable pitch heard; try moving the microphone closer.';
+                    const error = new Error(`${reason} Unresolved after ${attempt + 1} attempts.`);
+                    error.code = 'PITCH_UNRESOLVED';
+                    reject(error);
+                  }
+                  return;
+                }
+                if (!onset) {
+                  if (amplitude.rms > onsetThreshold) {
+                    onset = now;
+                    onProgress('Heard the strike. Measuring the ringing note…', index);
+                  }
+                  return;
+                }
+                // Wait until the whole analysis window is past the impact transient.
+                if (now - onset < 100 + 1000 * samples.length / context.sampleRate) return;
+                clipping ||= level(samples).clipped > 0.01;
+                const estimateFrame = estimate(samples, context.sampleRate);
+                if (estimateFrame && estimateFrame.rms > Math.max(0.001, floor * 1.3)) {
+                  frames.push(estimateFrame);
+                  candidate = consensus(frames);
+                  if (candidate) finish();
+                } else {
+                  frames.length = 0;
+                }
+              } catch (error) {
+                // Timer exceptions do not reject the enclosing Promise by
+                // themselves; settle it so the dialog cannot appear stuck.
+                reject(new Error(`Microphone analysis failed: ${error.message}`));
+              }
+            }, 60);
+          });
+        } catch (error) {
+          if (!sequence || error.code !== 'PITCH_UNRESOLVED') throw error;
+          result = { error: error.message, assignable: false };
+        } finally {
+          measurementActive = false;
+          clearInterval(timer);
+          clearTimeout(deadline);
+        }
+        if (signal.aborted) throw abortError();
+        results.push(result);
+        onResult(result, index);
+      }
+      return sequence ? results : results[0];
     } finally {
       signal.removeEventListener('abort', abort);
       cleanup();
     }
   }
-  return { estimate, consensus, note, level, listen };
+  const scan = options => listen({ ...options, sequence: true });
+  return { estimate, consensus, note, level, listen, scan };
 });

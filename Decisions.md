@@ -318,3 +318,10 @@ When a decision is reversed or superseded, append a new entry rather than rewrit
 - **Why:** Builds, simulated serial tests and browser checks do not validate physical routing, homing, playback or impact timing across two adapters.
 - **Supersedes:** The plan to merge into `main` immediately after software validation.
 - **Affects:** Branch integration and the hardware acceptance checklist in `docs/host-software.md`; no hardware playback has been performed as part of preparation.
+
+## 2026-10-02 — Release the main merge after two-drum playback
+
+- **Decision:** Merge `multi-ring` into `main` following the user's successful two-drum playback report and explicit approval.
+- **Why:** The user reports that the COM29/COM48 setup works well and sounds beautiful, with nearly twenty notes opening up more playable music. This supplies the requested physical playback feedback; quantitative impact timing and exhaustive fault testing are not implied.
+- **Supersedes:** Hold the main merge for two-drum hardware testing.
+- **Affects:** Branch integration and the validation record in `docs/host-software.md`.

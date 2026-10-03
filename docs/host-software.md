@@ -125,14 +125,19 @@ dispatch, failure isolation, live controls, cancellation and mapping identity.
 layout-specific browser settings, per-ring selection, and the firmware update
 button in a DOM simulation. `test_fleet_instruments.py` checks selection
 persistence, profile-local edits, shared controls, migration and stale writes.
-Multi-adapter physical playback and cross-ring impact timing still require bench
-validation; these tests do not open serial ports or move motors.
+These tests do not open serial ports or move motors. On 2026-10-02, the user
+reported successful physical playback with the two-drum COM29/COM48 setup,
+describing the nearly twenty-note range as working well and sounding beautiful,
+and approved merging `multi-ring` into `main`. This is a user-reported listening
+test of the prepared branch (`3c97cd1`); no quantitative cross-ring impact
+timing measurements or failure-recovery results were supplied.
 
-#### Two-drum hardware acceptance before merging to main
+#### Two-drum hardware regression checklist
 
-Keep the integration on `multi-ring` until the COM29/COM48 trial passes.
-No physical playback or cross-adapter timing has been validated yet. Launch
-with the two-drum command above, then open <http://localhost:8765/>.
+The successful playback trial above cleared the user's merge hold. Retain
+this checklist for subsequent hardware regressions; the report does not claim
+every item was exercised. Launch with the two-drum command above, then open
+<http://localhost:8765/>.
 
 1. Confirm ten actuators on each ring and the correct saved profile in each
    selector. Verify the adapters belong to the labelled drums. Check the
@@ -154,8 +159,8 @@ with the two-drum command above, then open <http://localhost:8765/>.
 
 Record the branch commit, launch command, adapter-to-drum assignments,
 firmware versions, MIDI file, settings, results and any captures in the test
-notes. Resolve observed regressions and record a passing hardware result
-before merging `multi-ring` into `main`.
+notes. Resolve observed regressions and record the hardware results for future
+changes.
 
 ### Assign pitches with a microphone
 

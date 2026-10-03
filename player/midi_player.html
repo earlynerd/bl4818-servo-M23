@@ -27,6 +27,14 @@
   .pill:hover { border-color: var(--accent); color: var(--text); }
   .pill.active { background: var(--accent-dim); border-color: var(--accent); color: var(--accent-bright); }
   .pill:disabled { opacity: 0.4; cursor: default; }
+  .pitch-dialog { margin: auto; color: var(--text); }
+  .pitch-dialog:not([open]) { display: none; }
+  .pitch-dialog::backdrop { background: rgba(0,0,0,0.65); }
+  .pitch-dialog select { width: 100%; padding: 10px; background: var(--surface-alt); color: var(--text); border: 1px solid var(--border); }
+  .pitch-dialog .pill { min-height: 44px; }
+  .pitch-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  #pitchScanResults { overflow-wrap: anywhere; }
+  #pitchScanResults td { white-space: normal; }
   .transpose-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .transpose-controls select { background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 5px; }
   .transpose-info { font-size: 12px; color: var(--text-muted); line-height: 1.5; margin-top: 8px; }
@@ -89,6 +97,9 @@
   .lib-search { flex: 1 1 120px; min-width: 90px; background: var(--surface); border: 1px solid var(--border); border-radius: 4px; padding: 5px 8px; color: var(--text); font-family: 'Crimson Pro', serif; font-size: 13px; }
   .lib-search::placeholder { color: var(--text-dim); }
   .lib-sort { background: var(--surface-alt); border: 1px solid var(--border); border-radius: 4px; padding: 4px 6px; color: var(--text-muted); font-family: 'JetBrains Mono', monospace; font-size: 11px; cursor: pointer; }
+  .instrument-field { background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 5px 8px; font-family: 'Crimson Pro', serif; font-size: 13px; }
+  .instrument-field option { background: var(--surface); color: var(--text); }
+  .instrument-field::placeholder { color: var(--text-dim); }
   .lib-breadcrumb { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; margin-bottom: 8px; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-dim); }
   .lib-crumb { cursor: pointer; color: var(--text-muted); padding: 1px 3px; border-radius: 3px; }
   .lib-crumb:hover { color: var(--accent-bright); }
@@ -266,6 +277,22 @@
 
     <div class="panel">
       <label class="label">Pitch → Address Mapping</label>
+      <div id="ringInstrumentControls" style="display:none"></div>
+      <div id="singleInstrumentControls">
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
+        <select class="instrument-field" id="instrumentSelect" aria-label="Instrument" style="flex:1;min-width:120px"></select>
+        <button class="pill" id="instrumentSelectBtn">Load</button>
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
+        <input class="instrument-field" id="instrumentName" maxlength="60" placeholder="Instrument name" aria-label="Instrument name" style="flex:1;min-width:120px">
+        <button class="pill" id="instrumentCreateBtn">Create instrument</button>
+        <button class="pill" id="instrumentRenameBtn">Rename</button>
+        <button class="pill" id="instrumentDeleteBtn">Delete</button>
+      </div>
+      </div>
+      <p id="instrumentCountNote" style="font-size:11px;color:var(--text-dim);margin-bottom:8px"></p>
+      <p id="instrumentHelp" style="font-size:11px;color:var(--text-dim);margin-bottom:8px">Create a new instrument before editing its pitches. Pitch changes save to the selected instrument.</p>
+      <button class="pill" id="detectPitchBtn" style="margin-bottom:10px">Detect pitches with microphone…</button>
       <table class="map-table" id="mapTable">
         <thead>
           <tr><th>Addr</th><th>Pitch</th><th>State</th><th>Trim</th><th></th></tr>
@@ -620,12 +647,43 @@
         <button class="pill" id="cfgSaveBtn" title="Persist all current tuning values to the selected drive(s) so they survive a reboot">Save to drive</button>
         <button class="pill" id="cfgHomeBtn">Re-home</button>
         <button class="pill" id="cfgTestBtn">Test strike</button>
+        <button class="pill" id="cfgTestDeadBtn" title="Test this mallet's dead-strike settings using the current level and default contact dwell">Test dead strike</button>
       </div>
     </div>
   </div>
 </div>
 
+<dialog id="pitchDialog" class="modal pitch-dialog" aria-labelledby="pitchTitle">
+  <div class="modal-header">
+    <h3 id="pitchTitle">Detect a mallet's pitch</h3>
+    <button class="modal-close" id="pitchClose" aria-label="Close microphone detection">×</button>
+  </div>
+  <p>Keep the microphone still near the instrument and measure one note at a time. Audio stays on this device.</p>
+  <label>Mallet<select id="pitchSlot"></select></label>
+  <label>Microphone<select id="pitchMic"><option value="">System default microphone</option></select></label>
+  <p style="color:var(--text-muted)">Strike &amp; detect uses the current master level and this mallet's trim. Home the mallet first. Listen only lets you tap its note by hand.</p>
+  <div class="pitch-actions">
+    <button class="pill" id="pitchStrike">Strike &amp; detect</button>
+    <button class="pill" id="pitchListen">Listen only</button>
+    <button class="pill" id="pitchCancel" disabled>Stop listening</button>
+  </div>
+  <output id="pitchReading" style="font-size:30px;color:var(--accent-bright)" aria-live="polite">—</output>
+  <p id="pitchStatus" role="status" style="min-height:3em;line-height:1.5"></p>
+  <div class="pitch-actions"><button class="pill" id="pitchApply" disabled>Assign detected pitch</button></div>
+  <hr style="border:0;border-top:1px solid var(--border)">
+  <h4>Map all mallets</h4>
+  <p>Measure each mallet with a short pause between notes. Missed or unclear notes get one retry, a little harder (up to 20% extra, capped at 200 mA extra). An overloaded microphone never increases the strike. Master level and trims stay unchanged. Review the results before saving.</p>
+  <div class="pitch-actions">
+    <button class="pill" id="pitchScanStart">Detect all mallets</button>
+    <button class="pill" id="pitchScanStop" disabled>Stop scan</button>
+    <button class="pill" id="pitchScanRetry" disabled>Retry unresolved</button>
+    <button class="pill" id="pitchScanSave" disabled>Save detected pitches</button>
+  </div>
+  <div id="pitchScanResults" hidden></div>
+  <p style="font-size:12px;color:var(--text-muted)">Phone microphone access needs a trusted HTTPS address. On the server PC, localhost works. Reference: A4 = 440 Hz; detection range 80–1500 Hz.</p>
+</dialog>
 <script src="midi_transpose.js"></script>
+<script src="pitch_detector.js"></script>
 <script>
 // ─── Config ──────────────────────────────────────────────────
 const API_BASE = ""; // same-origin (the Python bridge serves this page)
@@ -635,6 +693,7 @@ const STORAGE_KEY_VEL = "robotdrum.velfloor.v1";
 let STORAGE_KEY_FB = "robotdrum.fallback.v1";
 const STORAGE_KEY_KBD = "robotdrum.kbd.v1";
 const STORAGE_KEY_COMP = "robotdrum.comp.v1";
+const STORAGE_KEY_CURRENT = "robotdrum.current.v1";
 const STORAGE_KEY_LIB = "robotdrum.library.v1"; // library UI prefs: shuffle/autoplay/sort/favOnly
 const STORAGE_KEY_ROLL = "robotdrum.pianoroll.v1";
 // Home row first (most ergonomic for 10-mallet drums), then top row for
@@ -677,6 +736,16 @@ const S = {
   mapping: [], // mapping[slot] = midi pitch (or null to disable that slot)
   trim: [],    // trim[slot] = scalar multiplier on global current (1.0 = no change)
   fallback: {}, // fallback[pitch] = slot, for pitches not directly in mapping
+  instruments: [],
+  instrumentRings: [],
+  mappingContext: null,
+  instrumentChanging: false,
+  activeInstrumentId: "default",
+  hasSavedMapping: false,
+  mappingSave: Promise.resolve(),
+  settingsSave: Promise.resolve(),
+  settingsTimer: null,
+  remoteSettings: {},
   velFloor: DEFAULT_VEL_FLOOR, // fraction of target at MIDI vel=1 (1.0 = velocity ignored)
   composition: null, // { title, notes:[{pitch,timeMs,vel}], maxMs }
   // Raw bytes of the most recently loaded MIDI file (drag-drop, file picker,
@@ -970,7 +1039,8 @@ function updateLatencyEma(slot, currentMa, metrics) {
 // from the device so each ACK carries the last-completed strike's
 // timing piggybacked on it; we cache that into S.strikeTiming[slot] for
 // the cfg modal to display without paying for a separate query.
-function strikeAsync(addr, currentMa, label) {
+function strikeAsync(addr, currentMa, label, strikeType = "normal") {
+  if (S.pitchOpen) return;
   if (S.firmwareUpdating) return;
   // The ACK we're about to receive carries metrics for the *previous*
   // completed strike on this slot, not for the strike we're sending now.
@@ -985,11 +1055,15 @@ function strikeAsync(addr, currentMa, label) {
   // the next ACK on this slot lands, it'll carry the measured impact for this
   // strike, and we'll diff against this prediction to get the residual.
   S.lastStrikePredictedMs[addr] = compensationMs(addr, currentMa);
+  if (strikeType === "dead") {
+    delete S.lastStrikeCurrent[addr];
+    delete S.lastStrikePredictedMs[addr];
+  }
   const tFire = performance.now();
   fetch(API_BASE + "/api/strike", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ address: addr, current_ma: currentMa }),
+    body: JSON.stringify({ address: addr, current_ma: currentMa, strike_type: strikeType }),
     keepalive: true,
   }).then(r => r.ok ? r.json() : null).then(j => {
     if (!j) return;
@@ -1050,6 +1124,7 @@ function recordResidual(slot, residual) {
 async function refreshStatus() {
   try {
     const j = await api("GET", "/api/status");
+    const priorCount = S.count;
     S.count = j.count || 0;
     S.homed = j.homed || [];
     S.slots = Array.isArray(j.slots) ? j.slots : [];
@@ -1067,6 +1142,10 @@ async function refreshStatus() {
     const ready = !j.rings || j.rings.every(r => r.ready);
     setConn(ready, `${S.count} device(s) · ${ringCount} ring(s)${!ready ? " · check rings" : j.status_deferred ? " · cached state" : ""}`);
     rebuildMappingIfNeeded();
+    if (S.count !== priorCount) {
+      renderInstrumentControls();
+      if (S.composition) showComposition();
+    }
     renderMapTable();
     refreshTransposeControls();
     if (S.cfgSlot >= 0 && S.cfgSlot < S.count) {
@@ -1118,7 +1197,7 @@ function renderBusHealth(snap) {
     totBad += (b.timeouts || 0) + (b.crc_errors || 0) + (b.errors || 0);
   }
   meta.textContent = `${addrs.length} dev · ${totN} txns · ${totBad} bad · ${since}` +
-    (S.busProbe ? (S.playing ? " · probe paused" : " · probing") : " · probe off");
+    (S.busProbe ? (S.playing || S.pitchOpen ? " · probe paused" : " · probing") : " · probe off");
 
   const toMs = us => (us / 1000);
   let html = `<div style="display:grid;${BUS_COLS};gap:4px;font-size:9px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.5px">` +
@@ -1165,7 +1244,7 @@ async function busHealthTick() {
   if (S.firmwareUpdating) return;
   try {
     let snap;
-    if (S.busProbe && !S.playing && S.count > 0) {
+    if (S.busProbe && !S.playing && !S.pitchOpen && S.count > 0) {
       const r = await fetch(API_BASE + "/api/bus-health/probe", { method: "POST" });
       snap = r.ok ? await r.json() : null;
     } else {
@@ -1194,8 +1273,7 @@ function startBusHealthMonitor() {
 }
 
 // ─── Mapping & trim persistence ──────────────────────────────
-// Mapping is the only setting the bridge persists for us (in mapping.json),
-// so it survives across browsers. localStorage stays as a same-machine cache
+// Named mappings live on the bridge. localStorage stays as a same-machine cache
 // for fast first paint and as a fallback if the bridge isn't reachable yet.
 function loadMapping() {
   try {
@@ -1211,6 +1289,7 @@ async function fetchServerMapping() {
   try {
     const j = await api("GET", "/api/mapping");
     if (j.context) {
+      S.mappingContext = j.context;
       STORAGE_KEY = "robotdrum.mapping.v1." + j.context;
       STORAGE_KEY_TRIM = "robotdrum.trim.v1." + j.context;
       STORAGE_KEY_FB = "robotdrum.fallback.v1." + j.context;
@@ -1226,17 +1305,245 @@ async function fetchServerMapping() {
   return null;
 }
 function saveMapping() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(S.mapping));
+  const profileId = S.activeInstrumentId;
+  const mapping = S.mapping.slice(0, S.count);
+  S.mapping = mapping;
+  S.hasSavedMapping = true;
+  const profile = S.instruments.find(p => p.id === S.activeInstrumentId);
+  if (profile) profile.count = mapping.length;
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(mapping));
+  renderInstrumentControls();
   // Fire-and-forget: the local cache is already up-to-date, and a bridge
   // hiccup shouldn't block the UI. Errors are logged so the user can spot
   // a persistent disconnect.
-  api("POST", "/api/mapping", { mapping: S.mapping }).catch(e => {
+  S.mappingSave = S.mappingSave.catch(() => {}).then(() =>
+    api("POST", "/api/mapping", { mapping, profile_id: profileId })).catch(e => {
     log("mapping save failed: " + e.message);
   });
+  return S.mappingSave;
+}
+function profileStorageKey(base) {
+  return S.activeInstrumentId === "default" ? base : `${base}.${S.activeInstrumentId}`;
+}
+function storedProfileValue(base) {
+  const key = profileStorageKey(base);
+  let value = localStorage.getItem(key);
+  if (value == null && key !== base && !S.mappingContext) {
+    value = localStorage.getItem(base);
+    if (value != null) localStorage.setItem(key, value);
+  }
+  return value;
+}
+function instrumentSettings() {
+  return {
+    trim: S.trim.slice(), fallback: { ...S.fallback },
+    vel_floor: S.velFloor, comp_enabled: S.compEnabled,
+    comp_default_ms: S.compDefaultMs, current_ma: getCurrentMa(),
+  };
+}
+function persistLocalInstrumentSettings(settings) {
+  localStorage.setItem(profileStorageKey(STORAGE_KEY_TRIM), JSON.stringify(settings.trim));
+  localStorage.setItem(profileStorageKey(STORAGE_KEY_FB), JSON.stringify(settings.fallback));
+  localStorage.setItem(profileStorageKey(STORAGE_KEY_VEL), String(settings.vel_floor));
+  localStorage.setItem(profileStorageKey(STORAGE_KEY_COMP), JSON.stringify({
+    enabled: settings.comp_enabled, defaultMs: settings.comp_default_ms,
+  }));
+  localStorage.setItem(profileStorageKey(STORAGE_KEY_CURRENT), String(settings.current_ma));
+}
+function queueInstrumentSettingsSave() {
+  if (!S.instruments.length) return;
+  if (S.settingsTimer) clearTimeout(S.settingsTimer);
+  S.settingsTimer = setTimeout(() => {
+    S.settingsTimer = null;
+    const id = S.activeInstrumentId;
+    const settings = instrumentSettings();
+    S.settingsSave = S.settingsSave.catch(() => {}).then(() =>
+      api("POST", "/api/instruments", { action: "update_settings", id, settings })
+    ).catch(e => log("instrument settings save failed: " + e.message));
+  }, 300);
+}
+async function flushInstrumentSettings() {
+  if (S.settingsTimer) {
+    clearTimeout(S.settingsTimer);
+    S.settingsTimer = null;
+    const id = S.activeInstrumentId;
+    const settings = instrumentSettings();
+    S.settingsSave = S.settingsSave.catch(() => {}).then(() =>
+      api("POST", "/api/instruments", { action: "update_settings", id, settings })
+    ).catch(e => log("instrument settings save failed: " + e.message));
+  }
+  await S.settingsSave;
+}
+function applyInstrumentSettings(saved) {
+  const settings = saved && Object.keys(saved).length ? saved : null;
+  S.trim = settings && Array.isArray(settings.trim) ? settings.trim.slice() : loadTrim();
+  S.fallback = settings && settings.fallback ? { ...settings.fallback } : loadFallback();
+  S.velFloor = settings && Number.isFinite(settings.vel_floor)
+    ? settings.vel_floor : loadVelFloor();
+  S.compEnabled = settings && typeof settings.comp_enabled === "boolean"
+    ? settings.comp_enabled : true;
+  S.compDefaultMs = settings && Number.isFinite(settings.comp_default_ms)
+    ? settings.comp_default_ms : DEFAULT_COMP_MS;
+  if (!settings) loadCompSettings();
+  const current = settings && Number.isFinite(settings.current_ma)
+    ? settings.current_ma : loadCurrentMa();
+  const currentSlider = document.getElementById("currentSlider");
+  currentSlider.value = String(current);
+  document.getElementById("currentDisplay").textContent = `${currentSlider.value} mA`;
+  const velocitySlider = document.getElementById("velFloorSlider");
+  velocitySlider.value = String(Math.round(S.velFloor * 100));
+  document.getElementById("velFloorDisplay").textContent = `${velocitySlider.value}%`;
+  const compBtn = document.getElementById("compEnableBtn");
+  compBtn.textContent = S.compEnabled ? "On" : "Off";
+  compBtn.classList.toggle("active", S.compEnabled);
+  const compSlider = document.getElementById("compDefaultSlider");
+  compSlider.disabled = !S.compEnabled;
+  compSlider.value = String(S.compDefaultMs);
+  document.getElementById("compDefaultDisplay").textContent = `${compSlider.value} ms`;
+  persistLocalInstrumentSettings(instrumentSettings());
+  rebuildMappingIfNeeded();
+}
+function renderInstrumentControls() {
+  const rings = S.instrumentRings;
+  document.getElementById("singleInstrumentControls").style.display = rings.length ? "none" : "";
+  const ringControls = document.getElementById("ringInstrumentControls");
+  ringControls.style.display = rings.length ? "" : "none";
+  if (rings.length) {
+    ringControls.replaceChildren(...rings.map(ring => {
+      const row = document.createElement("div");
+      row.style.cssText = "margin-bottom:10px";
+      const label = document.createElement("label");
+      label.textContent = `${ring.name} · ${ring.port} · ${ring.count} mallets`;
+      label.style.cssText = "display:block;font-size:12px;margin-bottom:4px";
+      const select = document.createElement("select");
+      select.className = "instrument-field";
+      select.setAttribute("aria-label", `Instrument for ${ring.name}`);
+      select.style.maxWidth = "270px";
+      const blank = document.createElement("option");
+      blank.value = "";
+      blank.textContent = "Select saved instrument…";
+      select.append(blank);
+      for (const profile of S.instruments) {
+        const option = document.createElement("option");
+        option.value = profile.id;
+        option.textContent = `${profile.name} (${profile.count})`;
+        select.append(option);
+      }
+      select.value = ring.profile_id || "";
+      const load = document.createElement("button");
+      load.className = "pill";
+      load.textContent = "Load";
+      load.style.marginLeft = "6px";
+      load.disabled = S.instrumentChanging;
+      load.addEventListener("click", () => changeRingInstrument(ring.name, select.value));
+      row.append(label, select, load);
+      return row;
+    }));
+    document.getElementById("instrumentCountNote").textContent = `${S.count || rings.reduce((n, r) => n + r.count, 0)} mallets across ${rings.length} rings`;
+    document.getElementById("instrumentHelp").textContent = "Select a saved drum for each ring. Pitch and trim edits save to that drum. Master current, velocity and compensation are shared; fallback edits belong to this selection of drums. Reload other open players after changing selections.";
+    return;
+  }
+  const select = document.getElementById("instrumentSelect");
+  if (!select) return;
+  select.replaceChildren(...S.instruments.map(profile => {
+    const option = document.createElement("option");
+    option.value = profile.id;
+    option.textContent = `${profile.name} (${profile.count} mallets)`;
+    return option;
+  }));
+  select.value = S.activeInstrumentId;
+  const profile = S.instruments.find(p => p.id === S.activeInstrumentId);
+  const note = document.getElementById("instrumentCountNote");
+  note.textContent = profile && S.count && profile.count !== S.count
+    ? `Saved for ${profile.count} mallets; ${S.count} present. Only present mallets can play.`
+    : `${S.count} mallet(s) present`;
+  document.getElementById("instrumentDeleteBtn").disabled = S.instruments.length <= 1;
+}
+async function refreshInstruments() {
+  const result = await api("GET", "/api/instruments");
+  S.instruments = result.profiles;
+  S.instrumentRings = result.rings || [];
+  S.activeInstrumentId = result.active;
+  S.remoteSettings = result.settings || {};
+  renderInstrumentControls();
+}
+async function changeRingInstrument(ring, id) {
+  if (!id || S.instrumentChanging) return;
+  if (S.playing || S.playStarting || S.pitchOpen || S.firmwareUpdating) {
+    showError("Stop playback or pitch detection before changing instruments.");
+    return;
+  }
+  S.instrumentChanging = true;
+  renderInstrumentControls();
+  try {
+    await S.mappingSave;
+    await flushInstrumentSettings();
+    const result = await api("POST", "/api/instruments", {
+      action: "select_ring", ring, id, expected_id: S.activeInstrumentId,
+    });
+    S.instruments = result.profiles;
+    S.instrumentRings = result.rings;
+    S.activeInstrumentId = result.active;
+    S.mapping = result.mapping;
+    S.hasSavedMapping = true;
+    applyInstrumentSettings(result.settings);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(S.mapping));
+    renderMapTable();
+    if (S.composition) showComposition();
+  } catch (e) {
+    showError(`Ring instrument change failed: ${e.message}`);
+  } finally {
+    S.instrumentChanging = false;
+    renderInstrumentControls();
+  }
+}
+async function changeInstrument(action) {
+  if (S.playing || S.playStarting || S.pitchOpen || S.firmwareUpdating) {
+    showError("Stop playback or pitch detection before changing instruments.");
+    return;
+  }
+  const id = document.getElementById("instrumentSelect").value;
+  const name = document.getElementById("instrumentName").value.trim();
+  if ((action === "create" || action === "rename") && !name) {
+    showError("Enter an instrument name first."); return;
+  }
+  if (action === "delete" && !window.confirm("Delete this saved instrument?")) return;
+  try {
+    await S.mappingSave;
+    await flushInstrumentSettings();
+    const copiedTrim = S.trim.slice();
+    const copiedFallback = { ...S.fallback };
+    const copiedSettings = instrumentSettings();
+    const result = await api("POST", "/api/instruments", {
+      action, id, name,
+      ...(action === "create" ? { mapping: S.mapping.slice(0, S.count) } : {}),
+      ...(action === "create" ? { settings: copiedSettings } : {}),
+    });
+    S.instruments = result.profiles;
+    S.activeInstrumentId = result.active;
+    S.mapping = result.mapping;
+    S.hasSavedMapping = true;
+    if (action === "create") {
+      S.trim = copiedTrim;
+      S.fallback = copiedFallback;
+      persistLocalInstrumentSettings(copiedSettings);
+    } else {
+      applyInstrumentSettings(result.settings);
+    }
+    rebuildMappingIfNeeded();
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(S.mapping));
+    renderInstrumentControls();
+    renderMapTable();
+    if (S.composition) showComposition();
+    document.getElementById("instrumentName").value = "";
+  } catch (e) {
+    showError(`Instrument change failed: ${e.message}`);
+    renderInstrumentControls();
+  }
 }
 function loadTrim() {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY_TRIM);
+    const raw = storedProfileValue(STORAGE_KEY_TRIM);
     if (raw) {
       const arr = JSON.parse(raw);
       if (Array.isArray(arr)) return arr.map(v => Number.isFinite(v) ? Math.max(0, v) : 1.0);
@@ -1245,11 +1552,12 @@ function loadTrim() {
   return [];
 }
 function saveTrim() {
-  localStorage.setItem(STORAGE_KEY_TRIM, JSON.stringify(S.trim));
+  localStorage.setItem(profileStorageKey(STORAGE_KEY_TRIM), JSON.stringify(S.trim));
+  queueInstrumentSettingsSave();
 }
 function loadFallback() {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY_FB);
+    const raw = storedProfileValue(STORAGE_KEY_FB);
     if (raw) {
       const obj = JSON.parse(raw);
       if (obj && typeof obj === "object") {
@@ -1266,11 +1574,12 @@ function loadFallback() {
   return {};
 }
 function saveFallback() {
-  localStorage.setItem(STORAGE_KEY_FB, JSON.stringify(S.fallback));
+  localStorage.setItem(profileStorageKey(STORAGE_KEY_FB), JSON.stringify(S.fallback));
+  queueInstrumentSettingsSave();
 }
 function loadVelFloor() {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY_VEL);
+    const raw = storedProfileValue(STORAGE_KEY_VEL);
     if (raw != null) {
       const v = parseFloat(raw);
       if (Number.isFinite(v)) return Math.max(0, Math.min(1, v));
@@ -1279,7 +1588,17 @@ function loadVelFloor() {
   return DEFAULT_VEL_FLOOR;
 }
 function saveVelFloor() {
-  localStorage.setItem(STORAGE_KEY_VEL, String(S.velFloor));
+  localStorage.setItem(profileStorageKey(STORAGE_KEY_VEL), String(S.velFloor));
+  queueInstrumentSettingsSave();
+}
+function loadCurrentMa() {
+  const raw = storedProfileValue(STORAGE_KEY_CURRENT);
+  const value = raw == null ? 800 : Number(raw);
+  return Number.isFinite(value) ? Math.max(0, Math.min(3000, value)) : 800;
+}
+function saveCurrentMa() {
+  localStorage.setItem(profileStorageKey(STORAGE_KEY_CURRENT), String(getCurrentMa()));
+  queueInstrumentSettingsSave();
 }
 function loadKbdEnabled() {
   try { return localStorage.getItem(STORAGE_KEY_KBD) === "1"; } catch { return false; }
@@ -1304,7 +1623,7 @@ function saveRollSettings() {
 }
 function loadCompSettings() {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY_COMP);
+    const raw = storedProfileValue(STORAGE_KEY_COMP);
     if (raw) {
       const obj = JSON.parse(raw);
       if (obj && typeof obj === "object") {
@@ -1317,16 +1636,17 @@ function loadCompSettings() {
   } catch {}
 }
 function saveCompSettings() {
-  localStorage.setItem(STORAGE_KEY_COMP, JSON.stringify({
+  localStorage.setItem(profileStorageKey(STORAGE_KEY_COMP), JSON.stringify({
     enabled: S.compEnabled,
     defaultMs: S.compDefaultMs,
   }));
+  queueInstrumentSettingsSave();
 }
 function rebuildMappingIfNeeded() {
-  const want = Math.max(S.count, S.mapping.length);
+  const want = S.count;
   while (S.mapping.length < want) {
     const i = S.mapping.length;
-    S.mapping.push(DEFAULT_MAPPING[i] ?? null);
+    S.mapping.push(S.hasSavedMapping ? null : (DEFAULT_MAPPING[i] ?? null));
   }
   while (S.trim.length < want) S.trim.push(1.0);
 }
@@ -1410,6 +1730,7 @@ function renderMapTable() {
       const lbl = tbody.querySelector(`[data-trim-label="${slot}"]`);
       if (lbl) lbl.textContent = `${pct}%`;
     });
+    inp.addEventListener("change", () => { void flushInstrumentSettings(); });
   });
   tbody.querySelectorAll("button[data-test]").forEach(b => {
     b.addEventListener("click", () => {
@@ -1756,7 +2077,7 @@ async function applyConfigGroup(group) {
 // by ascending pitch. This matches the piano-roll's vertical sort so the
 // leftmost key is always the lowest-sounding mallet.
 function pitchAscendingSlots() {
-  const limit = Math.max(S.count, S.mapping.length);
+  const limit = S.count;
   const out = [];
   for (let i = 0; i < limit; i++) {
     const p = S.mapping[i];
@@ -2094,6 +2415,7 @@ function stopVoiceAudition() {
 }
 
 async function auditionMidiVoice(key) {
+  if (S.pitchOpen) return;
   if (!S.composition || S.playing || S.playStarting || S.firmwareUpdating) return;
   previewMidiVoice(key);
   const Audio = window.AudioContext || window.webkitAudioContext;
@@ -2219,14 +2541,14 @@ function restoreOriginalMidi() {
 }
 
 function pitchToSlot(pitch) {
-  for (let i = 0; i < S.mapping.length; i++) if (S.mapping[i] === pitch) return i;
+  for (let i = 0; i < S.count; i++) if (S.mapping[i] === pitch) return i;
   const fb = S.fallback[pitch];
-  const limit = Math.max(S.count, S.mapping.length);
-  return Number.isInteger(fb) && fb >= 0 && fb < limit ? fb : -1;
+  return Number.isInteger(fb) && fb >= 0 && fb < S.count ? fb : -1;
 }
 function pitchIsFallback(pitch) {
-  if (S.mapping.includes(pitch)) return false;
-  return Number.isInteger(S.fallback[pitch]);
+  if (S.mapping.slice(0, S.count).includes(pitch)) return false;
+  const fb = S.fallback[pitch];
+  return Number.isInteger(fb) && fb >= 0 && fb < S.count;
 }
 
 // Resolve every event to its slot and collapse near-simultaneous strikes
@@ -2310,13 +2632,13 @@ function renderFallbackTable(counts) {
     tbody.innerHTML = "";
     return;
   }
-  const directPitches = new Set(S.mapping.filter(p => p != null));
+  const directPitches = new Set(S.mapping.slice(0, S.count).filter(p => p != null));
   const unmapped = [...counts.keys()].filter(p => !directPitches.has(p)).sort((a, b) => a - b);
   if (unmapped.length === 0) { panel.style.display = "none"; tbody.innerHTML = ""; return; }
   panel.style.display = "block";
 
   // Build the slot-options markup once and reuse per row.
-  const slotCount = Math.max(S.count, S.mapping.length);
+  const slotCount = S.count;
   let optsBase = `<option value="">(drop)</option>`;
   for (let i = 0; i < slotCount; i++) {
     const sp = S.mapping[i];
@@ -2348,6 +2670,7 @@ function renderFallbackTable(counts) {
       const v = sel.value;
       if (v === "") delete S.fallback[p]; else S.fallback[p] = +v;
       saveFallback();
+      void flushInstrumentSettings();
       showComposition();
     });
   });
@@ -2369,7 +2692,7 @@ function renderPianoRoll() {
   // before (slot color + addr indicator); the unmapped semitones in between
   // are dim with a black/white-key tint so the melodic spacing is visible.
   const usedPitches = new Set();
-  for (let i = 0; i < S.mapping.length; i++) {
+  for (let i = 0; i < S.count; i++) {
     if (Number.isInteger(S.mapping[i])) usedPitches.add(S.mapping[i]);
   }
   for (const e of sched) usedPitches.add(e.pitch);
@@ -2381,7 +2704,7 @@ function renderPianoRoll() {
 
   // pitch -> slot. If two slots share a pitch, the lowest-index one wins.
   const pitchToMappedSlot = new Map();
-  for (let i = 0; i < S.mapping.length; i++) {
+  for (let i = 0; i < S.count; i++) {
     const p = S.mapping[i];
     if (Number.isInteger(p) && !pitchToMappedSlot.has(p)) pitchToMappedSlot.set(p, i);
   }
@@ -2626,6 +2949,7 @@ function stopPlayPolling() {
 }
 
 async function play() {
+  if (S.pitchOpen) return;
   stopVoiceAudition();
   if (S.playStarting) return;
   if (S.firmwareUpdating) {
@@ -3204,6 +3528,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   const cd = document.getElementById("currentDisplay");
   cs.addEventListener("input", () => {
     cd.textContent = `${cs.value} mA`;
+    saveCurrentMa();
     if (S.cfgSlot >= 0) refreshCfgTiming();
     // Live-scale upcoming strikes during playback. Fire-and-forget — drops
     // are tolerable (the next slider tick supersedes them anyway). The
@@ -3223,6 +3548,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   });
 
+  cs.addEventListener("change", () => { void flushInstrumentSettings(); });
+
   // Velocity floor
   const vfs = document.getElementById("velFloorSlider");
   const vfd = document.getElementById("velFloorDisplay");
@@ -3233,6 +3560,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     vfd.textContent = `${vfs.value}%`;
     saveVelFloor();
   });
+  vfs.addEventListener("change", () => { void flushInstrumentSettings(); });
   document.getElementById("velFloorOffBtn").addEventListener("click", () => {
     vfs.value = "100";
     vfs.dispatchEvent(new Event("input"));
@@ -3255,6 +3583,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     S.compEnabled = !S.compEnabled;
     saveCompSettings();
     refreshCompUi();
+    void flushInstrumentSettings();
   });
   compSlider.addEventListener("input", () => {
     S.compDefaultMs = +compSlider.value;
@@ -3262,6 +3591,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     saveCompSettings();
     if (S.cfgSlot >= 0) refreshCfgTiming();
   });
+
+  compSlider.addEventListener("change", () => { void flushInstrumentSettings(); });
 
   // Tempo scale
   const ts = document.getElementById("tempoSlider");
@@ -3352,7 +3683,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   });
   document.getElementById("resetMapBtn").addEventListener("click", () => {
-    S.mapping = DEFAULT_MAPPING.slice();
+    S.mapping = Array.from({length: S.count}, (_, i) => DEFAULT_MAPPING[i] ?? null);
     rebuildMappingIfNeeded();
     saveMapping();
     renderMapTable();
@@ -3362,12 +3693,18 @@ document.addEventListener("DOMContentLoaded", async () => {
     S.trim = new Array(Math.max(S.count, S.mapping.length)).fill(1.0);
     saveTrim();
     renderMapTable();
+    void flushInstrumentSettings();
   });
   document.getElementById("resetFallbackBtn").addEventListener("click", () => {
     S.fallback = {};
     saveFallback();
     if (S.composition) showComposition();
+    void flushInstrumentSettings();
   });
+  document.getElementById("instrumentSelectBtn").addEventListener("click", () => changeInstrument("select"));
+  document.getElementById("instrumentCreateBtn").addEventListener("click", () => changeInstrument("create"));
+  document.getElementById("instrumentRenameBtn").addEventListener("click", () => changeInstrument("rename"));
+  document.getElementById("instrumentDeleteBtn").addEventListener("click", () => changeInstrument("delete"));
   document.getElementById("refreshStatusBtn").addEventListener("click", refreshStatus);
   document.getElementById("enumBtn").addEventListener("click", async () => {
     log("enumerate…");
@@ -3528,17 +3865,19 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.querySelectorAll("button[data-config-apply]").forEach(button => {
     button.addEventListener("click", () => applyConfigGroup(button.dataset.configApply));
   });
-  document.getElementById("cfgTestBtn").addEventListener("click", () => {
+  const testCfgStrike = (strikeType) => {
     if (S.cfgSlot < 0) return;
     const slot = S.cfgSlot;
     const ma = effectiveCurrentForSlot(slot);
-    strikeAsync(slot, ma, `(cfg test slot ${slot})`);
-    log(`cfg test strike addr=${slot} ${ma} mA`);
+    strikeAsync(slot, ma, `(cfg test slot ${slot})`, strikeType);
+    log(`cfg test ${strikeType} strike addr=${slot} ${ma} mA`);
     // The strike's own metrics aren't on its ACK_TIMED reply — that
     // carries the *previous* strike's data. Pull this strike's metrics
     // explicitly from the bridge once the device has had time to rebound.
     harvestStrikeTiming(slot);
-  });
+  };
+  document.getElementById("cfgTestBtn").addEventListener("click", () => testCfgStrike("normal"));
+  document.getElementById("cfgTestDeadBtn").addEventListener("click", () => testCfgStrike("dead"));
   document.getElementById("cfgHomeBtn").addEventListener("click", async () => {
     if (S.cfgSlot < 0) return;
     const slot = S.cfgSlot;
@@ -3648,11 +3987,15 @@ document.addEventListener("DOMContentLoaded", async () => {
   // browsers. If the bridge isn't reachable or has no saved mapping yet,
   // we keep whatever loadMapping() returned from localStorage/defaults and
   // the next saveMapping() will seed the server.
+  try { await refreshInstruments(); } catch (e) { log("instrument list failed: " + e.message); }
   const serverMapping = await fetchServerMapping();
   if (serverMapping) {
     S.mapping = serverMapping;
+    S.hasSavedMapping = true;
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(S.mapping)); } catch {}
   }
+  applyInstrumentSettings(S.remoteSettings);
+  if (serverMapping && !Object.keys(S.remoteSettings).length) queueInstrumentSettingsSave();
 
   // Initial connection
   await refreshStatus();
@@ -3665,5 +4008,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   startBusHealthMonitor();
 });
 </script>
+<script src="pitch_assignment.js"></script>
 </body>
 </html>

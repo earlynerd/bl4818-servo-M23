@@ -36,6 +36,62 @@ def valid_image(payload: bytes) -> bytes:
 
 
 class ProvisionJLinkTests(unittest.TestCase):
+    def test_native_flash_preserves_commit_and_region_boundaries(self):
+        with tempfile.TemporaryDirectory(prefix="native flash ") as tmp:
+            root = Path(tmp)
+            image = valid_image(b"\x01\x02\x03\x04" * 7000)
+            app, manifest, ldrom = (root / name for name in ("app.bin", "manifest.bin", "ldrom.bin"))
+            app.write_bytes(image)
+            manifest.write_bytes(build_manifest(image))
+            ldrom.write_bytes(b"\x01\x02\x03\x04" * 1000)
+            output = root / "native.jlink"
+            generate_provision_script(app, manifest, ldrom, output, native_flash=True)
+            lines = output.read_text(encoding="ascii").splitlines()
+            downloads = [line for line in lines if line.startswith("loadfile ")]
+            self.assertEqual(downloads, [
+                f'loadfile "{app.as_posix()}" 0x00000000 noreset',
+                f'loadfile "{ldrom.as_posix()}" 0x00100000 noreset',
+            ])
+            self.assertLess(len(lines), 100)
+            self.assertIn("ExitOnError 1", lines)
+            self.assertEqual([line for line in lines if line.startswith("erase ")],
+                             ["erase 0x00100000 0x00100FFF noreset"])
+            # Decode physical FMC operations: only manifest-page writes are
+            # allowed, invalidate precedes bulk writes, and magic commits last.
+            address = command = data = None
+            operations = []
+            for index, line in enumerate(lines):
+                parts = line.split()
+                if len(parts) != 3 or parts[0] != "w4":
+                    continue
+                register, value = (int(part, 16) for part in parts[1:])
+                if register == 0x4000C004:
+                    address = value
+                elif register == 0x4000C008:
+                    data = value
+                elif register == 0x4000C00C:
+                    command = value
+                elif register == 0x4000C010 and value == 1:
+                    operations.append((index, command, address, data))
+            self.assertEqual(operations[0][1:3], (CMD_PAGE_ERASE, 0x7A00))
+            self.assertLess(operations[0][0], lines.index(downloads[0]))
+            programs = [op for op in operations if op[1] == CMD_PROGRAM]
+            self.assertGreater(programs[0][0], lines.index(downloads[1]))
+            self.assertTrue(all(0x7A00 <= op[2] < 0x7C00 for op in operations))
+            self.assertEqual(programs[-1][2:], (0x7A00, struct.unpack_from("<I", manifest.read_bytes())[0]))
+
+    def test_native_flash_rejects_mismatched_manifest_before_creating_script(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app, manifest, ldrom = (root / name for name in ("app.bin", "manifest.bin", "ldrom.bin"))
+            app.write_bytes(valid_image(b"application A"))
+            manifest.write_bytes(build_manifest(valid_image(b"application B")))
+            ldrom.write_bytes(b"\x00" * 4)
+            output = root / "native.jlink"
+            with self.assertRaisesRegex(ValueError, "CRC does not match"):
+                generate_provision_script(app, manifest, ldrom, output, native_flash=True)
+            self.assertFalse(output.exists())
+
     def test_provision_script_never_targets_configuration(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

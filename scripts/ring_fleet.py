@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ring_bus import MAX_DEVICES
+from fleet_instruments import FleetInstrumentProfiles
+from instrument_profiles import InstrumentProfiles
 
 
 @dataclass(frozen=True)
@@ -90,8 +92,13 @@ class RingFleet:
         self.rings = []
         self.maintenance = threading.Event()
         self._player = None
-        self._mapping_lock = threading.Lock()
         self.mapping_file = mapping_file
+        self.instruments = FleetInstrumentProfiles(
+            mapping_file.with_name(f"instruments-rings-{self.mapping_context}.json"),
+            mapping_file, self._layout(),
+            InstrumentProfiles(mapping_file.with_name("instruments.json"),
+                               mapping_file.with_name("mapping.json")),
+        )
         try:
             for spec in specs:
                 self.offsets.append(self.count)
@@ -215,8 +222,8 @@ class RingFleet:
         self._ready(lane)
         return self._translate(getattr(ring, method)(local, *args), lane)
 
-    def strike(self, address, current_ma):
-        return self._one("strike", address, current_ma)
+    def strike(self, address, current_ma, strike_type="normal"):
+        return self._one("strike", address, current_ma, strike_type)
 
     def query_config(self, address):
         return self._one("query_config", address)
@@ -302,35 +309,23 @@ class RingFleet:
         return {"ok": not failed, "failed": failed, "results": results}
 
     def _layout(self):
-        return [vars(spec) for spec in self.specs]
+        return [vars(spec).copy() for spec in self.specs]
 
     @property
     def mapping_context(self):
         return hashlib.sha256(json.dumps(self._layout(), sort_keys=True).encode()).hexdigest()[:16]
 
     def load_mapping(self):
-        try:
-            obj = json.loads(self.mapping_file.read_text(encoding="utf-8"))
-        except (FileNotFoundError, json.JSONDecodeError):
-            return [None] * self.count
-        if not isinstance(obj, dict) or obj.get("rings") != self._layout():
-            return [None] * self.count
-        mapping = obj.get("mapping")
-        if not isinstance(mapping, list) or len(mapping) != self.count:
-            return [None] * self.count
-        return [v if type(v) is int and 0 <= v <= 127 else None for v in mapping]
+        return self.instruments.mapping()
 
-    def save_mapping(self, mapping):
-        if len(mapping) != self.count:
-            raise ValueError(f"mapping needs exactly {self.count} slots")
-        if any(v is not None and (type(v) is not int or not 0 <= v <= 127) for v in mapping):
-            raise ValueError("mapping entries must be null or MIDI pitches 0..127")
-        with self._mapping_lock:
-            tmp = self.mapping_file.with_suffix(".json.tmp")
-            tmp.write_text(json.dumps({"rings": self._layout(), "mapping": mapping}, indent=2),
-                           encoding="utf-8")
-            tmp.replace(self.mapping_file)
-        return list(mapping)
+    def save_mapping(self, mapping, *, expected_id=None):
+        return self.instruments.save_mapping(mapping, expected_id=expected_id)
+
+    def change_instrument(self, action, **kwargs):
+        with self.player._play_lock if self.player is not None else nullcontext():
+            if action == "select_ring" and self.player is not None and self.player.is_playing():
+                raise ValueError("stop playback before selecting ring instruments")
+            return self.instruments.change(action, **kwargs)
 
     def pitches(self):
         # Lazy import avoids a module cycle and shares the existing note naming.

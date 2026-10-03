@@ -43,6 +43,12 @@ pcb/interface/interface-backups/
 mapping.json
 mapping-rings.json
 mapping-rings.json.tmp
+instruments.json
+instruments.json.tmp
+instruments-rings-*.json
+instruments-rings-*.json.tmp
+# Local HTTPS certificate and private key directory (never served as assets).
+certs/
 **/.midi_library.json
 
 # OS metadata

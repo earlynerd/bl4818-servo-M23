@@ -15,6 +15,7 @@ GET  /api/status              -> {"count": N, "homed": [bool * N], "slots": [{..
 GET  /api/strike-timing       -> cached compact timing per slot
 GET  /api/strike-timing?addr=N -> fresh compact poll for one slot
 GET  /api/mapping             -> {"mapping": [int|null, ...] | null}; persisted slot->pitch map
+GET  /api/instruments         -> selected id and named instrument summaries
 GET  /api/pitches             -> {"pitches": [{"pitch","name","slot","homed"}, ...]};
                                  currently mapped pitches, sorted ascending
 GET  /api/play                -> {"playing", "id", "scheduled", "cursor", "duration_ms",
@@ -46,6 +47,7 @@ POST /api/cancel              -> cancels all active strikes (panic stop, also st
 POST /api/stop                -> {"addresses": [int]?}; coordinated stop; re-home required
 POST /api/save-settings       -> {"addresses": [int]?}; persists strike params to NVM
 POST /api/mapping             -> {"mapping": [int|null, ...]}; persists slot->pitch map to disk
+POST /api/instruments         -> {"action": "create"|"select"|"rename"|"delete", ...}
 POST /api/play                -> Start scheduled playback. Accepts two event shapes:
                                   (a) canonical (browser path):
                                       {"events": [{"t_ms","address","nominal_current_ma"}, ...],
@@ -82,6 +84,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import ssl
 import subprocess
 import sys
 import threading
@@ -111,8 +114,10 @@ from ring_bus import (
     STRIKE_PARAM_MUTE_BRAKE_MS,
     STRIKE_PARAM_MUTE_ENGAGE_OFFSET,
     STRIKE_PARAM_MUTE_PRESS_MA,
+    STRIKE_TYPE_DEAD,
 )
 from firmware_image import image_metadata, prepare_image
+from instrument_profiles import InstrumentProfiles
 from ring_bootload import update_ring
 from ring_fleet import RingFleet, parse_ring_specs
 
@@ -227,6 +232,7 @@ LOOPER_HTML = ROOT / "player" / "looper.html"
 # was per-browser localStorage, which reset the mapping every time someone
 # opened the page from a fresh machine.
 MAPPING_FILE = ROOT / "mapping.json"
+INSTRUMENTS_FILE = ROOT / "instruments.json"
 
 
 class BusHealth:
@@ -350,6 +356,7 @@ class Bridge:
         self.maintenance = threading.Event()
         self.count: int = 0
         self.expected_count: int | None = None
+        self.instruments = InstrumentProfiles(INSTRUMENTS_FILE, MAPPING_FILE)
         # Per-address cache of the most recent compact strike-timing snapshot
         # we've seen, keyed by ring address. Populated by ACK_TIMED piggyback
         # on strike replies and by explicit /api/strike-timing polls. Each
@@ -561,7 +568,9 @@ class Bridge:
         self._refresh_status_cache(motor_details=False)
         return self.health.snapshot()
 
-    def strike(self, address: int, current_ma: int) -> dict:
+    def strike(self, address: int, current_ma: int, strike_type: str = "normal") -> dict:
+        if strike_type not in ("normal", "dead"):
+            raise ValueError("strike_type must be 'normal' or 'dead'")
         # ACK_TIMED costs 12 extra payload bytes (~480 us at 250 kbaud) and
         # replaces the otherwise-needed query_strike round trip. Net: less
         # ring traffic per strike, plus the host gets timing for free.
@@ -572,9 +581,15 @@ class Bridge:
             t_lock = time.monotonic()
             prev_current = self.latency.last_accepted_current(address)
             try:
-                reply = self.client.strike(
-                    address, current_ma, reply_mode=REPLY_MODE_ACK_TIMED
-                )
+                if strike_type == "dead":
+                    reply = self.client.strike_ex(
+                        address, current_ma, STRIKE_TYPE_DEAD,
+                        reply_mode=REPLY_MODE_ACK_TIMED,
+                    )
+                else:
+                    reply = self.client.strike(
+                        address, current_ma, reply_mode=REPLY_MODE_ACK_TIMED
+                    )
             except Exception as exc:
                 # A dropped/mangled strike reply is exactly the bus trouble the
                 # health panel exists to surface — record it before propagating
@@ -585,7 +600,11 @@ class Bridge:
             t_post_ack = time.monotonic()
             result = self._ack_to_dict(address, reply, cache_metrics=True)
             if result.get("accepted"):
-                self.latency.record_accepted(address, current_ma)
+                if strike_type == "dead":
+                    # Muted contact must not train normal-strike compensation.
+                    self.latency.forget_accepted(address)
+                else:
+                    self.latency.record_accepted(address, current_ma)
         self.health.record_ok(address, (t_post_ack - t_lock) * 1_000_000)
         self._fold_metrics_into_ema(address, prev_current, result.get("metrics"))
         result["server_timing_us"] = {
@@ -915,7 +934,7 @@ class Bridge:
                 except Exception:
                     homed_by_slot[addr] = False
         out: list[dict] = []
-        for slot, pitch in enumerate(mapping):
+        for slot, pitch in enumerate(mapping[:self.count]):
             if pitch is None:
                 continue
             out.append({
@@ -958,47 +977,12 @@ class Bridge:
         return results
 
     def load_mapping(self) -> list | None:
-        """Return the persisted slot->pitch mapping, or None if no file exists
-        yet. Entries are int (MIDI pitch 0-127) or null (slot disabled)."""
-        try:
-            raw = MAPPING_FILE.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            return None
-        try:
-            obj = json.loads(raw)
-        except json.JSONDecodeError:
-            return None
-        if isinstance(obj, dict):
-            obj = obj.get("mapping")
-        if not isinstance(obj, list):
-            return None
-        cleaned: list = []
-        for v in obj:
-            if v is None:
-                cleaned.append(None)
-            elif isinstance(v, int) and 0 <= v <= 127:
-                cleaned.append(v)
-            else:
-                cleaned.append(None)
-        return cleaned
+        """Return the selected instrument's saved slot-to-pitch mapping."""
+        return self.instruments.mapping()
 
-    def save_mapping(self, mapping: list) -> list:
-        """Write the slot->pitch mapping to disk. Returns the normalized list
-        that was written."""
-        cleaned: list = []
-        for v in mapping:
-            if v is None:
-                cleaned.append(None)
-            elif isinstance(v, int) and 0 <= v <= 127:
-                cleaned.append(v)
-            else:
-                # Reject anything that isn't a valid pitch or null — keeps
-                # the file readable and matches the browser's own validation.
-                raise ValueError(f"mapping entry {v!r} is not null or int 0-127")
-        tmp = MAPPING_FILE.with_suffix(MAPPING_FILE.suffix + ".tmp")
-        tmp.write_text(json.dumps({"mapping": cleaned}, indent=2), encoding="utf-8")
-        tmp.replace(MAPPING_FILE)
-        return cleaned
+    def save_mapping(self, mapping: list, *, expected_id: str | None = None) -> list:
+        """Update only the selected instrument's mapping."""
+        return self.instruments.save_mapping(mapping, expected_id=expected_id)
 
     def close(self) -> None:
         try:
@@ -1918,6 +1902,8 @@ class Handler(BaseHTTPRequestHandler):
             "/player.html": PLAYER_HTML,
             "/looper.html": LOOPER_HTML,
             "/midi_transpose.js": ROOT / "player" / "midi_transpose.js",
+            "/pitch_detector.js": ROOT / "player" / "pitch_detector.js",
+            "/pitch_assignment.js": ROOT / "player" / "pitch_assignment.js",
         }
         if self.path in player_assets:
             asset_path = player_assets[self.path]
@@ -1978,6 +1964,14 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 self._json(200, {"mapping": self.bridge.load_mapping(),
                                  "context": getattr(self.bridge, "mapping_context", None)})
+            except Exception as exc:
+                traceback.print_exc()
+                self._json(500, {"error": str(exc)})
+            return
+
+        if self.path == "/api/instruments":
+            try:
+                self._json(200, self.bridge.instruments.snapshot())
             except Exception as exc:
                 traceback.print_exc()
                 self._json(500, {"error": str(exc)})
@@ -2196,7 +2190,9 @@ class Handler(BaseHTTPRequestHandler):
                 data = self._read_json()
                 addr = int(data["address"])
                 cur = int(data["current_ma"])
-                self._json(200, self.bridge.strike(addr, cur))
+                self._json(200, self.bridge.strike(
+                    addr, cur, strike_type=data.get("strike_type", "normal")
+                ))
                 return
 
             if self.path == "/api/strikes":
@@ -2312,11 +2308,34 @@ class Handler(BaseHTTPRequestHandler):
                     self._json(400, {"error": "expected {'mapping': [...]}"})
                     return
                 try:
-                    cleaned = self.bridge.save_mapping(mapping)
+                    cleaned = self.bridge.save_mapping(
+                        mapping, expected_id=data.get("profile_id")
+                    )
                 except ValueError as exc:
                     self._json(400, {"error": str(exc)})
                     return
                 self._json(200, {"ok": True, "mapping": cleaned})
+                return
+
+            if self.path == "/api/instruments":
+                data = self._read_json()
+                try:
+                    extra = {}
+                    if data.get("action") == "select_ring":
+                        extra = {"ring": data.get("ring"), "expected_id": data.get("expected_id")}
+                        if not isinstance(self.bridge, RingFleet):
+                            raise ValueError("ring selection requires --ring mode")
+                    change = getattr(self.bridge, "change_instrument", self.bridge.instruments.change)
+                    result = change(
+                        data.get("action"), profile_id=data.get("id"),
+                        name=data.get("name"), mapping=data.get("mapping"),
+                        settings=data.get("settings"),
+                        **extra,
+                    )
+                except ValueError as exc:
+                    self._json(400, {"error": str(exc)})
+                    return
+                self._json(200, {**result, "mapping": self.bridge.load_mapping()})
                 return
 
             if self.path == "/api/play":
@@ -2364,7 +2383,7 @@ class Handler(BaseHTTPRequestHandler):
                             return
                         master = max(STRIKE_MA_MIN, min(STRIKE_MA_MAX, int(master)))
                         floor = max(0.0, min(1.0, float(floor)))
-                        mapping = self.bridge.load_mapping() or []
+                        mapping = (self.bridge.load_mapping() or [])[:self.bridge.count]
                         canonical, skipped = motif_events_to_canonical(
                             events, mapping, master, floor
                         )
@@ -2523,6 +2542,18 @@ class Handler(BaseHTTPRequestHandler):
             self._json(500, {"error": str(exc)})
 
 
+def make_tls_context(cert: str | None, key: str | None) -> ssl.SSLContext | None:
+    """Validate HTTPS configuration before opening the hardware connection."""
+    if not cert and not key:
+        return None
+    if not cert or not key:
+        raise ValueError("--tls-cert and --tls-key must be supplied together")
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.load_cert_chain(certfile=cert, keyfile=key)
+    return context
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("-p", "--port", help="Serial port (default: auto-detect)")
@@ -2531,6 +2562,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--baud", type=int, default=DEFAULT_BAUD, help=f"Baud rate (default: {DEFAULT_BAUD})")
     ap.add_argument("--host", default="127.0.0.1", help="HTTP bind host (default: 127.0.0.1)")
     ap.add_argument("--http-port", type=int, default=8765, help="HTTP bind port (default: 8765)")
+    ap.add_argument("--tls-cert", help="PEM certificate chain for optional HTTPS on --http-port")
+    ap.add_argument("--tls-key", help="PEM private key for --tls-cert (both options required)")
     ap.add_argument("--timeout-ms", type=int, default=1000,
                     help="Per-frame RX timeout in ms (default: 1000). Bump higher if you see"
                          " transient 'timeout waiting for frame' errors during homing.")
@@ -2555,6 +2588,12 @@ def main(argv: list[str] | None = None) -> int:
         ring_specs = parse_ring_specs(args.ring)
     except ValueError as exc:
         ap.error(str(exc))
+
+    try:
+        tls_context = make_tls_context(args.tls_cert, args.tls_key)
+    except (ValueError, OSError) as exc:
+        print(f"HTTPS configuration failed: {exc}", file=sys.stderr)
+        return 1
 
     library_dir: Path | None = None
     if args.library_dir:
@@ -2595,8 +2634,23 @@ def main(argv: list[str] | None = None) -> int:
         STRIKE_MA_MIN, min(STRIKE_MA_MAX, int(args.motif_current_ma))
     )
     Handler.default_vel_floor = max(0.0, min(1.0, float(args.motif_vel_floor)))
-    server = ThreadingHTTPServer((args.host, args.http_port), Handler)
-    url = f"http://{args.host}:{args.http_port}/"
+    server = None
+    try:
+        server = ThreadingHTTPServer((args.host, args.http_port), Handler)
+        if tls_context is not None:
+            # Defer handshakes to request threads; an idle TLS client must not
+            # block acceptance of subsequent control requests.
+            server.socket = tls_context.wrap_socket(
+                server.socket, server_side=True, do_handshake_on_connect=False
+            )
+    except OSError as exc:
+        print(f"Web server startup failed: {exc}", file=sys.stderr)
+        if server is not None:
+            server.server_close()
+        bridge.close()
+        return 1
+    scheme = "https" if tls_context is not None else "http"
+    url = f"{scheme}://{args.host}:{args.http_port}/"
     print(f"Serving {PLAYER_HTML.name} at {url}")
     print(f"Looper UI available at {url}looper.html")
     if library_dir is not None:

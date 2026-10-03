@@ -256,3 +256,65 @@ When a decision is reversed or superseded, append a new entry rather than rewrit
 - **Why:** Each ring supports at most 16 actuators; additional adapters expand the instrument without making one ring's reply timeout stall another ring's schedule.
 - **Tradeoffs:** Expected counts pin slot offsets; mismatched discovery blocks new playback. Named-ring mappings and browser slot settings are bound to the configured layout. Equal-size physical ring swaps require operator care. Actual cross-ring impact alignment remains a bench gate. Firmware updates stay in single-ring maintenance mode.
 - **Affects:** `scripts/ring_fleet.py`, `scripts/ring_midi_server.py`, player/looper ring labels, `docs/host-software.md`, and `midi_server_api.md`.
+## 2026-09-19 — Microphone pitch assignment starts with one reviewed mallet
+
+- **Decision:** Detect one selected mallet through browser-local microphone processing, using either one explicit strike at the existing current/trim or a manual tap. A stable estimate becomes a proposed pitch; only Assign persists it through the existing mapping API. Capture ends on completion, cancellation, dialog closure or page hiding. No audio is uploaded or stored.
+- **Why:** Isolated notes associate an acoustic measurement with a known actuator while keeping octave mistakes reviewable. Existing motion, homing, transport and firmware behavior are preserved.
+- **Tradeoffs:** Detection is bounded to 80–1500 Hz and A4=440; stability does not establish the true fundamental. Full-ring scanning awaits acoustic trials. Calibration has no cross-client reservation. Desktop localhost works immediately; phones require trusted HTTPS. Optional server TLS accepts externally managed certificates, with private reverse proxies also supported; certificate trust and VPN setup remain deployment work.
+- **Affects:** Browser player, static asset routes and `docs/host-software.md`.
+
+## 2026-09-20 — Full-ring microphone mapping uses one cancellable capture
+
+- **Decision:** Add an explicit all-mallet scan with one microphone session, frozen pass currents, fresh readiness checks, and a quiet interval referenced to the original noise floor. Preserve completed proposals on stop, allow unresolved-only retries, and save reviewed successes while retaining unresolved mappings.
+- **Why:** The user reported reliable mobile recognition on two drums; sequential capture removes repeated operator actions without changing the proven pitch estimator or firmware.
+- **Tradeoffs:** No automatic current increases or retry strikes. Acoustic failures may continue after quiet; command/connection failures stop. Hiding the page cancels capture. One operator is required; no cross-client reservation is introduced. Volume normalization remains a proposed follow-up requiring fixed microphone geometry, audio-processing checks, measured trim verification and shared trim persistence.
+- **Supersedes:** The full-ring scan deferral in the 2026-09-19 microphone decision.
+- **Affects:** `player/pitch_detector.js`, `player/pitch_assignment.js`, `player/midi_player.html`, and the host software guide.
+
+## 2026-09-20 — Pitch scans adapt to background noise and retry silent strikes
+
+- **Decision:** Limit inter-measurement settling to 0.6–1.5 seconds and require a new onset against a rolling pre-strike reference. Accept healthy cached readiness up to two seconds old; retry unavailable status three times on the same mallet. After 1.8 seconds without an audible onset following acknowledgment, retry once at up to 20% / 200 mA extra, capped at 3000 mA, without changing trims. Only exhausted silent attempts advance unresolved; readiness, command or unclear-audio failures stop for intervention.
+- **Why:** Mobile trials encountered city noise, long ringdown waits and spurious cached-status skips. The user requested bounded stronger retries and no arbitrary skipping.
+- **Supersedes:** Original-noise-floor settling and no automatic retry/current increase in “Full-ring microphone mapping uses one cancellable capture.”
+- **Affects:** Browser pitch capture, scan workflow, background probe scheduling and `docs/host-software.md`. Firmware and transport remain unchanged.
+
+## 2026-09-20 — Acoustic retry covers noise-triggered onsets
+
+- **Decision:** Retry the same mallet once after either 1.8 seconds without onset or 3 seconds without a stable pitch, then mark unresolved and continue. Overloaded audio retries at original current; other missed/unclear readings use the bounded increase. Actual readiness/command failures stop with their reason retained in the affected row.
+- **Why:** The user reported scans stopping on missed notes with only “Stopped before completion” shown. Background noise can trigger onset without a usable note, so onset alone cannot classify a failed capture as fatal.
+- **Supersedes:** The unclear-audio stop rule in “Pitch scans adapt to background noise and retry silent strikes.”
+- **Affects:** Browser pitch detector and scan feedback; `docs/host-software.md`.
+
+## 2026-09-20 — Stalled microphone capture has an independent watchdog
+
+- **Decision:** Check wall-clock time before the fresh-audio gate. Try one audio resume after 0.75 seconds without fresh frames, and stop with a specific microphone error after three seconds if it cannot recover. Reject analysis exceptions through the capture promise and require recent running audio before dispatching a strike.
+- **Why:** The user reported the scan remaining at the heard-strike message. A frozen or interrupted audio clock bypassed normal timeout checks until the 25-second fallback; a simulated freeze reproduced this path.
+- **Affects:** `player/pitch_detector.js` and the host software guide. Healthy-input acoustic retry timing and reviewed mapping saves remain as specified above.
+
+## 2026-09-21 — Optional native M2003 J-Link flash loader
+
+- **Decision:** Add `-NativeFlash` to the existing complete-stack flasher, selecting `M2003FC1AE` for bulk APROM/LDROM downloads with J-Link V9.58+. Retain explicit manifest invalidation and commit-last programming, CONFIG preservation, and independent physical byte verification. Keep the original method available by omitting the switch. Native failures stop without automatic fallback. Add generation-only operation and programming logs/timing.
+- **Why:** SEGGER now supports both banks directly. A V12 Compact Base bench test completed a forced full rewrite and verification in 3.375 seconds versus 10.667 seconds for the per-word method, preserving CONFIG and settings.
+- **Supersedes:** The per-word-only programming implementation; the complete-stack, boot-configuration, and physical-verification contracts remain in force.
+- **Affects:** `scripts/flash-jlink.ps1`, `scripts/make_provision_jlink.py`, build outputs, provisioning tests, and `docs/firmware-update.md`.
+
+## 2026-09-24 — Named instrument pitch maps follow the selected setup
+
+- **Decision:** Store named pitch maps and player settings in `instruments.json`, with one selected profile supplying the existing mapping and pitch-playback APIs. Import an existing `mapping.json` as the Default profile on first save. Browser playback, keyboard routing, looper routing, and pitch discovery consider only currently enumerated actuator slots; saved entries beyond that count stay with their profile but are inactive. Creating a profile copies trims, fallback routes, velocity floor, compensation, and master current.
+- **Why:** Switching between drums with different actuator counts left old mallets mapped and could make songs target absent addresses. Named profiles avoid repeated remapping while keeping an instrument's assignments available for later reuse.
+- **Supersedes:** A single shared `mapping.json` as the sole persisted pitch map.
+- **Affects:** MIDI server mapping API, player and looper routing, microphone assignment, `README.md`, and `midi_server_api.md`.
+
+## 2026-10-02 — Select existing drum profiles independently per ring
+
+- **Decision:** Integrate main's named instrument profiles, microphone/HTTPS flow and dead-strike testing with multi-ring playback. Each ring selects an existing profile; global pitch and trim edits split back into its local profile. Persist ring assignments and shared current/velocity/compensation controls by layout, with stale-selection checks. Keep original single-drum scalar settings and fallback routes intact; combined fallback overrides belong to the selected set of drums.
+- **Why:** Two drums on separate serial adapters should reuse their saved calibration without requiring a manually merged profile. Shared controls are the user's chosen trial workflow.
+- **Supersedes:** `mapping-rings.json` as the sole multi-ring store; matching legacy mappings remain readable. Fixed slot offsets and independent playback workers remain unchanged.
+- **Affects:** `scripts/fleet_instruments.py`, `scripts/ring_fleet.py`, server instrument API, player ring selectors, looper initialization and host/API documentation. Physical cross-adapter timing remains unqualified by software tests.
+
+## 2026-10-02 — Hold the main merge for two-drum hardware testing
+
+- **Decision:** Prepare and commit the integration on `multi-ring`, but defer merging it into `main` until the COM29/COM48 two-drum hardware trial passes.
+- **Why:** Builds, simulated serial tests and browser checks do not validate physical routing, homing, playback or impact timing across two adapters.
+- **Supersedes:** The plan to merge into `main` immediately after software validation.
+- **Affects:** Branch integration and the hardware acceptance checklist in `docs/host-software.md`; no hardware playback has been performed as part of preparation.

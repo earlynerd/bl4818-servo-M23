@@ -103,6 +103,7 @@ build-jlink: images
 		--manifest $(BUILD_DIR)/$(PROJECT).manifest.bin \
 		--ldrom $(BUILD_DIR)/$(LDROM_PROJECT).bin \
 		--output $(BUILD_DIR)/$(PROJECT).jlink \
+		--native-output $(BUILD_DIR)/$(PROJECT)-native.jlink \
 		--verify-output $(BUILD_DIR)/m2003-firmware-verify.jlink \
 		--config-read-output $(BUILD_DIR)/m2003-config-read.jlink
 

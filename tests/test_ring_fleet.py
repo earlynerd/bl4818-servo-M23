@@ -52,6 +52,10 @@ class SerialRing:
     def strike_burst(self, pairs, reply_mode):
         self.calls.append(("chord", list(pairs), reply_mode))
 
+    def strike_ex(self, address, current_ma, strike_type, reply_mode):
+        self.calls.append(("dead", address, current_ma, strike_type))
+        return CommandAck(address, 0, 0, 0)
+
     def strike_home(self, address, reply_mode):
         self.calls.append(("home", address))
         if self.on_home:
@@ -129,13 +133,20 @@ class FleetTests(unittest.TestCase):
         self.assertEqual([p["slot"] for p in self.fleet.pitches()], [0, 14, 23])
 
     def test_changed_layout_does_not_reuse_mapping(self):
-        self.fleet.save_mapping([60] * 24)
-        obj = json.loads(self.fleet.mapping_file.read_text())
+        obj = {"rings": self.fleet._layout(), "mapping": [60] * 24}
         obj["rings"][0]["port"] = "COM99"
         self.fleet.mapping_file.write_text(json.dumps(obj))
         self.assertEqual(self.fleet.load_mapping(), [None] * 24)
         with self.assertRaises(ValueError):
             self.fleet.save_mapping([60] * 14)
+
+    def test_dead_strike_routes_through_second_adapter(self):
+        result = self.fleet.strike(14, 500, strike_type="dead")
+        self.assertTrue(result["accepted"])
+        self.assertEqual(result["address"], 14)
+        self.assertEqual(self.clients[0].calls, [])
+        self.assertEqual(self.clients[1].calls[0][:3], ("dead", 0, 500))
+        self.assertIsNone(self.fleet.rings[1].latency.last_accepted_current(0))
 
     def test_count_change_fails_without_shifting_other_ring(self):
         self.clients[0].count = 13
@@ -230,6 +241,14 @@ class FleetTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "single-ring"):
             manager.start_update(0)
 
+    def test_ring_selection_cannot_change_during_playback(self):
+        source = self.fleet.instruments.source
+        selected = source.change("create", name="pan", mapping=[60] * 14)["active"]
+        self.fleet.player.play([self.event(0, 5000)])
+        with self.assertRaisesRegex(ValueError, "stop playback"):
+            self.fleet.change_instrument("select_ring", ring="pan", profile_id=selected)
+        self.assertEqual(self.fleet.load_mapping(), [None] * 24)
+
     def test_partial_open_failure_closes_already_open_ports(self):
         calls = []
         def factory(**kwargs):
@@ -258,9 +277,20 @@ class FleetTests(unittest.TestCase):
             with urlopen(req, timeout=2) as response:
                 return json.load(response)
         try:
+            source = self.fleet.instruments.source
+            first = source.change("create", name="Pan", mapping=[48] + [None] * 13,
+                                  settings={"trim": [1.2] * 14, "current_ma": 250})["active"]
+            second = source.change("create", name="Drum", mapping=[60] + [None] * 9,
+                                   settings={"trim": [0.8] * 10})["active"]
+            for ring, profile in [("pan", first), ("drum", second)]:
+                state = request("/api/instruments")
+                state = request("/api/instruments", {"action": "select_ring", "ring": ring,
+                                "id": profile, "expected_id": state["active"]})
+            self.assertEqual(state["settings"]["trim"], [1.2] * 14 + [0.8] * 10)
+            self.assertEqual(state["settings"]["current_ma"], 250)
             mapping = [None] * 24
             mapping[0], mapping[14] = 48, 60
-            request("/api/mapping", {"mapping": mapping})
+            request("/api/mapping", {"mapping": mapping, "profile_id": state["active"]})
             self.assertEqual(request("/api/mapping")["context"], self.fleet.mapping_context)
             self.assertEqual(request("/api/status")["count"], 24)
             response = request("/api/play", {"events": [

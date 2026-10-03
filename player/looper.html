@@ -448,6 +448,7 @@ const LP = {
   slots: [],
   // shared calibration (loaded from main player's storage)
   mapping: [],
+  activeInstrumentId: "default",
   trim: [],
   fallback: {},
   velFloor: DEFAULT_VEL_FLOOR,
@@ -542,7 +543,12 @@ async function fetchServerMapping() {
 }
 function loadTrim() {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY_TRIM);
+    const key = profileStorageKey(STORAGE_KEY_TRIM);
+    let raw = localStorage.getItem(key);
+    if (!raw && key !== STORAGE_KEY_TRIM) {
+      raw = localStorage.getItem(STORAGE_KEY_TRIM);
+      if (raw) localStorage.setItem(key, raw);
+    }
     if (raw) {
       const arr = JSON.parse(raw);
       if (Array.isArray(arr)) return arr.map(v => Number.isFinite(v) ? Math.max(0, v) : 1.0);
@@ -552,7 +558,12 @@ function loadTrim() {
 }
 function loadFallback() {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY_FB);
+    const key = profileStorageKey(STORAGE_KEY_FB);
+    let raw = localStorage.getItem(key);
+    if (!raw && key !== STORAGE_KEY_FB) {
+      raw = localStorage.getItem(STORAGE_KEY_FB);
+      if (raw) localStorage.setItem(key, raw);
+    }
     if (raw) {
       const obj = JSON.parse(raw);
       if (obj && typeof obj === "object") {
@@ -568,9 +579,21 @@ function loadFallback() {
   } catch {}
   return {};
 }
+function profileStorageKey(base) {
+  return LP.activeInstrumentId === "default" ? base : `${base}.${LP.activeInstrumentId}`;
+}
+function storedProfileValue(base) {
+  const key = profileStorageKey(base);
+  let value = localStorage.getItem(key);
+  if (value == null && key !== base) {
+    value = localStorage.getItem(base);
+    if (value != null) localStorage.setItem(key, value);
+  }
+  return value;
+}
 function loadVelFloor() {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY_VEL);
+    const raw = storedProfileValue(STORAGE_KEY_VEL);
     if (raw != null) {
       const v = parseFloat(raw);
       if (Number.isFinite(v)) return Math.max(0, Math.min(1, v));
@@ -579,11 +602,17 @@ function loadVelFloor() {
   return DEFAULT_VEL_FLOOR;
 }
 function saveVelFloor() {
-  localStorage.setItem(STORAGE_KEY_VEL, String(LP.velFloor));
+  localStorage.setItem(profileStorageKey(STORAGE_KEY_VEL), String(LP.velFloor));
+  if (LP.activeInstrumentId) {
+    api("POST", "/api/instruments", {
+      action: "update_settings", id: LP.activeInstrumentId,
+      settings: {vel_floor: LP.velFloor},
+    }).catch(() => {});
+  }
 }
 function loadCompSettings() {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY_COMP);
+    const raw = storedProfileValue(STORAGE_KEY_COMP);
     if (raw) {
       const obj = JSON.parse(raw);
       if (obj && typeof obj === "object") {
@@ -611,11 +640,11 @@ function saveMasterMa(ma) {
 
 // ─── Pitch routing & current scaling (mirrors midi_player.html) ───
 function slotForPitch(pitch) {
-  for (let i = 0; i < LP.mapping.length; i++) {
+  for (let i = 0; i < LP.count; i++) {
     if (LP.mapping[i] === pitch) return i;
   }
   const fb = LP.fallback[pitch];
-  return Number.isInteger(fb) ? fb : -1;
+  return Number.isInteger(fb) && fb >= 0 && fb < LP.count ? fb : -1;
 }
 function getCurrentMa() {
   return parseInt(document.getElementById("currentSlider").value, 10);
@@ -1493,6 +1522,13 @@ function uiTick() {
 // ─── Init / wiring ───
 async function init() {
   LP.mapping = loadMapping();
+  let remoteSettings = {};
+  try {
+    const instruments = await api("GET", "/api/instruments");
+    LP.activeInstrumentId = instruments.active;
+    remoteSettings = instruments.settings || {};
+  }
+  catch { LP.activeInstrumentId = "default"; }
   const serverMapping = await fetchServerMapping();
   if (serverMapping) {
     LP.mapping = serverMapping;
@@ -1502,6 +1538,11 @@ async function init() {
   LP.fallback = loadFallback();
   LP.velFloor = loadVelFloor();
   loadCompSettings();
+  if (Array.isArray(remoteSettings.trim)) LP.trim = remoteSettings.trim.slice();
+  if (remoteSettings.fallback) LP.fallback = { ...remoteSettings.fallback };
+  if (Number.isFinite(remoteSettings.vel_floor)) LP.velFloor = remoteSettings.vel_floor;
+  if (typeof remoteSettings.comp_enabled === "boolean") LP.compEnabled = remoteSettings.comp_enabled;
+  if (Number.isFinite(remoteSettings.comp_default_ms)) LP.compDefaultMs = remoteSettings.comp_default_ms;
   loadProject();
   LP.bpm = LP.bpm || 120;
   LP.beatsPerBar = LP.beatsPerBar || 4;

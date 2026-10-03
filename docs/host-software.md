@@ -43,7 +43,8 @@ Then open <http://localhost:8765/>. The normal startup sequence is:
    instrument.
 
 The server owns the serial port; do not run another ring client against the same
-port while it is active. The local pitch mapping is written to `mapping.json`.
+port while it is active. Named local pitch mappings are written to
+`instruments.json`; an existing `mapping.json` is imported on first use.
 The file is machine/instrument state and is ignored by Git.
 
 ### Assign pitches with a microphone

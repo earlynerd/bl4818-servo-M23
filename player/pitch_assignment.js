@@ -98,7 +98,7 @@ async function startPitchDetection(strike) {
       renderPitchScan();
     }
     pitchElement('pitchReading').textContent = `${result.name} · ${result.frequency.toFixed(1)} Hz`;
-    const duplicate = S.mapping.some((value, index) => index !== slot && value === result.midi);
+    const duplicate = S.mapping.slice(0, S.count).some((value, index) => index !== slot && value === result.midi);
     pitchMessage(`MIDI ${result.midi} · ${result.cents >= 0 ? '+' : ''}${result.cents.toFixed(1)} cents · stable across ${result.frames} readings. ` +
       (!result.assignable ? 'Between notes: check the tuning and retry before assigning.' :
         `Ready to assign to mallet ${slot}.${duplicate ? ' Another mallet already has this pitch; check that the octave is correct.' : ' Check the octave before assigning.'}`));
@@ -264,7 +264,7 @@ async function savePitchScan() {
         JSON.stringify(remote.mapping) !== JSON.stringify(mapping)) {
       throw new Error('Another browser changed the saved map. Reload the player before saving.');
     }
-    const saved = await pitchRequest('/api/mapping', { mapping }, signal);
+    const saved = await pitchRequest('/api/mapping', { mapping, profile_id: S.activeInstrumentId }, signal);
     if (!saved.ok || JSON.stringify(saved.mapping) !== JSON.stringify(mapping)) throw new Error('Server did not confirm the mapping.');
     S.mapping = saved.mapping;
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(S.mapping)); } catch {}
@@ -325,7 +325,7 @@ async function applyDetectedPitch() {
   mapping[result.slot] = result.midi;
   try {
     // Do not display a saved assignment until the server confirms persistence.
-    const saved = await pitchRequest('/api/mapping', { mapping }, new AbortController().signal);
+    const saved = await pitchRequest('/api/mapping', { mapping, profile_id: S.activeInstrumentId }, new AbortController().signal);
     if (!saved.ok || JSON.stringify(saved.mapping) !== JSON.stringify(mapping)) throw new Error('Server did not confirm the mapping.');
     S.mapping = saved.mapping;
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(S.mapping)); } catch {}

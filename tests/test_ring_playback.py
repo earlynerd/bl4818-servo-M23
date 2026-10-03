@@ -5,7 +5,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -22,13 +22,16 @@ from ring_bus import (  # noqa: E402
     FAULT_CODES,
     PREAMBLE,
     REPLY_MODE_ACK,
+    REPLY_MODE_ACK_TIMED,
     REPLY_MODE_NONE,
     SUBCMD_REPLY_ACK,
     SUBCMD_REPLY_NONE,
     SUBCMD_QUERY_CONFIG,
     SUBCMD_STRIKE,
+    SUBCMD_STRIKE_EX,
     SUBCMD_STRIKE_CANCEL,
     STRIKE_WARNING_HOME_SHIFT,
+    STRIKE_TYPE_DEAD,
     CommandAck,
     RingClientV2,
     RingTimeout,
@@ -337,6 +340,39 @@ class RingBurstTests(unittest.TestCase):
 
 
 class BridgeTests(unittest.TestCase):
+    def test_dead_strike_uses_extended_command_and_preserves_rejection(self):
+        for result in (ACK_RESULT_OK, ACK_RESULT_REJECT_NOT_READY):
+            with self.subTest(result=result):
+                bridge = object.__new__(Bridge)
+                bridge.lock = threading.Lock()
+                bridge.latency = LatencyTracker()
+                bridge.latency.record_accepted(2, 900)
+                bridge.health = FakeHealth()
+                bridge.strike_timing = {}
+                bridge.client = Mock()
+                bridge.client.strike_ex.return_value = CommandAck(
+                    2, SUBCMD_STRIKE_EX, result, 0,
+                )
+
+                reply = bridge.strike(2, 1200, strike_type="dead")
+
+                bridge.client.strike_ex.assert_called_once_with(
+                    2, 1200, STRIKE_TYPE_DEAD, reply_mode=REPLY_MODE_ACK_TIMED,
+                )
+                bridge.client.strike.assert_not_called()
+                self.assertEqual(reply["accepted"], result == ACK_RESULT_OK)
+                self.assertEqual(
+                    bridge.latency.last_accepted_current(2),
+                    None if result == ACK_RESULT_OK else 900,
+                )
+
+    def test_invalid_strike_type_does_not_touch_bus(self):
+        bridge = object.__new__(Bridge)
+        bridge.client = Mock()
+        with self.assertRaises(ValueError):
+            bridge.strike(2, 1200, strike_type="unknown")
+        self.assertEqual(bridge.client.mock_calls, [])
+
     def test_home_returns_truthful_rejection_ack(self):
         bridge = object.__new__(Bridge)
         bridge.lock = threading.Lock()

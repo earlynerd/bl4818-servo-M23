@@ -280,6 +280,64 @@ shared pins back to the UART adapter.
 
 There is intentionally no separate app-only or provisioning command path.
 
+#### Native J-Link flash programming
+
+J-Link V9.58 added M2003 support. The installed V9.68 device database lists
+`M2003FC1AE` with 32 KB APROM and 4 KB LDROM; SEGGER documents both native
+flash loaders at <https://kb.segger.com/Nuvoton_M2003>.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/flash-jlink.ps1 -NativeFlash
+```
+
+`make build-jlink` also generates `build/m2003-motor-native.jlink`. The wrapper
+selects the exact device for native programming and continues to use generic
+Cortex-M23 sessions for the existing CONFIG and physical readback operations.
+Two `loadfile` operations replace bulk per-word APROM/LDROM programming. J-Link
+performs its own flash download verification; the independent byte-for-byte
+readback remains mandatory. LDROM is erased over its bounded 4 KB range before
+loading. The small explicit FMC sequence invalidates the manifest before APROM
+changes and writes its magic last, after both native downloads succeed.
+The settings journal at `0x7C00..0x7FFF` is outside all programmed/erased ranges.
+No chip-wide erase or native CONFIG/SPROM programming is requested.
+
+Native mode stops on a J-Link error; it does not automatically retry with the
+legacy method after a partial download. `-GenerateOnly` prepares files without
+contacting a probe. `-SkipBuild` reuses generated files. Programming output and
+timing are retained in `build/m2003-firmware-program.log` and console output,
+respectively. Omit `-NativeFlash` to explicitly use the original method.
+
+**Bench result, 2026-09-21:** One connected M2003FC1AE actuator, J-Link Compact
+Base V12.00 (serial 822007774), J-Link V9.68, SWD 4000 kHz. Application: 29,584
+bytes, CRC32 `EBFDF9BC`; manifest: 512 bytes; LDROM: 4,092 bytes. Timings below
+exclude building and include CONFIG capture, programming, and independent
+physical verification; CONFIG was already LDROM-first.
+
+| Run | Programming phase | Complete wrapper |
+| --- | ---: | ---: |
+| Native, existing APROM matched and was skipped | 0.78 s | 2.436 s |
+| Native, forced full APROM rewrite | 1.79 s | 3.375 s |
+| Original per-word method, same probe and images | 8.94 s | 10.667 s |
+
+The forced native run inserted `erase 0x00000000 0x000079FF noreset` immediately
+before the application `loadfile`, after manifest invalidation. That extra
+erase is included in its timing; it is not part of the normal generated script.
+J-Link confirmed a 29,696-byte APROM range was programmed, at 49 KB/s program
+and verify speed. The normal native script has 74 lines versus 42,494 for the
+original. All three runs passed APROM, manifest, and LDROM byte comparisons.
+The final wrapper, including persistent programming logs, was also run
+successfully in normal native mode (0.82 s programming phase).
+
+Final CONFIG remained `FFFFFF7F / FFFFFFFF / FFFFFF5A`. The entire 1 KB settings
+journal matched its pre-test SHA256:
+`A39AB6D4E9827E3E82F0E8390A1D392C9B97E4A0527D60AE11E55C97C4E4EF39`.
+Evidence is in local `build/native-flash-bench.log`, `build/native-force-bench.log`,
+`build/native-force-benchmark.jlink`, `build/legacy-flash-bench.log`,
+`build/native-final-bench.log`, and `build/native-settings-{before,after}.{bin,log}`.
+Offline validation: forced rebuild `make -B build-jlink`, generation-only
+wrapper run, and all 12 provisioning tests passed. UART handoff/cold boot was
+not exercised during this SWD test; power-cycle before reconnecting UART.
+
 The standalone updater remains the supported recovery and command-line path:
 
 ```powershell

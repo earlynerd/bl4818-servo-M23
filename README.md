@@ -118,6 +118,17 @@ Connect the programmer over SWD and run:
 powershell -File scripts/flash-jlink.ps1
 ```
 
+For J-Link V9.58 or newer, use the faster native M2003FC1AE flash loader:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/flash-jlink.ps1 -NativeFlash
+```
+
+Add `-SkipBuild` to reuse the generated artifacts, or `-GenerateOnly` to build
+them without contacting hardware. Native mode retains the CONFIG preservation,
+commit-last manifest, and physical verification described below. Omitting
+`-NativeFlash` retains the original per-word programming method.
+
 This standard command first records CONFIG0..2, programs and byte-verifies
 APROM, its manifest, and LDROM, then preserves the existing configuration while
 selecting LDROM-first boot. It refuses automatic CONFIG changes on a locked or
@@ -134,8 +145,10 @@ py scripts/ring_midi_server.py -p COM7 --library-dir C:\path\to\midi-library
 ```
 
 Open <http://localhost:8765/>. Enumerate the ring, home the actuators, and assign
-a MIDI pitch to each slot before playing a file. The mapping is stored locally
-in `mapping.json` and is intentionally not committed.
+a MIDI pitch to each slot before playing a file. Use the instrument selector
+to save and switch named pitch maps and player settings. Profiles are stored locally in
+`instruments.json` and are intentionally not committed. An existing
+`mapping.json` is imported as the Default profile.
 
 For a first hardware check without the browser:
 

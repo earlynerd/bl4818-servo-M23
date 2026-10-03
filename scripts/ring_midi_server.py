@@ -16,6 +16,7 @@ GET  /api/status              -> {"count": N, "homed": [bool * N], "slots": [{..
 GET  /api/strike-timing       -> cached compact timing per slot
 GET  /api/strike-timing?addr=N -> fresh compact poll for one slot
 GET  /api/mapping             -> {"mapping": [int|null, ...] | null}; persisted slot->pitch map
+GET  /api/instruments         -> selected id and named instrument summaries
 GET  /api/pitches             -> {"pitches": [{"pitch","name","slot","homed"}, ...]};
                                  currently mapped pitches, sorted ascending
 GET  /api/play                -> {"playing", "id", "scheduled", "cursor", "duration_ms",
@@ -47,6 +48,7 @@ POST /api/cancel              -> cancels all active strikes (panic stop, also st
 POST /api/stop                -> {"addresses": [int]?}; coordinated stop; re-home required
 POST /api/save-settings       -> {"addresses": [int]?}; persists strike params to NVM
 POST /api/mapping             -> {"mapping": [int|null, ...]}; persists slot->pitch map to disk
+POST /api/instruments         -> {"action": "create"|"select"|"rename"|"delete", ...}
 POST /api/play                -> Start scheduled playback. Accepts two event shapes:
                                   (a) canonical (browser path):
                                       {"events": [{"t_ms","address","nominal_current_ma"}, ...],
@@ -112,8 +114,10 @@ from ring_bus import (
     STRIKE_PARAM_MUTE_BRAKE_MS,
     STRIKE_PARAM_MUTE_ENGAGE_OFFSET,
     STRIKE_PARAM_MUTE_PRESS_MA,
+    STRIKE_TYPE_DEAD,
 )
 from firmware_image import image_metadata, prepare_image
+from instrument_profiles import InstrumentProfiles
 from ring_bootload import update_ring
 
 
@@ -227,6 +231,7 @@ LOOPER_HTML = ROOT / "player" / "looper.html"
 # was per-browser localStorage, which reset the mapping every time someone
 # opened the page from a fresh machine.
 MAPPING_FILE = ROOT / "mapping.json"
+INSTRUMENTS_FILE = ROOT / "instruments.json"
 
 
 class BusHealth:
@@ -349,6 +354,7 @@ class Bridge:
         # a queued playback request cannot begin as the applications restart.
         self.maintenance = threading.Event()
         self.count: int = 0
+        self.instruments = InstrumentProfiles(INSTRUMENTS_FILE, MAPPING_FILE)
         # Per-address cache of the most recent compact strike-timing snapshot
         # we've seen, keyed by ring address. Populated by ACK_TIMED piggyback
         # on strike replies and by explicit /api/strike-timing polls. Each
@@ -552,7 +558,9 @@ class Bridge:
         self._refresh_status_cache(motor_details=False)
         return self.health.snapshot()
 
-    def strike(self, address: int, current_ma: int) -> dict:
+    def strike(self, address: int, current_ma: int, strike_type: str = "normal") -> dict:
+        if strike_type not in ("normal", "dead"):
+            raise ValueError("strike_type must be 'normal' or 'dead'")
         # ACK_TIMED costs 12 extra payload bytes (~480 us at 250 kbaud) and
         # replaces the otherwise-needed query_strike round trip. Net: less
         # ring traffic per strike, plus the host gets timing for free.
@@ -563,9 +571,15 @@ class Bridge:
             t_lock = time.monotonic()
             prev_current = self.latency.last_accepted_current(address)
             try:
-                reply = self.client.strike(
-                    address, current_ma, reply_mode=REPLY_MODE_ACK_TIMED
-                )
+                if strike_type == "dead":
+                    reply = self.client.strike_ex(
+                        address, current_ma, STRIKE_TYPE_DEAD,
+                        reply_mode=REPLY_MODE_ACK_TIMED,
+                    )
+                else:
+                    reply = self.client.strike(
+                        address, current_ma, reply_mode=REPLY_MODE_ACK_TIMED
+                    )
             except Exception as exc:
                 # A dropped/mangled strike reply is exactly the bus trouble the
                 # health panel exists to surface — record it before propagating
@@ -576,7 +590,11 @@ class Bridge:
             t_post_ack = time.monotonic()
             result = self._ack_to_dict(address, reply, cache_metrics=True)
             if result.get("accepted"):
-                self.latency.record_accepted(address, current_ma)
+                if strike_type == "dead":
+                    # Muted contact must not train normal-strike compensation.
+                    self.latency.forget_accepted(address)
+                else:
+                    self.latency.record_accepted(address, current_ma)
         self.health.record_ok(address, (t_post_ack - t_lock) * 1_000_000)
         self._fold_metrics_into_ema(address, prev_current, result.get("metrics"))
         result["server_timing_us"] = {
@@ -900,7 +918,7 @@ class Bridge:
                 except Exception:
                     homed_by_slot[addr] = False
         out: list[dict] = []
-        for slot, pitch in enumerate(mapping):
+        for slot, pitch in enumerate(mapping[:self.count]):
             if pitch is None:
                 continue
             out.append({
@@ -943,47 +961,12 @@ class Bridge:
         return results
 
     def load_mapping(self) -> list | None:
-        """Return the persisted slot->pitch mapping, or None if no file exists
-        yet. Entries are int (MIDI pitch 0-127) or null (slot disabled)."""
-        try:
-            raw = MAPPING_FILE.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            return None
-        try:
-            obj = json.loads(raw)
-        except json.JSONDecodeError:
-            return None
-        if isinstance(obj, dict):
-            obj = obj.get("mapping")
-        if not isinstance(obj, list):
-            return None
-        cleaned: list = []
-        for v in obj:
-            if v is None:
-                cleaned.append(None)
-            elif isinstance(v, int) and 0 <= v <= 127:
-                cleaned.append(v)
-            else:
-                cleaned.append(None)
-        return cleaned
+        """Return the selected instrument's saved slot-to-pitch mapping."""
+        return self.instruments.mapping()
 
-    def save_mapping(self, mapping: list) -> list:
-        """Write the slot->pitch mapping to disk. Returns the normalized list
-        that was written."""
-        cleaned: list = []
-        for v in mapping:
-            if v is None:
-                cleaned.append(None)
-            elif isinstance(v, int) and 0 <= v <= 127:
-                cleaned.append(v)
-            else:
-                # Reject anything that isn't a valid pitch or null — keeps
-                # the file readable and matches the browser's own validation.
-                raise ValueError(f"mapping entry {v!r} is not null or int 0-127")
-        tmp = MAPPING_FILE.with_suffix(MAPPING_FILE.suffix + ".tmp")
-        tmp.write_text(json.dumps({"mapping": cleaned}, indent=2), encoding="utf-8")
-        tmp.replace(MAPPING_FILE)
-        return cleaned
+    def save_mapping(self, mapping: list, *, expected_id: str | None = None) -> list:
+        """Update only the selected instrument's mapping."""
+        return self.instruments.save_mapping(mapping, expected_id=expected_id)
 
     def close(self) -> None:
         try:
@@ -1939,6 +1922,14 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(500, {"error": str(exc)})
             return
 
+        if self.path == "/api/instruments":
+            try:
+                self._json(200, self.bridge.instruments.snapshot())
+            except Exception as exc:
+                traceback.print_exc()
+                self._json(500, {"error": str(exc)})
+            return
+
         if self.path == "/api/pitches":
             try:
                 self._json(200, {"pitches": self.bridge.pitches()})
@@ -2152,7 +2143,9 @@ class Handler(BaseHTTPRequestHandler):
                 data = self._read_json()
                 addr = int(data["address"])
                 cur = int(data["current_ma"])
-                self._json(200, self.bridge.strike(addr, cur))
+                self._json(200, self.bridge.strike(
+                    addr, cur, strike_type=data.get("strike_type", "normal")
+                ))
                 return
 
             if self.path == "/api/strikes":
@@ -2268,11 +2261,27 @@ class Handler(BaseHTTPRequestHandler):
                     self._json(400, {"error": "expected {'mapping': [...]}"})
                     return
                 try:
-                    cleaned = self.bridge.save_mapping(mapping)
+                    cleaned = self.bridge.save_mapping(
+                        mapping, expected_id=data.get("profile_id")
+                    )
                 except ValueError as exc:
                     self._json(400, {"error": str(exc)})
                     return
                 self._json(200, {"ok": True, "mapping": cleaned})
+                return
+
+            if self.path == "/api/instruments":
+                data = self._read_json()
+                try:
+                    result = self.bridge.instruments.change(
+                        data.get("action"), profile_id=data.get("id"),
+                        name=data.get("name"), mapping=data.get("mapping"),
+                        settings=data.get("settings"),
+                    )
+                except ValueError as exc:
+                    self._json(400, {"error": str(exc)})
+                    return
+                self._json(200, {**result, "mapping": self.bridge.load_mapping()})
                 return
 
             if self.path == "/api/play":
@@ -2320,7 +2329,7 @@ class Handler(BaseHTTPRequestHandler):
                             return
                         master = max(STRIKE_MA_MIN, min(STRIKE_MA_MAX, int(master)))
                         floor = max(0.0, min(1.0, float(floor)))
-                        mapping = self.bridge.load_mapping() or []
+                        mapping = (self.bridge.load_mapping() or [])[:self.bridge.count]
                         canonical, skipped = motif_events_to_canonical(
                             events, mapping, master, floor
                         )

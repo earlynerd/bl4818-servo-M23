@@ -277,3 +277,17 @@ When a decision is reversed or superseded, append a new entry rather than rewrit
 - **Decision:** Check wall-clock time before the fresh-audio gate. Try one audio resume after 0.75 seconds without fresh frames, and stop with a specific microphone error after three seconds if it cannot recover. Reject analysis exceptions through the capture promise and require recent running audio before dispatching a strike.
 - **Why:** The user reported the scan remaining at the heard-strike message. A frozen or interrupted audio clock bypassed normal timeout checks until the 25-second fallback; a simulated freeze reproduced this path.
 - **Affects:** `player/pitch_detector.js` and the host software guide. Healthy-input acoustic retry timing and reviewed mapping saves remain as specified above.
+
+## 2026-09-21 — Optional native M2003 J-Link flash loader
+
+- **Decision:** Add `-NativeFlash` to the existing complete-stack flasher, selecting `M2003FC1AE` for bulk APROM/LDROM downloads with J-Link V9.58+. Retain explicit manifest invalidation and commit-last programming, CONFIG preservation, and independent physical byte verification. Keep the original method available by omitting the switch. Native failures stop without automatic fallback. Add generation-only operation and programming logs/timing.
+- **Why:** SEGGER now supports both banks directly. A V12 Compact Base bench test completed a forced full rewrite and verification in 3.375 seconds versus 10.667 seconds for the per-word method, preserving CONFIG and settings.
+- **Supersedes:** The per-word-only programming implementation; the complete-stack, boot-configuration, and physical-verification contracts remain in force.
+- **Affects:** `scripts/flash-jlink.ps1`, `scripts/make_provision_jlink.py`, build outputs, provisioning tests, and `docs/firmware-update.md`.
+
+## 2026-09-24 — Named instrument pitch maps follow the selected setup
+
+- **Decision:** Store named pitch maps and player settings in `instruments.json`, with one selected profile supplying the existing mapping and pitch-playback APIs. Import an existing `mapping.json` as the Default profile on first save. Browser playback, keyboard routing, looper routing, and pitch discovery consider only currently enumerated actuator slots; saved entries beyond that count stay with their profile but are inactive. Creating a profile copies trims, fallback routes, velocity floor, compensation, and master current.
+- **Why:** Switching between drums with different actuator counts left old mallets mapped and could make songs target absent addresses. Named profiles avoid repeated remapping while keeping an instrument's assignments available for later reuse.
+- **Supersedes:** A single shared `mapping.json` as the sole persisted pitch map.
+- **Affects:** MIDI server mapping API, player and looper routing, microphone assignment, `README.md`, and `midi_server_api.md`.

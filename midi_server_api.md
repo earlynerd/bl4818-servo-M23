@@ -83,12 +83,13 @@ not need to keep the connection open.
 
 ### Mapping: slot ↔ pitch
 
-The physical ring has N actuators ("slots", addressed 0..N-1). The
-mapping is a list of `slots.length` entries where each entry is either
+The physical ring has N actuators ("slots", addressed 0..N-1). A saved
+instrument mapping has one entry per configured mallet, where each entry is either
 a MIDI pitch number (0-127) or `null` (slot disabled / not used in this
-song). It's persisted to `mapping.json` at the project root, so it
+song). It's persisted to `instruments.json` at the project root, so it
 survives server restarts and is shared across every browser that
-connects to the bridge.
+connects to the bridge. Only addresses 0..N-1 are playable when the connected
+ring has fewer actuators than the saved instrument.
 
 Integrations talk in **MIDI pitch numbers**, not slot indexes. The
 bridge looks each pitch up in the mapping and routes the strike to the
@@ -241,7 +242,7 @@ endpoint for integrations.
 
 Sorted ascending by pitch. `homed: false` means the actuator hasn't
 self-homed yet — strikes will likely fail or be inaccurate. Empty list
-means no mapping has been saved yet.
+means no mapped pitch belongs to a currently enumerated actuator.
 
 ### `GET /api/mapping`
 
@@ -254,6 +255,27 @@ usually want `/api/pitches` instead.
 ```
 
 If no mapping has been saved, `"mapping": null`.
+
+The selected instrument's full saved mapping is returned. Entries beyond the
+currently enumerated actuator count are saved for that instrument but are not
+reported by `/api/pitches` or used for playback.
+
+### `GET /api/instruments` and `POST /api/instruments`
+
+Named instrument profiles live in `instruments.json`. Each stores its pitch map,
+per-mallet trims, fallback routes, velocity floor, compensation settings, and
+master strike current. Existing `mapping.json`
+is imported as the Default profile when profiles are first saved. The active
+profile supplies `/api/mapping` and pitch-based playback.
+
+`GET` returns `{"active":"default","profiles":[{"id":"default","name":"Default","count":10}]}`.
+`POST` accepts `{"action":"create","name":"Handpan","mapping":[...],"settings":{...}}` to
+save the current setup as a new active profile. Use `{"action":"select","id":"..."}`
+to load one, `{"action":"rename","id":"...","name":"..."}` to rename it,
+or `{"action":"delete","id":"..."}` to remove it. Use
+`{"action":"update_settings","id":"...","settings":{"vel_floor":0.5}}`
+to update player settings. At least one profile is retained. Responses include
+the active profile's `mapping` and `settings`.
 
 ### `POST /api/play`
 
@@ -646,6 +668,10 @@ compensation. Returns the firmware ACK and the timing block for the
 *previous* completed strike on that slot.
 
 **Request body:** `{"address": 0, "current_ma": 1200}`
+
+Optional `"strike_type": "dead"` tests a dead strike with the drive's current
+dead-strike tuning and default contact dwell. Omit it (or use `"normal"`) for
+a normal strike. Dead strikes do not train normal-strike latency compensation.
 
 **Response (200):**
 ```json

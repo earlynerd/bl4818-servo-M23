@@ -1,5 +1,7 @@
 param(
     [switch]$SkipBuild,
+    [switch]$NativeFlash,
+    [switch]$GenerateOnly,
     [string]$JLinkExe,
     [int]$Speed = 4000
 )
@@ -96,12 +98,13 @@ function Invoke-JLinkLogged {
     param(
         [string]$Label,
         [string]$CommandFile,
-        [string]$LogPath
+        [string]$LogPath,
+        [string]$Device = "Cortex-M23"
     )
 
     Write-Host $Label
     [string[]]$captured = @(& $resolvedJLinkExe `
-        -device Cortex-M23 -if SWD -speed $Speed -CommandFile $CommandFile 2>&1)
+        -device $Device -if SWD -speed $Speed -NoGui 1 -ExitOnError 1 -CommandFile $CommandFile 2>&1)
     $exitCode = $LASTEXITCODE
     $captured | ForEach-Object { Write-Host $_ }
     [System.IO.File]::WriteAllLines($LogPath, $captured)
@@ -113,6 +116,11 @@ function Invoke-JLinkLogged {
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $buildScript = Join-Path $PSScriptRoot "build-jlink.ps1"
 $commandFile = Join-Path $projectRoot "build\m2003-motor.jlink"
+$programDevice = "Cortex-M23"
+if ($NativeFlash) {
+    $commandFile = Join-Path $projectRoot "build\m2003-motor-native.jlink"
+    $programDevice = "M2003FC1AE"
+}
 $verifyCommandFile = Join-Path $projectRoot "build\m2003-firmware-verify.jlink"
 $configReadFile = Join-Path $projectRoot "build\m2003-config-read.jlink"
 $configTool = Join-Path $PSScriptRoot "m2003_configure_ldrom.py"
@@ -123,6 +131,7 @@ $configProgramFile = Join-Path $projectRoot "build\m2003-config-program.jlink"
 $configEraseLog = Join-Path $projectRoot "build\m2003-config-erase.log"
 $configProgramLog = Join-Path $projectRoot "build\m2003-config-program.log"
 $verifyLog = Join-Path $projectRoot "build\m2003-firmware-verify.log"
+$programLog = Join-Path $projectRoot "build\m2003-firmware-program.log"
 $appVectorReadback = Join-Path $projectRoot "build\m2003-firmware-verify-app-vector-readback.bin"
 $appTailReadback = Join-Path $projectRoot "build\m2003-firmware-verify-app-tail-readback.bin"
 $appReadback = Join-Path $projectRoot "build\m2003-motor-app-readback.bin"
@@ -141,6 +150,12 @@ if (-not (Test-Path -LiteralPath $verifyCommandFile)) {
 if (-not (Test-Path -LiteralPath $configReadFile)) {
     throw "Missing command file: $configReadFile"
 }
+if ($GenerateOnly) {
+    Write-Host "Generated only; no hardware contacted."
+    Write-Host "Programming device: $programDevice"
+    Write-Host "Command file: $commandFile"
+    return
+}
 $resolvedJLinkExe = Resolve-JLinkExe -ExplicitPath $JLinkExe
 # Prevent stale files from making a failed J-Link run appear verified.
 foreach ($readback in @(
@@ -150,6 +165,7 @@ foreach ($readback in @(
     $manifestReadback,
     $ldromReadback,
     $verifyLog,
+    $programLog,
     $configCaptureLog,
     $configPlanFile,
     $configEraseFile,
@@ -177,11 +193,14 @@ if ($LASTEXITCODE -ne 0) {
 }
 $configPlan = Get-Content -LiteralPath $configPlanFile -Raw | ConvertFrom-Json
 
-Write-Host "Programming APROM + manifest + LDROM."
-& $resolvedJLinkExe -device Cortex-M23 -if SWD -speed $Speed -CommandFile $commandFile
-if ($LASTEXITCODE -ne 0) {
-    throw "J-Link failed with exit code $LASTEXITCODE"
-}
+$programTimer = [System.Diagnostics.Stopwatch]::StartNew()
+Invoke-JLinkLogged `
+    "Programming APROM + manifest + LDROM using $programDevice." `
+    $commandFile `
+    $programLog `
+    $programDevice
+$programTimer.Stop()
+Write-Host ("Programming completed in {0:F2} seconds." -f $programTimer.Elapsed.TotalSeconds)
 
 Invoke-JLinkLogged `
     "Reading APROM, manifest, and LDROM through physical addresses..." `

@@ -121,6 +121,8 @@ def generate_provision_script(
     manifest_path: Path,
     ldrom_path: Path,
     output_path: Path,
+    *,
+    native_flash: bool = False,
 ) -> None:
     app = app_path.read_bytes()
     manifest = manifest_path.read_bytes()
@@ -140,6 +142,7 @@ def generate_provision_script(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
         "// M2003 one-time loader provisioning (NO CONFIG WRITES)",
+        *(["// Native M2003FC1AE flash loader (J-Link V9.58+)", "ExitOnError 1"] if native_flash else []),
         "r",
         "h",
     ]
@@ -157,13 +160,28 @@ def generate_provision_script(
             f"mem32 0x{FMC_ISPTRG:08X} 1",
         ]
     )
-    _append_region(
-        lines,
-        name="APROM application",
-        base=0,
-        data=app,
-        ispctl=ISPCTL_ENABLE_APROM,
-    )
+    if native_flash:
+        # SEGGER handles bulk erase/program/verify in target RAM. Keep the
+        # small manifest commit below explicit so its magic is written last.
+        lines.extend(
+            [
+                f'loadfile "{_slash(app_path)}" 0x00000000 noreset',
+                f"erase 0x{LDROM_BASE:08X} 0x{LDROM_BASE + LDROM_SIZE - 1:08X} noreset",
+                f'loadfile "{_slash(ldrom_path)}" 0x{LDROM_BASE:08X} noreset',
+            ]
+        )
+        # Native algorithms may restore peripheral state; establish FMC
+        # access again before committing the manifest.
+        _append_unlock(lines)
+        lines.append(f"w4 0x{CLK_AHBCLK:08X} 0x{AHBCLK_RESET_WITH_ISP:08X}")
+    else:
+        _append_region(
+            lines,
+            name="APROM application",
+            base=0,
+            data=app,
+            ispctl=ISPCTL_ENABLE_APROM,
+        )
     _append_region(
         lines,
         name="APROM committed-image manifest",
@@ -173,14 +191,15 @@ def generate_provision_script(
         erase_size=MANIFEST_PAGE_SIZE,
         commit_word_last=True,
     )
-    _append_region(
-        lines,
-        name="permanent LDROM loader",
-        base=LDROM_BASE,
-        data=ldrom,
-        ispctl=ISPCTL_ENABLE_LDROM,
-        erase_size=LDROM_SIZE,
-    )
+    if not native_flash:
+        _append_region(
+            lines,
+            name="permanent LDROM loader",
+            base=LDROM_BASE,
+            data=ldrom,
+            ispctl=ISPCTL_ENABLE_LDROM,
+            erase_size=LDROM_SIZE,
+        )
     lines.extend(
         [
             f"w4 0x{FMC_ISPCTL:08X} 0x{ISPCTL_READ_ONLY:08X}",
@@ -294,11 +313,17 @@ def main() -> int:
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--ldrom", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--native-output", type=Path)
     parser.add_argument("--verify-output", type=Path, required=True)
     parser.add_argument("--config-read-output", type=Path, required=True)
     args = parser.parse_args()
 
     generate_provision_script(args.app, args.manifest, args.ldrom, args.output)
+    if args.native_output:
+        generate_provision_script(
+            args.app, args.manifest, args.ldrom, args.native_output, native_flash=True
+        )
+        print(f"wrote {args.native_output} (native APROM + LDROM, commit-last manifest)")
     generate_verify_script(args.app, args.manifest, args.ldrom, args.verify_output)
     generate_config_read_script(args.config_read_output)
     print(f"wrote {args.output} (APROM + manifest + LDROM)")

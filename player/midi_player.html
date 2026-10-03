@@ -144,16 +144,24 @@
 
   .stats { display: flex; gap: 18px; font-size: 12px; font-family: 'JetBrains Mono', monospace; color: var(--text-muted); flex-wrap: wrap; }
 
-  .map-table { width: 100%; border-collapse: collapse; font-family: 'JetBrains Mono', monospace; font-size: 12px; }
+  .map-table { width: 100%; table-layout: fixed; border-collapse: collapse; font-family: 'JetBrains Mono', monospace; font-size: 12px; }
   .map-table th { font-weight: normal; color: var(--text-dim); text-align: left; padding: 4px 4px; border-bottom: 1px solid var(--border); font-size: 10px; text-transform: uppercase; letter-spacing: 1px; }
-  .map-table td { padding: 4px 4px; border-bottom: 1px solid rgba(48,42,36,0.4); }
+  .map-table td { padding: 6px 4px; border-bottom: 1px solid rgba(48,42,36,0.4); overflow-wrap: anywhere; }
+  .map-table th:nth-child(1) { width: 60px; }
+  .map-table th:nth-child(2) { width: 54px; }
+  .map-table th:nth-child(4) { width: 64px; }
+  .map-table th:nth-child(5) { width: 62px; }
+  .map-table td:nth-child(3) { font-size: 11px; }
+  .map-table .map-status-note { display: block; font-size: 10px; }
   .map-table input[type=number] {
-    width: 52px; background: var(--surface); border: 1px solid var(--border); border-radius: 3px;
+    width: 100%; max-width: 52px; min-width: 0; background: var(--surface); border: 1px solid var(--border); border-radius: 3px;
     padding: 3px 5px; color: var(--text); font-family: 'JetBrains Mono', monospace; font-size: 12px;
   }
   .map-table .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }
   .map-table .test-btn { padding: 2px 6px; font-size: 11px; }
-  .map-table .icon-btn { padding: 2px 5px; font-size: 13px; line-height: 1; }
+  .map-table .map-actions { display: flex; flex-direction: column; gap: 4px; }
+  .map-table .trim-slider { display: block; width: 100%; min-width: 0; margin: 7px 0 10px; }
+  .map-table .trim-label { display: block; font-size: 11px; color: var(--text-muted); text-align: center; }
   .map-table .homed { color: var(--success); }
   .map-table .unhomed { color: var(--error); }
 
@@ -1677,7 +1685,7 @@ function renderMapTable() {
   let h = "";
   for (let i = 0; i < rows; i++) {
     const pitch = S.mapping[i];
-    const color = SLOT_COLORS[i] || "var(--text-muted)";
+    const color = SLOT_COLORS[i % SLOT_COLORS.length] || "var(--text-muted)";
     const homed = !!S.homed[i];
     const slot = S.slots[i] || {};
     const faulted = Number(slot.fault) > 0;
@@ -1691,7 +1699,7 @@ function renderMapTable() {
     if (slot.status_cached || slot.status_error) {
       const age = slot.status_age_ms == null ? "No reading yet"
         : `Last reading ${(slot.status_age_ms / 1000).toFixed(1)} seconds ago`;
-      stateText += slot.status_error ? " (unavailable)" : " (cached)";
+      stateText += `<small class="map-status-note">${slot.status_error ? "(unavailable)" : "(cached)"}</small>`;
       stateTitle = ` title="${escapeHtml(age + (slot.status_error ? ": " + slot.status_error : "; refresh when idle for current state"))}"`;
     }
     const noteTitle = pitch == null ? "" : ` title="${midiName(pitch)}"`;
@@ -1700,14 +1708,14 @@ function renderMapTable() {
       <td><span class="swatch" style="background:${color}"></span>${i}${slot.ring ? `<small style="display:block;font-size:9px" title="${escapeHtml(slot.port)}">${escapeHtml(slot.ring)}:${slot.local_address}</small>` : ""}</td>
       <td><input type="number" min="0" max="127" step="1" data-slot="${i}" value="${pitch == null ? "" : pitch}" placeholder="—"${noteTitle}></td>
       <td class="${homed && !faulted ? 'homed' : 'unhomed'}"${stateTitle}>${stateText}</td>
-      <td style="white-space:nowrap">
-        <input type="range" min="25" max="200" step="5" value="${trimPct}" data-trim-slot="${i}" class="slider" style="width:60px;vertical-align:middle">
-        <span class="trim-label" data-trim-label="${i}" style="display:inline-block;min-width:30px;font-size:11px;color:var(--text-muted);text-align:right">${trimPct}%</span>
+      <td>
+        <input type="range" min="25" max="200" step="5" value="${trimPct}" data-trim-slot="${i}" class="slider trim-slider">
+        <span class="trim-label" data-trim-label="${i}">${trimPct}%</span>
       </td>
-      <td style="white-space:nowrap;text-align:right">
+      <td><div class="map-actions">
         <button class="pill test-btn" data-test="${i}">strike</button>
-        <button class="pill icon-btn" data-cfg="${i}" title="Edit strike params (home offset, coast, homing duty)" aria-label="strike config">⚙</button>
-      </td>
+        <button class="pill test-btn" data-cfg="${i}" title="Mallet settings (PID, home offset, coast, homing duty)" aria-label="Mallet settings for slot ${i}">settings</button>
+      </div></td>
     </tr>`;
   }
   tbody.innerHTML = h;
@@ -1779,7 +1787,7 @@ function openCfgModal(slot) {
   const target = document.getElementById("cfgTarget");
   target.value = "single";
   target.options[0].textContent = `Selected actuator (addr ${slot})`;
-  swatch.style.background = SLOT_COLORS[slot] || "var(--text-muted)";
+  swatch.style.background = SLOT_COLORS[slot % SLOT_COLORS.length] || "var(--text-muted)";
   title.textContent = `Strike Config — addr ${slot}`;
   if (S.slots[slot]?.ring) title.textContent += ` · ${S.slots[slot].ring}:${S.slots[slot].local_address}`;
   meta.textContent = `pitch ${pitch == null ? "— (unmapped)" : `${midiName(pitch)} (${pitch})`}`;
@@ -2104,7 +2112,7 @@ function renderKeyboardPanel() {
   for (let i = 0; i < slots.length && i < KEYBOARD_KEYS.length; i++) {
     const { slot, pitch } = slots[i];
     const k = KEYBOARD_KEYS[i];
-    const color = SLOT_COLORS[slot] || "var(--text-muted)";
+    const color = SLOT_COLORS[slot % SLOT_COLORS.length] || "var(--text-muted)";
     const label = k === ";" ? ";" : k === "'" ? "'" : k.toUpperCase();
     h += `<div data-kbd-slot="${slot}" style="display:flex;flex-direction:column;align-items:center;gap:2px;padding:5px 6px;background:var(--surface);border:1px solid var(--border);border-radius:4px;min-width:36px;transition:background 0.08s">
       <span style="font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:600;color:${color}">${label}</span>
@@ -2739,7 +2747,7 @@ function renderPianoRoll() {
     const isC = (pitch % 12) === 0;
     const cls = ["piano-label"];
     if (slot < 0) cls.push(isC ? "octave" : "unmapped");
-    const col = slot >= 0 ? (SLOT_COLORS[slot] || "var(--text-muted)") : "";
+    const col = slot >= 0 ? (SLOT_COLORS[slot % SLOT_COLORS.length] || "var(--text-muted)") : "";
     const bg = slot >= 0 ? "rgba(200,150,64,0.06)" : (isBlack ? "rgba(0,0,0,0.18)" : "transparent");
     const addrText = slot >= 0 ? `#${slot}` : "";
     labels += `<div class="${cls.join(" ")}" style="${col ? `color:${col};` : ""}background:${bg}"><span>${midiName(pitch)}</span><span class="addr">${addrText}</span></div>`;
@@ -2786,7 +2794,7 @@ function renderPianoRoll() {
     const dropped = slot < 0;
     const fb = !dropped && pitchIsFallback(e.pitch);
     const color = sourcePreview ? midiVoiceColor(e)
-      : dropped ? "var(--text-dim)" : (SLOT_COLORS[slot] || "var(--accent)");
+      : dropped ? "var(--text-dim)" : (SLOT_COLORS[slot % SLOT_COLORS.length] || "var(--accent)");
 
     const velFrac = Math.max(0.15, Math.min(1, (e.vel || 0) / 127));
     const barHeightPct = (0.2 + velFrac * 0.8) * rh;

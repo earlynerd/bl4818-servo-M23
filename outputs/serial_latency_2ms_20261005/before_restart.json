@@ -1,0 +1,337 @@
+{
+  "play": {
+    "playing": false,
+    "id": null,
+    "name": null,
+    "scheduled": 0,
+    "cursor": 0,
+    "duration_ms": null,
+    "elapsed_ms": null,
+    "remaining_ms": null,
+    "master_scale": 1.0,
+    "muted": [],
+    "master_current_ma": null,
+    "vel_floor": null,
+    "residual_stats": {},
+    "timing_stats": {
+      "lock_wait_ms": {
+        "last": 0.0,
+        "sum": 0.0,
+        "sumSq": 0.0,
+        "n": 0,
+        "maxAbs": 0.0
+      },
+      "serial_rtt_ms": {
+        "last": 0.0,
+        "sum": 0.0,
+        "sumSq": 0.0,
+        "n": 0,
+        "maxAbs": 0.0
+      }
+    },
+    "dispatch_stats": {
+      "attempted": 0,
+      "accepted": 0,
+      "unacknowledged": 0,
+      "rejected": 0,
+      "transport_failed": 0,
+      "muted": 0,
+      "bursts": 0,
+      "reasons": {}
+    }
+  },
+  "bus-health": {
+    "since_s": 383.5,
+    "addresses": {
+      "0": {
+        "n": 188,
+        "ok": 188,
+        "timeouts": 0,
+        "crc_errors": 0,
+        "errors": 0,
+        "rtt_sum_us": 2622001.900221221,
+        "rtt_sumsq_us": 41920180082.88782,
+        "rtt_max_us": 20676.60000466276,
+        "rtt_last_us": 16962.299996521324,
+        "last_error": null
+      },
+      "1": {
+        "n": 188,
+        "ok": 188,
+        "timeouts": 0,
+        "crc_errors": 0,
+        "errors": 0,
+        "rtt_sum_us": 3035840.1999546913,
+        "rtt_sumsq_us": 49290524366.69028,
+        "rtt_max_us": 31709.10000335425,
+        "rtt_last_us": 15907.099994365126,
+        "last_error": null
+      },
+      "2": {
+        "n": 188,
+        "ok": 188,
+        "timeouts": 0,
+        "crc_errors": 0,
+        "errors": 0,
+        "rtt_sum_us": 3012981.200168724,
+        "rtt_sumsq_us": 48356359350.45322,
+        "rtt_max_us": 19819.000008283183,
+        "rtt_last_us": 15890.999988187104,
+        "last_error": null
+      },
+      "3": {
+        "n": 188,
+        "ok": 188,
+        "timeouts": 0,
+        "crc_errors": 0,
+        "errors": 0,
+        "rtt_sum_us": 3033279.4000569265,
+        "rtt_sumsq_us": 49385038150.45418,
+        "rtt_max_us": 29497.499999706633,
+        "rtt_last_us": 15975.99999513477,
+        "last_error": null
+      },
+      "4": {
+        "n": 188,
+        "ok": 188,
+        "timeouts": 0,
+        "crc_errors": 0,
+        "errors": 0,
+        "rtt_sum_us": 3049505.1000034437,
+        "rtt_sumsq_us": 49972184984.42605,
+        "rtt_max_us": 28614.999988349155,
+        "rtt_last_us": 16022.299998439848,
+        "last_error": null
+      },
+      "5": {
+        "n": 188,
+        "ok": 188,
+        "timeouts": 0,
+        "crc_errors": 0,
+        "errors": 0,
+        "rtt_sum_us": 2992151.9000345143,
+        "rtt_sumsq_us": 48007780439.26062,
+        "rtt_max_us": 21922.599989920855,
+        "rtt_last_us": 15998.700007912703,
+        "last_error": null
+      },
+      "6": {
+        "n": 188,
+        "ok": 188,
+        "timeouts": 0,
+        "crc_errors": 0,
+        "errors": 0,
+        "rtt_sum_us": 3013935.4001148604,
+        "rtt_sumsq_us": 48724509766.3624,
+        "rtt_max_us": 28135.499989730306,
+        "rtt_last_us": 15944.800004945137,
+        "last_error": null
+      },
+      "7": {
+        "n": 188,
+        "ok": 188,
+        "timeouts": 0,
+        "crc_errors": 0,
+        "errors": 0,
+        "rtt_sum_us": 3035254.300062661,
+        "rtt_sumsq_us": 49528425116.41835,
+        "rtt_max_us": 26807.499991264194,
+        "rtt_last_us": 16035.200009355322,
+        "last_error": null
+      },
+      "8": {
+        "n": 188,
+        "ok": 188,
+        "timeouts": 0,
+        "crc_errors": 0,
+        "errors": 0,
+        "rtt_sum_us": 2961101.000022609,
+        "rtt_sumsq_us": 47001808993.15367,
+        "rtt_max_us": 17932.299990206957,
+        "rtt_last_us": 15891.7999942787,
+        "last_error": null
+      },
+      "9": {
+        "n": 188,
+        "ok": 188,
+        "timeouts": 0,
+        "crc_errors": 0,
+        "errors": 0,
+        "rtt_sum_us": 3017118.3999918867,
+        "rtt_sumsq_us": 48497571809.39589,
+        "rtt_max_us": 20474.100005230866,
+        "rtt_last_us": 16055.700005381368,
+        "last_error": null
+      },
+      "10": {
+        "n": 188,
+        "ok": 188,
+        "timeouts": 0,
+        "crc_errors": 0,
+        "errors": 0,
+        "rtt_sum_us": 2709434.3999924604,
+        "rtt_sumsq_us": 44010857807.23023,
+        "rtt_max_us": 20660.39999772329,
+        "rtt_last_us": 12084.499991033226,
+        "last_error": null
+      },
+      "11": {
+        "n": 188,
+        "ok": 188,
+        "timeouts": 0,
+        "crc_errors": 0,
+        "errors": 0,
+        "rtt_sum_us": 3028899.6001327178,
+        "rtt_sumsq_us": 49072374071.81998,
+        "rtt_max_us": 32222.400011960417,
+        "rtt_last_us": 16007.30000063777,
+        "last_error": null
+      },
+      "12": {
+        "n": 188,
+        "ok": 188,
+        "timeouts": 0,
+        "crc_errors": 0,
+        "errors": 0,
+        "rtt_sum_us": 3026200.0000366243,
+        "rtt_sumsq_us": 48782384963.965195,
+        "rtt_max_us": 21201.299998210743,
+        "rtt_last_us": 15732.39998833742,
+        "last_error": null
+      },
+      "13": {
+        "n": 188,
+        "ok": 188,
+        "timeouts": 0,
+        "crc_errors": 0,
+        "errors": 0,
+        "rtt_sum_us": 3020831.600035308,
+        "rtt_sumsq_us": 48845388860.19198,
+        "rtt_max_us": 25951.20000478346,
+        "rtt_last_us": 15981.19999107439,
+        "last_error": null
+      },
+      "14": {
+        "n": 188,
+        "ok": 188,
+        "timeouts": 0,
+        "crc_errors": 0,
+        "errors": 0,
+        "rtt_sum_us": 2985027.8000958497,
+        "rtt_sumsq_us": 47658701903.089096,
+        "rtt_max_us": 19284.399997559376,
+        "rtt_last_us": 16116.300001158379,
+        "last_error": null
+      },
+      "15": {
+        "n": 188,
+        "ok": 188,
+        "timeouts": 0,
+        "crc_errors": 0,
+        "errors": 0,
+        "rtt_sum_us": 3025657.600170234,
+        "rtt_sumsq_us": 49213476660.97515,
+        "rtt_max_us": 36336.00000466686,
+        "rtt_last_us": 16010.899998946115,
+        "last_error": null
+      },
+      "16": {
+        "n": 188,
+        "ok": 188,
+        "timeouts": 0,
+        "crc_errors": 0,
+        "errors": 0,
+        "rtt_sum_us": 3028702.899988275,
+        "rtt_sumsq_us": 49096288210.43177,
+        "rtt_max_us": 25160.00000468921,
+        "rtt_last_us": 15954.200003761798,
+        "last_error": null
+      },
+      "17": {
+        "n": 188,
+        "ok": 188,
+        "timeouts": 0,
+        "crc_errors": 0,
+        "errors": 0,
+        "rtt_sum_us": 3014583.7000600295,
+        "rtt_sumsq_us": 48808844086.6773,
+        "rtt_max_us": 31311.700004152954,
+        "rtt_last_us": 16193.10000387486,
+        "last_error": null
+      },
+      "18": {
+        "n": 188,
+        "ok": 188,
+        "timeouts": 0,
+        "crc_errors": 0,
+        "errors": 0,
+        "rtt_sum_us": 3007266.399858054,
+        "rtt_sumsq_us": 48231973249.75631,
+        "rtt_max_us": 22550.800000317395,
+        "rtt_last_us": 15787.399999680929,
+        "last_error": null
+      },
+      "19": {
+        "n": 188,
+        "ok": 188,
+        "timeouts": 0,
+        "crc_errors": 0,
+        "errors": 0,
+        "rtt_sum_us": 3016522.999969311,
+        "rtt_sumsq_us": 48612530239.927376,
+        "rtt_max_us": 24418.29998861067,
+        "rtt_last_us": 16063.300005043857,
+        "last_error": null
+      }
+    }
+  },
+  "strike-timing": {
+    "slots": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "firmware": {
+    "busy": false,
+    "operation": null,
+    "phase": "idle",
+    "message": "Build firmware to prepare an image",
+    "progress": null,
+    "artifact": null,
+    "result": null,
+    "targets": [],
+    "error": null,
+    "log": "",
+    "update_supported": true,
+    "rings": [
+      {
+        "name": "jameson",
+        "port": "COM29",
+        "expected_count": 10
+      },
+      {
+        "name": "retuned",
+        "port": "COM48",
+        "expected_count": 10
+      }
+    ]
+  }
+}

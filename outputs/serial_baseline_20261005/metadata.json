@@ -1,0 +1,26 @@
+{
+  "base": "https://192.168.8.109:8766",
+  "started_utc": "2026-10-06T05:23:40.439043+00:00",
+  "method": "Existing server probes; normal browser polling may coexist",
+  "git_head": "c316e8ecb705a98765581836f11af957ad901a47",
+  "source_sha256": {
+    "scripts/ring_bus.py": "ade23dcd574bcccc7218d81634ba6788cb2c691260da7feb8bff9f766593ef11",
+    "scripts/ring_midi_server.py": "4676b4375d59158522c25065a0710ca5b3717ae87f358e3fdd49dc58727c0ef7",
+    "scripts/ring_fleet.py": "d54b2aa3f61ba9df5961e41f2f9e38c9f0780884ed8baa513caa034b005c15c3",
+    "src/protocol.c": "a4e643aeb0331ba98bacaf7689fec6d8c681d13ad032c65cb3b53db7843c74f4",
+    "src/app_uart.c": "b43c2574f4e1c32d2aca651ef5c00cdcf2039d7d6a1d91b7e8f095170b8ee504",
+    "player/midi_player.html": "104fab4d116e5fda72a5e227d84fa9e249fff98d3260b66614501e74cf8dc05b"
+  },
+  "adapters": {
+    "COM29": {
+      "device_key": "VID_0403+PID_6001+A10JO345A",
+      "saved_latency_timer_ms": 16
+    },
+    "COM48": {
+      "device_key": "VID_0403+PID_6001+BG03STIBA",
+      "saved_latency_timer_ms": 16
+    }
+  },
+  "complete": true,
+  "ended_utc": "2026-10-06T05:25:01.794449+00:00"
+}

@@ -1,0 +1,23 @@
+{
+  "previous_pid": 312516,
+  "create_time": 1791264181.0731971,
+  "cmdline": [
+    "C:\\Program Files\\Python314\\python.exe",
+    "scripts/ring_midi_server.py",
+    "--ring",
+    "jameson=COM29,10",
+    "--ring",
+    "retuned=COM48,10",
+    "--http-port",
+    "8766",
+    "--library-dir",
+    "../MIDI",
+    "--host",
+    "192.168.8.109",
+    "--tls-cert",
+    "certs/player.pem",
+    "--tls-key",
+    "certs/player-key.pem"
+  ],
+  "cwd": "C:\\Users\\mmsyl\\Documents\\bl4818-servo-M23_2"
+}

@@ -1,0 +1,25 @@
+{
+  "busy": false,
+  "operation": null,
+  "phase": "idle",
+  "message": "Build firmware to prepare an image",
+  "progress": null,
+  "artifact": null,
+  "result": null,
+  "targets": [],
+  "error": null,
+  "log": "",
+  "update_supported": true,
+  "rings": [
+    {
+      "name": "jameson",
+      "port": "COM29",
+      "expected_count": 10
+    },
+    {
+      "name": "retuned",
+      "port": "COM48",
+      "expected_count": 10
+    }
+  ]
+}

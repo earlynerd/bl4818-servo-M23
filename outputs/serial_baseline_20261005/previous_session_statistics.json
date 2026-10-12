@@ -1,0 +1,33 @@
+{
+  "provenance": "Selected values transcribed exactly from the successful GET /api/play response read during this chat before the user restarted the server. This is historical session data, not the new controlled probe baseline.",
+  "playing": false,
+  "timing_stats": {
+    "lock_wait_ms": {"last": 0.003, "sum": 65.5510000000003, "sumSq": 223.25622499998184, "n": 5850, "maxAbs": 12.162},
+    "serial_rtt_ms": {"last": 18.432, "sum": 28614.386999999984, "sumSq": 406812.6314589996, "n": 2284, "maxAbs": 21.382}
+  },
+  "residual_stats_columns": ["global_slot", "n", "sum_ms", "sum_squared_ms", "max_abs_ms"],
+  "residual_stats": [
+    [19,58,35.28567481573466,487.1236161012935,8.0],
+    [3,159,59.60567287072409,5462.910042521652,53.70078512387673],
+    [18,65,37.09088534701982,584.65205544401,17.19190113690533],
+    [11,29,25.65290795021898,174.6005009812397,6.200000000000003],
+    [14,18,18.10444621534539,505.6724884887883,8.834656660000007],
+    [13,100,20.13585315104202,1394.7836036786432,11.637293757384398],
+    [0,46,27.24550001608401,373.22218429101684,8.0],
+    [17,46,27.547821950473065,769.009156926888,10.767978539182728],
+    [4,88,50.7793013995253,844.6997422321441,12.436471388336699],
+    [8,70,29.760948002862264,662.9802437711483,11.831914060003044],
+    [9,95,27.849342959515845,1297.5810299303512,14.479263811824794],
+    [7,47,34.625643367998045,606.5773087627161,9.020600000000002],
+    [2,47,20.75861007570311,338.4843394193339,12.772000000000006],
+    [15,1,4.0,16.0,4.0],
+    [6,221,24.553745425631917,1008.7539235003629,10.292866777812371],
+    [16,31,28.692570505799438,224.7432598540986,7.399999999999999],
+    [1,58,26.364931145098424,637.2880317790529,12.72588806000001],
+    [10,61,24.374386464852222,684.357463787783,10.838416633864],
+    [5,43,28.175074605775833,462.2170507633128,9.601500640000005],
+    [12,2,35.400000000000006,663.5600000000002,22.0]
+  ],
+  "last_play_dispatch": {"attempted":381,"accepted":207,"unacknowledged":174,"rejected":0,"transport_failed":0,"muted":0,"bursts":6,"reasons":{}},
+  "limitations": "Session aggregate statistics combine multiple plays and cannot reconstruct percentiles, current-bin warmup, or chronological outliers. No-ACK chords do not contribute serial RTT and clear residual attribution. Lock and RTT sample populations differ. Initial /api/bus-health showed no errors across all twenty slots, but is not reconstructed here."
+}

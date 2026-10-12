@@ -1,0 +1,3 @@
+# Runtime logs are mutable and excluded from the evidence manifests.
+/serial_latency_2ms_20261005/server_stdout.log
+/serial_latency_2ms_20261005/server_stderr.log

@@ -1,0 +1,19 @@
+﻿{
+    "Mode":  "Apply",
+    "Values":  [
+                   {
+                       "Port":  "COM29",
+                       "After":  2,
+                       "Before":  16,
+                       "Identity":  "VID_0403+PID_6001+A10JO345A"
+                   },
+                   {
+                       "Port":  "COM48",
+                       "After":  2,
+                       "Before":  16,
+                       "Identity":  "VID_0403+PID_6001+BG03STIBA"
+                   }
+               ],
+    "Utc":  "2026-10-06T05:28:55.3054801Z",
+    "Success":  true
+}

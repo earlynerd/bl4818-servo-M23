@@ -68,8 +68,8 @@ POST /api/play/update         -> {"master_scale": float?, "master_ma": int?,
                                  to the next strike.
 GET  /api/firmware            -> build/update state and frozen image metadata
 POST /api/firmware/build      -> {"image_version": uint32}; build server checkout
-POST /api/firmware/update     -> {"confirm": true, "expected_crc32": uint32};
-                                 broadcast the frozen build to the complete ring
+POST /api/firmware/update     -> {"confirm": true, "expected_crc32": uint32,
+                                  "rings": [name]?}; update selected rings in order
 
 Usage
 -----
@@ -95,6 +95,8 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 from urllib.parse import unquote, urlparse
+
+from serial_latency import SerialLatencyError, check_serial_latency
 
 from ring_bus import (
     CommandAck,
@@ -1542,7 +1544,7 @@ class FirmwareUpdateManager:
 
     def __init__(self, bridge: Bridge) -> None:
         self.bridge = bridge
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._image: bytes | None = None
         self._meta = None
         self._state = {
@@ -1553,6 +1555,7 @@ class FirmwareUpdateManager:
             "progress": None,
             "artifact": None,
             "result": None,
+            "targets": [],
             "error": None,
             "log": "",
         }
@@ -1563,8 +1566,10 @@ class FirmwareUpdateManager:
             # a detached snapshot without sharing nested progress/result maps.
             state = json.loads(json.dumps(self._state))
         state["update_supported"] = getattr(self.bridge, "firmware_update_supported", True)
-        if not state["update_supported"]:
-            state["message"] = "Firmware updates: restart with -p PORT for one ring at a time"
+        state["rings"] = [
+            {"name": spec.name, "port": spec.port, "expected_count": spec.count}
+            for spec in getattr(self.bridge, "specs", [])
+        ]
         return state
 
     def _begin(self, operation: str, phase: str, message: str) -> None:
@@ -1580,6 +1585,7 @@ class FirmwareUpdateManager:
                 "message": message,
                 "progress": None,
                 "result": None,
+                "targets": [],
                 "error": None,
                 "log": "",
             })
@@ -1700,9 +1706,32 @@ class FirmwareUpdateManager:
             traceback.print_exc()
             self._fail(exc, log_text)
 
-    def start_update(self, expected_crc32: int) -> dict:
+    def _update_targets(self, ring_names: list[str] | None) -> list[tuple[dict, Bridge]]:
+        if not hasattr(self.bridge, "rings"):
+            if ring_names is not None:
+                raise ValueError("ring selection requires named-ring mode")
+            return [({"name": None, "port": getattr(self.bridge.client, "port", None),
+                      "expected_count": None}, self.bridge)]
+        if not isinstance(ring_names, list) or not ring_names:
+            raise ValueError("select at least one ring in rings")
+        if any(not isinstance(name, str) for name in ring_names):
+            raise ValueError("rings must contain ring names")
+        if len(set(ring_names)) != len(ring_names):
+            raise ValueError("rings must not contain duplicate names")
+        unknown = set(ring_names) - {spec.name for spec in self.bridge.specs}
+        if unknown:
+            raise ValueError(f"unknown rings: {', '.join(sorted(unknown))}")
+        return [
+            ({"name": spec.name, "port": spec.port, "expected_count": spec.count,
+              "offset": offset}, ring)
+            for spec, offset, ring in zip(self.bridge.specs, self.bridge.offsets, self.bridge.rings)
+            if spec.name in ring_names
+        ]
+
+    def start_update(self, expected_crc32: int, ring_names: list[str] | None = None) -> dict:
         if not getattr(self.bridge, "firmware_update_supported", True):
-            raise RuntimeError("firmware updates require single-ring mode (-p PORT)")
+            raise RuntimeError("firmware updates are unavailable")
+        targets = self._update_targets(ring_names)
         expected = int(expected_crc32)
         with self._lock:
             artifact = self._state.get("artifact")
@@ -1712,16 +1741,16 @@ class FirmwareUpdateManager:
                 raise RuntimeError(
                     "displayed firmware no longer matches the server artifact; refresh and confirm again"
                 )
-        self._begin(
-            "update",
-            "stopping_playback",
-            "Stopping playback and reserving the ring",
-        )
-        # Close the race before the worker cancels playback and waits for the
-        # ring lock. Handler and Player checks reject all new ring work now.
-        self.bridge.maintenance.set()
+            self._begin(
+                "update", "stopping_playback", "Stopping playback and reserving the rings",
+            )
+            self._state["targets"] = [{**target, "state": "pending"} for target, _ in targets]
+            image, meta = self._image, self._meta
+            # Reserve all rings before the worker joins playback or waits for I/O.
+            self.bridge.maintenance.set()
         thread = threading.Thread(
             target=self._run_update,
+            args=(targets, image, meta),
             name="firmware-update",
             daemon=True,
         )
@@ -1741,46 +1770,86 @@ class FirmwareUpdateManager:
                 "progress": progress or None,
             })
 
-    def _run_update(self) -> None:
+    def _run_update(self, targets, image: bytes, meta) -> None:
+        completed = []
+        current = None
+        outcome = {}
+        fleet = hasattr(self.bridge, "rings")
+
+        def fleet_result():
+            return {
+                "count": sum(item["result"]["count"] for item in completed),
+                "addresses": [item["offset"] + address for item in completed
+                              for address in item["result"]["addresses"]],
+                "repaired": [item["offset"] + address for item in completed
+                             for address in item["result"]["repaired"]],
+                "rings": completed,
+                "image_size": meta.image_size,
+                "image_crc32": meta.image_crc32,
+                "image_version": meta.image_version,
+            }
+
         try:
             if self.bridge.player is not None:
                 self.bridge.player.cancel()
-            with self._lock:
-                image = self._image
-                meta = self._meta
-            if image is None or meta is None:
-                raise RuntimeError("prepared firmware artifact disappeared")
+            # An enumeration already in flight may have owned the same flag.
+            self.bridge.maintenance.set()
+            for index, (target, ring) in enumerate(targets):
+                current = index
+                with self._lock:
+                    self._state["targets"][index]["state"] = "updating"
 
-            with self.bridge.lock:
-                result = update_ring(
-                    self.bridge.client,
-                    image,
-                    meta,
-                    addresses=None,
-                    broadcast_all=True,
-                    progress=self._update_progress,
-                )
-                self.bridge.reset_status_cache(result["count"])
-            with self._lock:
-                self._state.update({
-                    "busy": False,
-                    "operation": None,
-                    "phase": "complete",
-                    "message": (
-                        f"Updated {len(result['addresses'])} actuator(s); "
-                        "re-home before playback"
-                    ),
-                    "progress": None,
-                    "result": result,
-                    "error": None,
-                })
+                def progress(event):
+                    if fleet:
+                        event = {**event, "ring": target["name"], "port": target["port"],
+                                 "ring_index": index + 1, "ring_total": len(targets),
+                                 "message": f"{target['name']} ({index + 1}/{len(targets)}): {event['message']}"}
+                        # A ring completing is still an active fleet transaction.
+                        if event["phase"] == "complete":
+                            event["phase"] = "ring_complete"
+                    self._update_progress(event)
+
+                with ring.lock:
+                    options = {"expected_count": target["expected_count"]} if fleet else {}
+                    result = update_ring(
+                        ring.client, image, meta, addresses=None, broadcast_all=True,
+                        progress=progress, **options,
+                    )
+                    ring.reset_status_cache(result["count"])
+                completed.append({**target, "result": result})
+                with self._lock:
+                    self._state["targets"][index].update({"state": "complete", "result": result})
+                    self._state["result"] = fleet_result() if fleet else result
+                current = None
+            result = fleet_result() if fleet else completed[0]["result"]
+            outcome = {
+                "phase": "complete",
+                "message": f"Updated {len(result['addresses'])} actuator(s)"
+                           + (f" on {len(targets)} ring(s)" if fleet else "")
+                           + "; re-home updated actuators before playback",
+                "progress": None, "result": result, "error": None,
+            }
         except Exception as exc:
             traceback.print_exc()
-            self._fail(RuntimeError(
-                f"{exc}; one or more actuators may remain in LDROM — retry the same artifact"
-            ))
+            if current is not None:
+                targets[current][1].reset_status_cache(0)
+            with self._lock:
+                for index, target in enumerate(self._state["targets"]):
+                    if index == current:
+                        target.update({"state": "failed", "error": str(exc)})
+                    elif target["state"] == "pending":
+                        target["state"] = "skipped"
+            prefix = f"Ring {targets[current][0]['name']}: " if fleet and current is not None else ""
+            error = (f"{prefix}{exc}; update queue stopped; "
+                     "one or more actuators may remain in LDROM — retry the same artifact")
+            outcome = {"phase": "failed", "message": error, "error": error, "progress": None,
+                       "result": fleet_result() if fleet else None}
         finally:
-            self.bridge.maintenance.clear()
+            # Publish idle and release maintenance together so a new update
+            # cannot have its reservation cleared by the previous worker.
+            with self._lock:
+                self.bridge.maintenance.clear()
+                self._state.update(outcome, busy=False, operation=None)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -2119,8 +2188,13 @@ class Handler(BaseHTTPRequestHandler):
                     self._json(400, {"error": "expected_crc32 is required"})
                     return
                 try:
-                    state = self.firmware.start_update(int(data["expected_crc32"]))
-                except (ValueError, RuntimeError) as exc:
+                    state = self.firmware.start_update(
+                        int(data["expected_crc32"]), data.get("rings"),
+                    )
+                except (TypeError, ValueError) as exc:
+                    self._json(400, {"error": str(exc)})
+                    return
+                except RuntimeError as exc:
                     self._json(409, {"error": str(exc)})
                     return
                 self._json(202, state)
@@ -2568,6 +2642,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="Per-frame RX timeout in ms (default: 1000). Bump higher if you see"
                          " transient 'timeout waiting for frame' errors during homing.")
     ap.add_argument("--trace", action="store_true", help="Print raw ring TX/RX frames")
+    ap.add_argument("--check-serial-latency", action="store_true",
+                    help="Check configured adapters and exit without opening any serial port")
     ap.add_argument("--library-dir", default=None,
                     help="Folder of .mid/.midi files exposed at /api/library. "
                          "Recurses into subfolders. Favorites/ratings are stored "
@@ -2606,6 +2682,16 @@ def main(argv: list[str] | None = None) -> int:
     if not port and not ring_specs:
         print("No serial port found; pass -p/--port", file=sys.stderr)
         return 1
+
+    try:
+        settings = check_serial_latency([spec.port for spec in ring_specs] if ring_specs else [port])
+    except SerialLatencyError as exc:
+        print(f"Serial latency check failed: {exc}", file=sys.stderr)
+        return 1
+    for setting in settings:
+        print(f"Serial latency: {setting.describe()}")
+    if args.check_serial_latency:
+        return 0
 
     bridge = None
     try:

@@ -6,13 +6,18 @@ const vm = require('node:vm');
 
 function page(filename) {
   const nodes = new Map();
-  const element = () => ({
+  const element = (tagName = '') => ({
+    tagName,
     style: {}, dataset: {}, value: '', textContent: '', innerHTML: '', children: [], listeners: {},
     classList: { add() {}, remove() {}, toggle() {} },
     setAttribute() {}, append(...children) { this.children.push(...children); },
     replaceChildren(...children) { this.children = children; },
     addEventListener(event, handler) { this.listeners[event] = handler; },
-    querySelectorAll() { return []; },
+    querySelectorAll(selector) {
+      return this.children.flatMap(child => [
+        ...(child.tagName === selector ? [child] : []), ...child.querySelectorAll(selector),
+      ]);
+    },
   });
   const node = id => {
     if (!nodes.has(id)) nodes.set(id, element());
@@ -95,10 +100,86 @@ test('player renders ring/local address while retaining global slot controls', (
   assert.match(html, /title="COM8"/);
 });
 
-test('firmware update button remains disabled for a built image in multi-ring mode', () => {
+test('firmware update button remains disabled when the server reports updates unavailable', () => {
   const p = page('midi_player.html');
   p.run('refreshTransposeControls = () => {}; renderFirmware({phase:"ready", update_supported:false, artifact:{image_size:100, image_crc32_hex:"0x1234",image_version:1,built_at:"now"}});');
   assert.equal(p.node('firmwareUpdateBtn').disabled, true);
+});
+
+function firmwarePage() {
+  const p = page('midi_player.html');
+  p.run(`
+    S.count = 24;
+    refreshTransposeControls = () => {};
+    globalThis.firmwareReady = {phase:'ready',busy:false,update_supported:true,
+      rings:[{name:'pan',port:'COM7',expected_count:14},{name:'drum',port:'COM8',expected_count:10}],
+      artifact:{image_size:100,image_crc32:1234,image_crc32_hex:'000004D2',image_version:1,built_at:'now'}};
+    renderFirmware(firmwareReady);
+  `);
+  return p;
+}
+
+test('firmware ring selection survives polling, disables empty selections and locks while busy', () => {
+  const p = firmwarePage();
+  const container = p.node('firmwareRingSelection');
+  assert.equal(container.children.length, 3);
+  assert.match(container.children[2].children[1].textContent, /drum.*COM8.*10/);
+  const inputs = container.querySelectorAll('input');
+  assert.ok(inputs.every(input => input.checked));
+  assert.equal(p.node('firmwareUpdateBtn').disabled, false);
+  inputs[0].checked = false;
+  inputs[0].listeners.change();
+  p.run('renderFirmware(firmwareReady);');
+  assert.equal(container.querySelectorAll('input')[0], inputs[0]);
+  assert.equal(inputs[0].checked, false);
+  assert.equal(p.run('S.firmwareRingSelection.join()'), 'drum');
+  inputs[1].checked = false;
+  inputs[1].listeners.change();
+  assert.equal(p.node('firmwareUpdateBtn').disabled, true);
+  inputs[1].checked = true;
+  inputs[1].listeners.change();
+  p.run(`renderFirmware({...firmwareReady,busy:true,operation:'update',phase:'writing',
+    message:'drum (1/1): pages',progress:{done:1,total:2,ring:'drum'},
+    targets:[{name:'drum',state:'updating'}]});`);
+  assert.ok(inputs.every(input => input.disabled));
+  assert.equal(p.node('firmwareUpdateBtn').disabled, true);
+  assert.equal(p.node('firmwareTargets').textContent, 'drum: updating');
+  assert.equal(p.node('firmwareMessage').textContent, 'drum (1/1): pages');
+});
+
+test('firmware confirmation and request include only selected rings', async () => {
+  const p = firmwarePage();
+  const first = p.node('firmwareRingSelection').querySelectorAll('input')[0];
+  first.checked = false;
+  first.listeners.change();
+  p.run(`
+    window.confirm = message => {globalThis.confirmation = message; return true;};
+    api = async (method,path,body) => {globalThis.updateRequest = {method,path,body};
+      return {...firmwareReady,busy:true,operation:'update',targets:[{name:'drum',state:'pending'}]};};
+  `);
+  await p.run('startFirmwareUpdate()');
+  const request = JSON.parse(p.run('JSON.stringify(updateRequest)'));
+  assert.deepEqual(request, {method:'POST',path:'/api/firmware/update',
+    body:{confirm:true,expected_crc32:1234,rings:['drum']}});
+  const confirmation = p.run('confirmation');
+  assert.match(confirmation, /10 actuator/);
+  assert.match(confirmation, /drum \(COM8\)/);
+  assert.doesNotMatch(confirmation, /pan|COM7/);
+  assert.match(confirmation, /one after the other/);
+});
+
+test('firmware cancellation sends no update and single-ring requests keep their original shape', async () => {
+  const p = firmwarePage();
+  p.run(`window.confirm = () => false; api = async () => {throw new Error('unexpected update');};`);
+  await p.run('startFirmwareUpdate()');
+  p.run(`
+    renderFirmware({...firmwareReady,rings:[]});
+    window.confirm = () => true;
+    api = async (method,path,body) => {globalThis.updateBody = body; return {...firmwareReady,rings:[]};};
+  `);
+  await p.run('startFirmwareUpdate()');
+  assert.deepEqual(JSON.parse(p.run('JSON.stringify(updateBody)')), {confirm:true,expected_crc32:1234});
+  assert.equal(p.node('firmwareRingSelection').style.display, 'none');
 });
 
 test('looper shares ring-specific settings and renders ring labels', async () => {

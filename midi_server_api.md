@@ -117,9 +117,9 @@ rings continue if one ring times out; cancellation joins every worker before
 sending cancels concurrently across rings. This does not guarantee a specific
 cross-adapter physical timing tolerance.
 
-`GET /api/firmware` adds `update_supported: false` in named-ring mode;
-`POST /api/firmware/update` returns 409 there. Use the existing `-p PORT`
-maintenance workflow for one ring at a time. See
+`GET /api/firmware` reports `update_supported: true` and the named-ring layout.
+`POST /api/firmware/update` requires an explicit nonempty `rings` list in
+named-ring mode and updates those complete rings sequentially. See
 [`docs/host-software.md`](docs/host-software.md#multiple-rings-on-one-server)
 for setup and validation limits.
 
@@ -616,7 +616,7 @@ the browser and also written to the server shell.
 Returns the current build/update state. `phase` is one of `idle`, `building`,
 `ready`, `stopping_playback`, the structured loader phases (`enumerating`,
 `entering_loader`, `loader_ready`, `broadcast_begin`, `writing`, `verifying`,
-`repairing`, `committing`, `restarting`), `complete`, or `failed`.
+`repairing`, `committing`, `restarting`, `ring_complete`), `complete`, or `failed`.
 
 ```json
 {
@@ -636,6 +636,9 @@ Returns the current build/update state. `phase` is one of `idle`, `building`,
     "built_at": "2026-08-02T20:15:00Z"
   },
   "result": null,
+  "update_supported": true,
+  "rings": [],
+  "targets": [],
   "error": null,
   "log": "...make output..."
 }
@@ -644,6 +647,17 @@ Returns the current build/update state. `phase` is one of `idle`, `building`,
 The prepared bytes are frozen in server memory. The subsequent update uses
 those exact bytes even if the checkout or build directory changes afterward.
 `dirty: true` means the build included uncommitted/untracked checkout changes.
+
+In named-ring mode, `rings` lists configured `{name, port, expected_count}`
+objects. `targets` lists the selected queue in configured order, with those
+fields plus global `offset`, `state` (`pending`, `updating`, `complete`, `failed`,
+`skipped`), a per-ring `result` on completion, and `error` on failure. Active
+`progress` includes `ring`, `port`, one-based `ring_index`, and `ring_total`.
+The top-level `result` aggregates completed actuator `addresses` and `repaired`
+using global slots, and `count` is the number of completed actuators. Its `rings`
+array contains completed ring metadata and the original local-address result.
+Completed results remain available on partial failure. Single-ring results
+keep their existing shape.
 
 ### `POST /api/firmware/build`
 
@@ -671,8 +685,19 @@ Only `POST /api/firmware/update` enters maintenance mode.
 
 Starts the protocol-3 full-ring update and returns 202. The explicit boolean
 confirmation and numeric CRC are required; a stale/mismatched CRC returns 409.
-The server stops playback, rejects new ring work, and holds the bridge lock for
-the complete operation. The shared data phase is followed by per-device CRC
+In named-ring mode, also supply the names of the rings to update, for example:
+
+```json
+{ "confirm": true, "expected_crc32": 882877237, "rings": ["pan", "drum"] }
+```
+
+The list must be nonempty and contain unique, known names; missing/invalid
+selection returns 400. Omit `rings` in single-ring mode. Selected rings run in
+configured order regardless of request order, using the same frozen bytes.
+Fresh enumeration checks each ring's configured count before entering loaders.
+The server stops playback, rejects new work on all rings for the entire queue,
+and holds each active bridge lock for its complete operation. The shared data
+phase is followed by per-device CRC
 verification, addressed repair where needed, per-device commit, APROM restart,
 re-enumeration, and status response.
 
@@ -680,7 +705,9 @@ During the update, ring-touching endpoints return 409 `firmware update in
 progress`. Mapping, MIDI-library, cached playback state, cached bus-health, and
 firmware-state requests remain available. On success every actuator must be
 re-homed. On failure, one or more actuators may remain safely in LDROM; retry the
-same frozen artifact after correcting the cause.
+same frozen artifact after correcting the cause. A failure stops the queue;
+later rings are marked skipped and completed ring results are retained. A failed
+ring's cached status is invalidated. Select the failed/skipped rings for retry.
 
 There is no authentication layer and the API allows cross-origin callers, like
 the rest of this work-network service. Anyone who can reach it can start a

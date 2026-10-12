@@ -331,6 +331,7 @@ def inspect_loader_targets(
     enter: bool = True,
     retries: int = 3,
     require_protocol3: bool = False,
+    expected_count: Optional[int] = None,
     progress: ProgressCallback = None,
 ) -> tuple[int, list[int], BootloaderClient, list[BootInfo]]:
     """Enumerate and validate loader targets on an already-open ring.
@@ -341,6 +342,8 @@ def inspect_loader_targets(
     """
     _report(progress, "enumerating", "Enumerating ring")
     count = ring.enumerate()
+    if expected_count is not None and count != expected_count:
+        raise RingError(f"expected {expected_count} actuators, discovered {count}")
     targets = list(range(count)) if addresses is None else list(dict.fromkeys(addresses))
     if not targets:
         raise RingError("no actuators enumerated")
@@ -412,6 +415,7 @@ def update_ring(
     broadcast_all: bool = False,
     enter: bool = True,
     retries: int = 3,
+    expected_count: Optional[int] = None,
     progress: ProgressCallback = None,
 ) -> dict:
     """Update targets using an already-open ring connection.
@@ -428,6 +432,7 @@ def update_ring(
         enter=enter,
         retries=retries,
         require_protocol3=broadcast_all,
+        expected_count=expected_count,
         progress=progress,
     )
     repaired: list[int] = []

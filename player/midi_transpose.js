@@ -37,6 +37,12 @@ const MidiTranspose = (() => {
   function findBest(events, pitches, options = {}) {
     const mode = options.mode ?? "fold";
     if (!MODES.includes(mode)) throw new Error("Unknown transposition mode");
+    const doTranspose = options.transpose !== false;
+    const manualShift = options.shift ?? null;
+    if (doTranspose && manualShift !== null &&
+        (!Number.isInteger(manualShift) || manualShift < -127 || manualShift > 127)) {
+      throw new Error("Enter a whole-number shift from -127 to +127 semitones");
+    }
     const target = targetPitches(pitches, pitches.length);
     if (!target.length) throw new Error("Assign pitches to connected actuators first");
     const selected = events.filter(e => !options.voices || options.voices.has(voiceKey(e)))
@@ -47,7 +53,11 @@ const MidiTranspose = (() => {
     let best = null;
     // All twelve pitch-class shifts, in every octave that can overlap MIDI's
     // finite 0..127 range. No key estimate or instrument-specific scale table.
-    for (let shift = -127; shift <= 127; shift++) {
+    // Folding alone evaluates zero shift; manual transposition evaluates only
+    // the requested shift. Automatic fitting keeps the existing ranking.
+    const firstShift = !doTranspose ? 0 : manualShift ?? -127;
+    const lastShift = !doTranspose ? 0 : manualShift ?? 127;
+    for (let shift = firstShift; shift <= lastShift; shift++) {
       const lookup = new Map();
       const counts = { exact: 0, folded: 0, substituted: 0, unmapped: 0 };
       let distance = 0;
@@ -71,6 +81,7 @@ const MidiTranspose = (() => {
       excluded: events.length - selected.length,
       target,
       mode,
+      shiftMode: !doTranspose ? "none" : manualShift === null ? "auto" : "manual",
       events: selected.map(e => {
         const mapped = best.lookup.get(e.pitch);
         return { ...e, originalPitch: e.pitch, pitch: mapped.pitch,

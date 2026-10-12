@@ -158,7 +158,8 @@ py scripts/ring_midi_server.py --ring jameson=COM29,10 --ring retuned=COM48,10
 
 The player provides a saved-instrument selector for each ring and shared playback
 controls. See [multiple-ring setup](docs/host-software.md#multiple-rings-on-one-server)
-for profile persistence and slot routing. Firmware updates still use single-ring mode.
+for profile persistence and slot routing. The Firmware panel lets you select
+rings to update and processes them one after another.
 
 For a first hardware check without the browser:
 

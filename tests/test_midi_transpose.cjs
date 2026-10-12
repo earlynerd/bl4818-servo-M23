@@ -45,6 +45,68 @@ test('octave folding keeps pitch classes and missing notes stay explicit', () =>
   assert.equal(transpose.mapPitch(58, 0, pan, 'adapt').kind, 'exact');
 });
 
+test('standalone folding never searches for a key or register shift', () => {
+  const chromatic = Array.from({ length: 21 }, (_, i) => 52 + i);
+  const input = events([73, 85, 52, 0, 127]);
+  const before = structuredClone(input);
+  const result = transpose.findBest(input, chromatic, { transpose: false });
+  assert.equal(result.shift, 0);
+  assert.equal(result.shiftMode, 'none');
+  assert.deepEqual(result.events.map(e => e.pitch), [61, 61, 52, 60, 67]);
+  assert.ok(result.events.every((e, i) => (e.pitch - input[i].pitch) % 12 === 0));
+  assert.deepEqual(input, before);
+  // Automatic best fit is still available, and deliberately chooses a shift.
+  assert.equal(transpose.findBest(events([73, 85]), chromatic).shift, -13);
+  const missing = transpose.findBest(events([71, 84]), drum, { transpose: false });
+  assert.equal(missing.counts.unmapped, 1);
+  assert.equal(missing.events[1].pitch, 72);
+});
+
+test('manual shifts use the requested signed semitones without optimizing them', () => {
+  for (const shift of [-5, 7]) {
+    const input = events([53, 65]);
+    const result = transpose.findBest(input, pan, { shift, mode: 'strict' });
+    assert.equal(result.shift, shift);
+    assert.equal(result.shiftMode, 'manual');
+    assert.deepEqual(result.events.map(e => e.pitch), [53 + shift, 65 + shift]);
+    assert.equal(result.counts.exact, 2);
+    result.events.forEach((e, i) => {
+      assert.equal(e.timeMs, input[i].timeMs);
+      assert.equal(e.durMs, input[i].durMs);
+      assert.equal(e.vel, input[i].vel);
+      assert.equal(e.originalPitch, input[i].pitch);
+    });
+  }
+  const input = events([61]);
+  assert.equal(transpose.findBest(input, [60, 62]).shift, -1);
+  assert.equal(transpose.findBest(input, [60, 62], { shift: 1 }).events[0].pitch, 62);
+  assert.equal(transpose.findBest(input, [60, 62], { shift: 0 }).counts.unmapped, 1);
+});
+
+test('manual transposition precedes optional octave folding', () => {
+  const input = events([84, 96]);
+  const target = [60, 61, 72];
+  const folded = transpose.findBest(input, target, { shift: 1 });
+  assert.equal(folded.shift, 1);
+  assert.deepEqual(folded.events.map(e => e.pitch), [61, 61]);
+  assert.equal(folded.counts.folded, 2);
+  assert.equal(transpose.findBest(input, target, { shift: 1, mode: 'strict' }).counts.unmapped, 2);
+  const unchanged = transpose.findBest(input, target, { transpose: false, shift: 1, mode: 'strict' });
+  assert.deepEqual(unchanged.events.map(e => e.pitch), [84, 96]);
+  assert.equal(unchanged.shift, 0);
+});
+
+test('manual shifts validate integers and MIDI limits without routing clamped notes', () => {
+  for (const shift of [-128, 128, 0.5, NaN, Infinity, '12']) {
+    assert.throws(() => transpose.findBest(events([60]), drum, { shift }), /whole-number/);
+  }
+  assert.equal(transpose.findBest(events([127]), [0], { shift: -127, mode: 'strict' }).counts.exact, 1);
+  assert.equal(transpose.findBest(events([0]), [127], { shift: 127, mode: 'strict' }).counts.exact, 1);
+  const outside = transpose.findBest(events([127]), [127], { shift: 1, mode: 'strict' });
+  assert.equal(outside.counts.unmapped, 1);
+  assert.equal(outside.events[0].transposeKind, 'unmapped');
+});
+
 test('pitch fitting does not change octave placement to avoid closely spaced notes', () => {
   // Both 0 and -12 give two exact matches and one octave fold. Previously,
   // the closely spaced final two notes made -12 win at 1x, despite moving
@@ -293,6 +355,100 @@ test('opening stays original; apply is repeatable; restore and subsequent open r
   p.run('applyTransposition()'); p.load();
   assert.equal(p.run('S.composition.transposition'), null);
   assert.equal(p.node('restoreMidiBtn').disabled, true);
+});
+
+test('player checkboxes support automatic only, folding only, both and neither', () => {
+  const p = player();
+  p.load(midi([[[0, 0x90, 73, 90], [...vlq(480), 0x80, 73, 0],
+    [0, 0x90, 85, 90], [...vlq(480), 0x80, 85, 0]]]));
+  p.run('S.mapping = Array.from({length:21}, (_, i) => 52 + i); S.count = 21; S.trim = Array(21).fill(1)');
+  const original = p.run('JSON.stringify(S.composition.originalEvents)');
+  assert.equal(p.node('transposeEnabled').checked, true);
+  assert.equal(p.node('octaveFoldEnabled').checked, true);
+  assert.equal(p.node('transposeShiftMode').value, 'auto');
+  p.run('applyTransposition()');
+  assert.equal(p.run('S.composition.transposition.shift'), -13);
+  p.node('transposeEnabled').checked = false;
+  p.run('refreshTransposeControls()');
+  assert.equal(p.node('transposeShiftMode').disabled, true);
+  assert.match(p.node('transposeSummary').textContent, /Options changed/);
+  assert.equal(p.run('S.composition.transposition.shift'), -13);
+  p.run('applyTransposition()');
+  assert.equal(p.run('S.composition.transposition.shift'), 0);
+  assert.equal(p.run('JSON.stringify(S.composition.events.map(e => e.pitch))'), '[61,61]');
+  assert.match(p.node('transposeSummary').textContent, /No transposition.*2 octave moves/);
+  p.node('octaveFoldEnabled').checked = false;
+  p.run('applyTransposition()');
+  assert.equal(p.node('transposeMode').disabled, true);
+  assert.equal(p.run('JSON.stringify(S.composition.events.map(e => e.pitch))'), '[73,85]');
+  assert.equal(p.run('S.composition.transposition.counts.unmapped'), 2);
+  p.node('transposeEnabled').checked = true;
+  p.run('applyTransposition()');
+  assert.equal(p.run('S.composition.transposition.shift'), -13);
+  assert.equal(p.run('S.composition.transposition.mode'), 'strict');
+  assert.equal(p.run('S.composition.transposition.counts.exact'), 2);
+  assert.equal(p.run('JSON.stringify(S.composition.originalEvents)'), original);
+});
+
+test('player manual offsets apply from source, mark pending edits and reset on new files', () => {
+  const p = player(); p.load();
+  const original = p.run('JSON.stringify(S.composition.events)');
+  p.node('transposeShiftMode').value = 'manual';
+  p.node('transposeSemitones').value = '-1';
+  p.node('octaveFoldEnabled').checked = false;
+  p.run('applyTransposition()');
+  assert.equal(p.node('transposeSemitonesControl').hidden, false);
+  assert.equal(p.node('transposeSemitones').disabled, false);
+  assert.match(p.node('transposeSummary').textContent, /Manual -1 semitones/);
+  assert.equal(p.run('S.composition.transposition.counts.exact'), pan.length);
+  const applied = p.run('JSON.stringify(S.composition.events)');
+  p.run('applyTransposition()');
+  assert.equal(p.run('JSON.stringify(S.composition.events)'), applied);
+  p.node('transposeSemitones').value = '11';
+  p.node('octaveFoldEnabled').checked = true;
+  p.run('refreshTransposeControls()');
+  assert.match(p.node('transposeSummary').textContent, /Options changed/);
+  assert.equal(p.run('JSON.stringify(S.composition.events)'), applied);
+  p.run('applyTransposition()');
+  assert.match(p.node('transposeSummary').textContent, /Manual \+11 semitones/);
+  assert.ok(p.run('S.composition.transposition.counts.folded') > 0);
+  p.run('restoreOriginalMidi()');
+  assert.equal(p.run('JSON.stringify(S.composition.events)'), original);
+  p.load();
+  assert.equal(p.node('transposeShiftMode').value, 'auto');
+  assert.equal(p.node('transposeSemitones').value, '0');
+  assert.equal(p.run('S.composition.transposition'), null);
+});
+
+test('invalid manual input preserves the applied view; disabled transpose ignores it', () => {
+  const p = player(); p.load(); p.run('applyTransposition()');
+  const current = p.run('JSON.stringify(S.composition.events)');
+  p.node('transposeShiftMode').value = 'manual';
+  for (const value of ['', '1.5', '128', '-128']) {
+    p.node('transposeSemitones').value = value;
+    p.run('applyTransposition()');
+    assert.match(p.node('errorBox').textContent, /whole-number/);
+    assert.equal(p.run('JSON.stringify(S.composition.events)'), current);
+  }
+  p.node('transposeEnabled').checked = false;
+  p.run('applyTransposition()');
+  assert.equal(p.node('transposeSemitones').disabled, true);
+  assert.equal(p.run('S.composition.transposition.shift'), 0);
+});
+
+test('new pitch controls are disabled while starting, playing or updating firmware', () => {
+  const p = player(); p.load();
+  p.node('transposeShiftMode').value = 'manual';
+  for (const flag of ['playStarting', 'playing', 'firmwareUpdating']) {
+    p.run(`S.${flag} = true; refreshTransposeControls()`);
+    for (const id of ['transposeEnabled', 'octaveFoldEnabled', 'transposeShiftMode',
+      'transposeSemitones', 'transposeMode', 'transposeBtn']) {
+      assert.equal(p.node(id).disabled, true, `${flag}: ${id}`);
+    }
+    p.run('applyTransposition()');
+    assert.equal(p.run('S.composition.transposition'), null);
+    p.run(`S.${flag} = false`);
+  }
 });
 
 test('drums are excluded only on click and selections apply only on click', () => {

@@ -1,20 +1,24 @@
 """Exercise multiple real Bridges with simulated serial clients; no hardware I/O."""
 import json
 import sys
+import struct
 import tempfile
 import threading
+import time
 import unittest
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.request import Request, urlopen
+from urllib.error import HTTPError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from ring_bus import CommandAck, RingTimeout, REPLY_MODE_NONE
 from ring_fleet import RingFleet, parse_ring_specs
 from ring_midi_server import Bridge, Player, Handler, FirmwareUpdateManager
+from firmware_image import prepare_image, image_metadata
 
 
 class SerialRing:
@@ -235,11 +239,132 @@ class FleetTests(unittest.TestCase):
         self.assertEqual(result["address"], 23)
         self.assertIn(("param", 9, 1, 40), self.clients[1].calls)
 
-    def test_firmware_update_requires_single_ring_mode(self):
+    def firmware_manager(self):
         manager = FirmwareUpdateManager(self.fleet)
-        self.assertFalse(manager.snapshot()["update_supported"])
-        with self.assertRaisesRegex(RuntimeError, "single-ring"):
-            manager.start_update(0)
+        manager._image = prepare_image(struct.pack("<II", 0x20000FF0, 9) + b"firmware")
+        manager._meta = image_metadata(manager._image, image_version=12)
+        manager._state["artifact"] = {"image_crc32": manager._meta.image_crc32}
+        return manager
+
+    def firmware_result(self, client, image, meta, **kwargs):
+        return {"count": client.count, "addresses": list(range(client.count)),
+                "repaired": [0], "image_size": meta.image_size,
+                "image_crc32": meta.image_crc32, "image_version": meta.image_version,
+                "loader_versions": [3] * client.count}
+
+    def run_update(self, manager, names, updater):
+        with patch("ring_midi_server.threading.Thread") as worker, \
+             patch("ring_midi_server.update_ring", side_effect=updater):
+            manager.start_update(manager._meta.image_crc32, names)
+            manager._run_update(*worker.call_args.kwargs["args"])
+        return manager.snapshot()
+
+    def test_firmware_requires_explicit_valid_ring_selection_and_crc(self):
+        manager = self.firmware_manager()
+        self.assertTrue(manager.snapshot()["update_supported"])
+        self.assertEqual([r["name"] for r in manager.snapshot()["rings"]], ["pan", "drum"])
+        for selection in [None, [], "pan", [1], ["other"], ["pan", "pan"]]:
+            with self.subTest(selection=selection), self.assertRaises(ValueError):
+                manager.start_update(manager._meta.image_crc32, selection)
+        with self.assertRaisesRegex(RuntimeError, "no longer matches"):
+            manager.start_update(0, ["pan"])
+        self.assertFalse(self.fleet.maintenance.is_set())
+        self.assertFalse(manager.snapshot()["busy"])
+
+    def test_firmware_updates_selected_rings_in_configured_order_under_maintenance(self):
+        manager = self.firmware_manager()
+        self.fleet.player.play([self.event(0, 5000), self.event(14, 5000)])
+        calls = []
+
+        def update(client, image, meta, **kwargs):
+            lane = self.clients.index(client)
+            self.assertIs(image, manager._image)
+            self.assertIs(meta, manager._meta)
+            self.assertTrue(all(ring.maintenance.is_set() for ring in self.fleet.rings))
+            self.assertTrue(self.fleet.rings[lane].lock._busy)
+            self.assertFalse(self.fleet.player.is_playing())
+            self.assertEqual(kwargs["expected_count"], self.specs[lane].count)
+            self.assertTrue(kwargs["broadcast_all"])
+            with self.assertRaisesRegex(RuntimeError, "firmware update"):
+                self.fleet.player.play([self.event(14)])
+            with self.assertRaisesRegex(RuntimeError, "firmware update"):
+                self.fleet.enumerate()
+            with self.assertRaisesRegex(RuntimeError, "already in progress"):
+                manager.start_update(meta.image_crc32, ["pan"])
+            with self.assertRaisesRegex(RuntimeError, "already in progress"):
+                manager.start_build(1)
+            kwargs["progress"]({"phase": "writing", "message": "pages", "done": 1, "total": 2})
+            snap = manager.snapshot()
+            self.assertEqual(snap["progress"]["ring"], self.specs[lane].name)
+            self.assertEqual(snap["progress"]["ring_index"], lane + 1)
+            self.assertEqual(snap["progress"]["ring_total"], 2)
+            if lane:
+                self.assertEqual(snap["targets"][0]["state"], "complete")
+            calls.append(client)
+            return self.firmware_result(client, image, meta, **kwargs)
+
+        state = self.run_update(manager, ["drum", "pan"], update)
+        self.assertEqual(calls, self.clients)
+        self.assertEqual(state["phase"], "complete")
+        self.assertEqual(state["result"]["addresses"], list(range(24)))
+        self.assertEqual(state["result"]["repaired"], [0, 14])
+        self.assertEqual([t["state"] for t in state["targets"]], ["complete", "complete"])
+        self.assertFalse(self.fleet.maintenance.is_set())
+        self.assertEqual([ring.count for ring in self.fleet.rings], [14, 10])
+
+    def test_firmware_selection_leaves_other_ring_and_its_status_untouched(self):
+        manager = self.firmware_manager()
+        self.fleet.status()
+        cache = self.fleet.rings[0]._status_cache.copy()
+        calls = []
+
+        def update(client, image, meta, **kwargs):
+            calls.append(client)
+            return self.firmware_result(client, image, meta, **kwargs)
+
+        state = self.run_update(manager, ["drum"], update)
+        self.assertEqual(calls, [self.clients[1]])
+        self.assertEqual(state["result"]["addresses"], list(range(14, 24)))
+        self.assertEqual(state["result"]["count"], 10)
+        self.assertEqual(self.fleet.rings[0]._status_cache, cache)
+        self.assertEqual(self.fleet.rings[1]._status_cache, {})
+
+    def test_firmware_failure_stops_queue_and_invalidates_failed_ring(self):
+        manager = self.firmware_manager()
+        calls = []
+
+        def update(client, *args, **kwargs):
+            calls.append(client)
+            raise RingTimeout("unplugged")
+
+        with patch("ring_midi_server.traceback.print_exc"):
+            state = self.run_update(manager, ["pan", "drum"], update)
+        self.assertEqual(calls, [self.clients[0]])
+        self.assertEqual(state["phase"], "failed")
+        self.assertIn("Ring pan", state["error"])
+        self.assertEqual([t["state"] for t in state["targets"]], ["failed", "skipped"])
+        self.assertEqual(state["result"]["addresses"], [])
+        self.assertEqual([ring.count for ring in self.fleet.rings], [0, 10])
+        self.assertFalse(self.fleet.maintenance.is_set())
+        self.assertIsNotNone(manager._image)
+
+    def test_firmware_partial_failure_preserves_completed_results_for_retry(self):
+        manager = self.firmware_manager()
+
+        def update(client, image, meta, **kwargs):
+            if client is self.clients[1]:
+                raise RingTimeout("lost reply")
+            return self.firmware_result(client, image, meta, **kwargs)
+
+        with patch("ring_midi_server.traceback.print_exc"):
+            state = self.run_update(manager, ["pan", "drum"], update)
+        self.assertEqual(state["result"]["addresses"], list(range(14)))
+        self.assertEqual([t["state"] for t in state["targets"]], ["complete", "failed"])
+        self.assertEqual([ring.count for ring in self.fleet.rings], [14, 0])
+        state = self.run_update(manager, ["drum"], self.firmware_result)
+        self.assertEqual(state["phase"], "complete")
+        self.assertEqual(state["result"]["addresses"], list(range(14, 24)))
+        self.assertEqual([ring.count for ring in self.fleet.rings], [14, 10])
 
     def test_ring_selection_cannot_change_during_playback(self):
         source = self.fleet.instruments.source
@@ -248,6 +373,70 @@ class FleetTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "stop playback"):
             self.fleet.change_instrument("select_ring", ring="pan", profile_id=selected)
         self.assertEqual(self.fleet.load_mapping(), [None] * 24)
+
+    def test_http_firmware_selection_and_fleet_maintenance(self):
+        manager = self.firmware_manager()
+        entered, release = threading.Event(), threading.Event()
+
+        class TestHandler(Handler):
+            bridge = self.fleet
+            firmware = manager
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), TestHandler)
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+
+        def request(path, data=None):
+            req = Request(f"http://127.0.0.1:{server.server_port}{path}",
+                          data=None if data is None else json.dumps(data).encode(),
+                          headers={"Content-Type": "application/json"})
+            try:
+                response = urlopen(req, timeout=2)
+            except HTTPError as exc:
+                response = exc
+            with response:
+                return response.code, json.load(response)
+
+        def update(client, image, meta, **kwargs):
+            self.assertIs(client, self.clients[1])
+            self.assertEqual(kwargs["expected_count"], 10)
+            entered.set()
+            release.wait(2)
+            return self.firmware_result(client, image, meta, **kwargs)
+
+        body = {"confirm": True, "expected_crc32": manager._meta.image_crc32}
+        try:
+            with patch("ring_midi_server.update_ring", side_effect=update) as updater:
+                for invalid in [body, {**body, "rings": []}, {**body, "rings": ["unknown"]},
+                                {**body, "rings": ["drum"], "confirm": False}]:
+                    self.assertEqual(request("/api/firmware/update", invalid)[0], 400)
+                self.assertEqual(request("/api/firmware/update", {**body, "expected_crc32": 0,
+                                                                "rings": ["drum"]})[0], 409)
+                self.assertEqual(request("/api/firmware/update", {**body, "rings": ["drum"]})[0], 202)
+                self.assertTrue(entered.wait(1))
+                for path in ["/api/home", "/api/play", "/api/enumerate"]:
+                    self.assertEqual(request(path, {})[0], 409)
+                self.assertEqual(request("/api/firmware/update", {**body, "rings": ["pan"]})[0], 409)
+                self.assertEqual(request("/api/firmware/build", {"image_version": 1})[0], 409)
+                code, state = request("/api/firmware")
+                self.assertEqual(code, 200)
+                self.assertTrue(state["busy"])
+                self.assertEqual(state["targets"][0]["name"], "drum")
+                release.set()
+                deadline = time.monotonic() + 2
+                while manager.snapshot()["busy"] and time.monotonic() < deadline:
+                    time.sleep(0.005)
+                self.assertEqual(manager.snapshot()["phase"], "complete")
+                self.assertFalse(manager.snapshot()["busy"])
+                self.assertFalse(self.fleet.maintenance.is_set())
+                self.assertEqual(updater.call_count, 1)
+        finally:
+            release.set()
+            server.shutdown()
+            server.server_close()
+            worker.join(2)
 
     def test_partial_open_failure_closes_already_open_ports(self):
         calls = []

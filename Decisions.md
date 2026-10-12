@@ -325,3 +325,24 @@ When a decision is reversed or superseded, append a new entry rather than rewrit
 - **Why:** The user reports that the COM29/COM48 setup works well and sounds beautiful, with nearly twenty notes opening up more playable music. This supplies the requested physical playback feedback; quantitative impact timing and exhaustive fault testing are not implied.
 - **Supersedes:** Hold the main merge for two-drum hardware testing.
 - **Affects:** Branch integration and the validation record in `docs/host-software.md`.
+
+## 2026-10-05 — Separate MIDI transposition from octave folding
+
+- **Decision:** Independent Transpose and Octave folding checkboxes apply from original MIDI events via Apply. Transpose defaults to the existing automatic best-fit ranking; Manual shift instead uses the exact signed integer offset. With Transpose unchecked, folding evaluates only zero global shift, preserving the key. Both unchecked retain pitches while applying track inclusion. Substitution remains optional and requires folding.
+- **Why:** Chromatic instruments often need only register folding; automatic key changes and deliberate manual shifts are separate choices.
+- **Supersedes:** The combined fit-mode selector in “MIDI transposition is an explicit, reversible player action.” Original-on-open, restore, mapping-staleness checks, source preservation, and separate 50 ms restrike handling remain in force.
+- **Affects:** `player/midi_transpose.js`, `player/midi_player.html`, and `docs/host-software.md`.
+
+## 2026-10-05 — Selected rings update sequentially from one frozen artifact
+
+- **Decision:** Enable browser firmware updates in named-ring mode with explicit ring checkboxes and API selection. Update complete selected rings in configured order through their existing serial bridges, using one frozen image. Hold fleet maintenance throughout, validate each ring's discovered count before loader entry, and stop the queue on the first failure while retaining completed results and marking later rings skipped.
+- **Why:** Multiple connected rings need in-place maintenance without restarting the server for each adapter. Sequential updates provide clear progress and bound partial failure to the active ring; selection limits which rings receive the artifact.
+- **Supersedes:** The single-ring-only firmware maintenance scope in “Multiple serial rings share one MIDI player clock.” Wire protocol, flash layout and single-ring request shape remain unchanged.
+- **Affects:** `scripts/ring_midi_server.py`, `scripts/ring_fleet.py`, `scripts/ring_bootload.py`, player Firmware panel and firmware maintenance documentation. Multi-ring physical update validation remains pending.
+
+## 2026-10-05 — Verify FTDI latency before MIDI server startup
+
+- **Decision:** On Windows, check each configured present FTDI adapter's saved latency timer before opening any ring. Require 1–2 ms and verified VID/PID/serial-to-COM identity; stop on slow or unverifiable FTDI settings. Keep normal startup read-only. Provide a separate, explicitly invoked Administrator helper that changes only named FTDI adapters to 2 ms. Other adapters/platforms keep existing behavior with an explicit not-checked message.
+- **Why:** The COM29/COM48 trial reduced median transaction RTT from roughly 16 ms to 6 ms, and the user reported that previously difficult fast passages now play cleanly. Persisted adapter settings should not silently regress after replacement or driver setup.
+- **Supersedes:** Unchecked FTDI driver defaults at MIDI server startup.
+- **Affects:** MIDI server startup, `scripts/serial_latency.py`, and `docs/host-software.md`. This verifies saved configuration, not live latency or acoustic synchronization.

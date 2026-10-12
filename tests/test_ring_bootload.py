@@ -118,6 +118,17 @@ class FirmwareImageTests(unittest.TestCase):
 
 
 class BootloaderClientTests(unittest.TestCase):
+    def test_expected_ring_count_is_checked_before_entering_any_loader(self):
+        ring = unittest.mock.Mock()
+        ring.enumerate.return_value = 2
+        image = prepare_image(struct.pack("<II", 0x20000FF0, 9) + b"firmware")
+        meta = image_metadata(image, image_version=1)
+        with patch("ring_bootload.BootloaderClient") as loader, \
+             self.assertRaisesRegex(RingError, "expected 3 actuators, discovered 2"):
+            update_ring(ring, image, meta, broadcast_all=True, expected_count=3)
+        ring.enter_bootloader.assert_not_called()
+        loader.assert_not_called()
+
     def test_command_skips_cut_through_echo(self):
         address = 3
         command = bytes([CMD_BOOT_BASE + address, BOOT_SUB_GET_INFO])

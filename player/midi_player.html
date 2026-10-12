@@ -36,7 +36,10 @@
   #pitchScanResults { overflow-wrap: anywhere; }
   #pitchScanResults td { white-space: normal; }
   .transpose-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-  .transpose-controls select { background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 5px; }
+  .transpose-controls select, .transpose-controls input[type="number"] { background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 5px; }
+  .transpose-controls label { display: flex; align-items: center; gap: 5px; font-size: 12px; }
+  .transpose-controls input[type="number"] { width: 72px; }
+  .transpose-controls [hidden] { display: none; }
   .transpose-info { font-size: 12px; color: var(--text-muted); line-height: 1.5; margin-top: 8px; }
   .transpose-voices { display: grid; gap: 8px; margin-top: 8px; max-height: 340px; overflow: auto; }
   .voice-row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; border-left:4px solid var(--voice-color); padding:6px 8px; }
@@ -397,6 +400,8 @@
       <div id="firmwareArtifact" class="firmware-meta" style="margin-top:8px">No server build prepared.</div>
       <div id="firmwareProgress" class="progress-bar" style="display:none;margin-top:9px"><div id="firmwareProgressFill" class="progress-fill" style="width:0%"></div></div>
       <div id="firmwareMessage" style="font-size:11px;color:var(--text-dim);margin-top:7px">Build the checked-out source before updating.</div>
+      <div id="firmwareRingSelection" style="display:none;margin-top:8px;font-size:11px"></div>
+      <div id="firmwareTargets" style="display:none;white-space:pre-line;margin-top:7px;font-size:11px;color:var(--text-dim)"></div>
       <div style="display:flex;gap:6px;align-items:center;margin-top:10px">
         <input type="number" id="firmwareVersion" class="firmware-version" min="0" max="4294967295" step="1" title="Manifest image-version label (not an anti-rollback counter)">
         <button class="pill" id="firmwareBuildBtn" style="flex:1">Build</button>
@@ -451,20 +456,29 @@
       <div id="progressContainer" class="progress-bar" style="display:none"><div id="progressFill" class="progress-fill" style="width:0%"></div></div>
       <div class="panel" id="transposePanel">
         <div class="transpose-controls">
-          <button class="pill" id="transposeBtn" type="button" disabled>Transpose</button>
-          <label for="transposeMode">Fit</label>
-          <select id="transposeMode">
-            <option value="strict">Transpose only</option>
-            <option value="fold" selected>Transpose + octave folding</option>
-            <option value="adapt">Also substitute missing notes</option>
+          <label><input id="transposeEnabled" type="checkbox" checked>Transpose</label>
+          <select id="transposeShiftMode" aria-label="Transposition method">
+            <option value="auto" selected>Automatic best fit</option>
+            <option value="manual">Manual shift</option>
           </select>
+          <label id="transposeSemitonesControl" hidden>
+            <input id="transposeSemitones" type="number" min="-127" max="127" step="1" value="0" aria-label="Semitone shift">semitones
+          </label>
+          <label><input id="octaveFoldEnabled" type="checkbox" checked>Octave folding</label>
+          <label for="transposeMode">Missing notes</label>
+          <select id="transposeMode">
+            <option value="fold" selected>Leave unplayable</option>
+            <option value="adapt">Substitute nearby pitch classes</option>
+          </select>
+          <button class="pill" id="transposeBtn" type="button" disabled>Apply</button>
           <button class="pill" id="restoreMidiBtn" type="button" disabled>Restore original</button>
         </div>
+        <p class="transpose-info">Transpose and octave folding work separately or together. Manual shift: positive moves up, negative moves down. Folding preserves pitch classes; substitutions require folding. Click Apply to change the playback view.</p>
         <p class="transpose-info" id="transposeTarget"></p>
-        <p class="transpose-info" id="transposeSummary" aria-live="polite">Original notes. Click Transpose to fit this file to the instrument.</p>
+        <p class="transpose-info" id="transposeSummary" aria-live="polite">Original notes. Choose pitch options and click Apply.</p>
         <details open style="margin-top:8px">
-          <summary style="cursor:pointer;font-size:12px;color:var(--text-muted)">Inspect tracks and choose what to transpose</summary>
-          <p class="transpose-info">Show hides/shows original source notes immediately, using track colors. Include chooses what to transpose and applies only on Transpose. Channel 10 starts excluded as General MIDI drums.</p>
+          <summary style="cursor:pointer;font-size:12px;color:var(--text-muted)">Inspect tracks and choose what to include</summary>
+          <p class="transpose-info">Show hides/shows original source notes immediately, using track colors. Include chooses tracks for pitch changes and applies only on Apply. Channel 10 starts excluded as General MIDI drums.</p>
           <div class="transpose-voices" id="transposeVoices"></div>
           <div class="transpose-controls" style="margin-top:8px">
             <button class="pill" type="button" id="arrangementViewBtn" onclick="previewMidiVoice(null)" disabled>Arrangement · mallet colors</button>
@@ -816,6 +830,8 @@ const S = {
   firmware: null,
   firmwareUpdating: false,
   firmwarePollIntervalId: null,
+  firmwareRingSelection: null,
+  firmwareRingLayout: null,
   // Session-wide pipeline timing breakdown — decomposes the total beat error
   // into the components between "intended fire time" and "physical impact":
   //   schedJitter — setTimeout fired N ms vs when we wanted it to (signed)
@@ -880,12 +896,98 @@ function defaultFirmwareVersion() {
     String(d.getUTCDate()).padStart(2, "0"));
 }
 
+function refreshFirmwareUpdateButton() {
+  const state = S.firmware;
+  const namedRings = !!(state && state.rings && state.rings.length);
+  const button = document.getElementById("firmwareUpdateBtn");
+  button.textContent = namedRings ? "Update selected" : "Update ring";
+  button.disabled = !state || !!state.busy || !state.artifact || state.update_supported === false
+    || (namedRings && !S.firmwareRingSelection?.length);
+}
+
+function renderFirmwareSelection(state) {
+  const rings = state?.rings || [];
+  const container = document.getElementById("firmwareRingSelection");
+  container.style.display = rings.length ? "block" : "none";
+  const layout = JSON.stringify(rings);
+  if (S.firmwareRingLayout !== layout) {
+    S.firmwareRingLayout = layout;
+    S.firmwareRingSelection = rings.map(ring => ring.name);
+    const heading = document.createElement("div");
+    heading.textContent = "Rings to update (one at a time):";
+    heading.style.marginBottom = "4px";
+    container.replaceChildren(heading);
+    for (const ring of rings) {
+      const label = document.createElement("label");
+      label.style.display = "block";
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.checked = true;
+      input.dataset.ring = ring.name;
+      input.addEventListener("change", () => {
+        const selected = new Set(S.firmwareRingSelection);
+        if (input.checked) selected.add(ring.name);
+        else selected.delete(ring.name);
+        S.firmwareRingSelection = rings.filter(item => selected.has(item.name)).map(item => item.name);
+        refreshFirmwareUpdateButton();
+      });
+      const text = document.createElement("span");
+      text.textContent = ` ${ring.name} · ${ring.port} · ${ring.expected_count} actuators`;
+      label.append(input, text);
+      container.append(label);
+    }
+  }
+  for (const input of container.querySelectorAll("input")) input.disabled = !!state?.busy;
+  const targets = document.getElementById("firmwareTargets");
+  const namedTargets = (state?.targets || []).filter(target => target.name);
+  targets.style.display = namedTargets.length ? "block" : "none";
+  targets.textContent = namedTargets.map(target =>
+    `${target.name}: ${target.state}${target.error ? ` — ${target.error}` : ""}`
+  ).join("\n");
+}
+
+async function startFirmwareUpdate() {
+  const state = S.firmware;
+  const artifact = state?.artifact;
+  if (!artifact || state.busy || state.update_supported === false) return;
+  const rings = (state.rings || []).filter(ring => S.firmwareRingSelection?.includes(ring.name));
+  if (state.rings?.length && !rings.length) return;
+  const count = rings.length ? rings.reduce((sum, ring) => sum + ring.expected_count, 0) : S.count;
+  const selection = rings.length
+    ? `\nRings: ${rings.map(ring => `${ring.name} (${ring.port})`).join(", ")}\nEach ring will update one after the other.\n`
+    : "";
+  const dirtyWarning = artifact.dirty
+    ? "\n\nWARNING: the server checkout had uncommitted changes when this was built."
+    : "";
+  const ok = window.confirm(
+    `Update all ${count} actuator(s)${rings.length ? " in the selected rings" : ""} with this firmware?\n` +
+    selection + "\n" +
+    `CRC32: ${artifact.image_crc32_hex}\n` +
+    `Version: ${artifact.image_version}\n` +
+    `Source: ${artifact.commit || "unknown"}${artifact.dirty ? " + dirty" : ""}` +
+    dirtyWarning +
+    "\n\nPlayback will stop. Do not remove power; updated actuators must be re-homed afterward."
+  );
+  if (!ok) return;
+  try {
+    hideMessages();
+    log(`starting firmware update crc=${artifact.image_crc32_hex}…`);
+    const request = {confirm: true, expected_crc32: artifact.image_crc32};
+    if (rings.length) request.rings = rings.map(ring => ring.name);
+    renderFirmware(await api("POST", "/api/firmware/update", request));
+  } catch (e) {
+    showError("Firmware update could not start: " + e.message);
+    log("firmware update start failed: " + e.message);
+  }
+}
+
 function renderFirmware(state) {
   const previous = S.firmware;
   S.firmware = state;
   const artifact = state && state.artifact;
   const updating = !!(state && state.busy && state.operation === "update");
   S.firmwareUpdating = updating;
+  renderFirmwareSelection(state);
   refreshTransposeControls();
 
   const phase = document.getElementById("firmwarePhase");
@@ -938,8 +1040,7 @@ function renderFirmware(state) {
 
   document.getElementById("firmwareVersion").disabled = !!(state && state.busy);
   document.getElementById("firmwareBuildBtn").disabled = !!(state && state.busy);
-  document.getElementById("firmwareUpdateBtn").disabled =
-    !!(state && state.busy) || !artifact || (state && state.update_supported === false);
+  refreshFirmwareUpdateButton();
   for (const id of [
     "homeBtn", "recoverBtn", "cancelBtn", "stopMotorsBtn", "enumBtn", "arpBtn",
     "refreshStatusBtn", "busProbeBtn", "busResetBtn"
@@ -2316,6 +2417,10 @@ function loadFromMIDI(buf, filename) {
     S.loadedMidiBuf = buf;
     S.loadedMidiName = filename;
     S.loadedFromLibrary = false;
+    document.getElementById("transposeEnabled").checked = true;
+    document.getElementById("transposeShiftMode").value = "auto";
+    document.getElementById("transposeSemitones").value = "0";
+    document.getElementById("octaveFoldEnabled").checked = true;
     document.getElementById("transposeMode").value = "fold";
     renderTransposeVoices();
     if (typeof updateSaveToLibraryBtn === "function") updateSaveToLibraryBtn();
@@ -2340,6 +2445,18 @@ function transpositionIsStale() {
 function selectedTransposeVoices() {
   return new Set([...document.querySelectorAll("[data-transpose-voice]:checked")]
     .map(input => input.dataset.transposeVoice));
+}
+
+function transposeOptions() {
+  const transpose = document.getElementById("transposeEnabled").checked;
+  const manual = document.getElementById("transposeShiftMode").value === "manual";
+  const value = document.getElementById("transposeSemitones").value.trim();
+  return {
+    transpose,
+    mode: document.getElementById("octaveFoldEnabled").checked
+      ? document.getElementById("transposeMode").value : "strict",
+    shift: transpose && manual ? (value === "" ? NaN : Number(value)) : undefined,
+  };
 }
 
 function midiVoiceKey(e) { return `${e.track}:${e.channel}`; }
@@ -2488,7 +2605,15 @@ function refreshTransposeControls() {
   const target = ready ? MidiTranspose.targetPitches(S.mapping, S.count) : [];
   document.getElementById("transposeBtn").disabled = !c || busy || !target.length;
   document.getElementById("restoreMidiBtn").disabled = !c || !c.transposition || busy;
-  document.getElementById("transposeMode").disabled = busy;
+  const doTranspose = document.getElementById("transposeEnabled").checked;
+  const fold = document.getElementById("octaveFoldEnabled").checked;
+  const manual = document.getElementById("transposeShiftMode").value === "manual";
+  document.getElementById("transposeEnabled").disabled = busy;
+  document.getElementById("octaveFoldEnabled").disabled = busy;
+  document.getElementById("transposeShiftMode").disabled = busy || !doTranspose;
+  document.getElementById("transposeSemitones").disabled = busy || !doTranspose || !manual;
+  document.getElementById("transposeSemitonesControl").hidden = !manual;
+  document.getElementById("transposeMode").disabled = busy || !fold;
   document.querySelectorAll("[data-transpose-voice]").forEach(input => { input.disabled = busy; });
   document.querySelectorAll("[data-preview-voice], [data-audition-voice]").forEach(button => { button.disabled = busy; });
   document.getElementById("transposeTarget").textContent = !ready
@@ -2499,19 +2624,21 @@ function refreshTransposeControls() {
   const applied = c.transposition;
   const summary = document.getElementById("transposeSummary");
   if (!applied) {
-    summary.textContent = "Original notes. Click Transpose to fit this file to the instrument.";
+    summary.textContent = "Original notes. Choose pitch options and click Apply.";
   } else {
     const counts = applied.counts;
     const schedule = buildSchedule(c.events, getTempoScale());
     const merged = schedule.filter(e => e.suppressed && e.suppressedReason !== "restrike").length;
     const restrikes = schedule.filter(e => e.suppressedReason === "restrike").length;
     const played = schedule.filter(e => e.slot >= 0 && !e.suppressed).length;
-    const pending = applied.mode !== document.getElementById("transposeMode").value ||
+    const pending = applied.optionsKey !== JSON.stringify(transposeOptions()) ||
       applied.voiceKeys !== JSON.stringify([...selectedTransposeVoices()].sort());
     const change = transpositionIsStale()
-      ? " Instrument mapping changed: transpose again or restore before playing."
-      : pending ? " Options changed: click Transpose to apply." : "";
-    summary.textContent = `Applied ${applied.shift >= 0 ? "+" : ""}${applied.shift} semitones · ` +
+      ? " Instrument mapping changed: apply again or restore before playing."
+      : pending ? " Options changed: click Apply to update." : "";
+    const shiftLabel = applied.shiftMode === "none" ? "No transposition"
+      : `${applied.shiftMode === "manual" ? "Manual" : "Automatic"} ${applied.shift >= 0 ? "+" : ""}${applied.shift} semitones`;
+    summary.textContent = `${shiftLabel} · ` +
       `${counts.exact} exact · ${counts.folded} octave moves · ${counts.substituted} substitutions · ` +
       `${counts.unmapped} unplayable · ${applied.excluded} excluded by track · ` +
       `${merged} merged · ${restrikes} omitted under 50 ms · ${played} playable at ${getTempoScale().toFixed(2)}x.` + change;
@@ -2526,16 +2653,16 @@ function applyTransposition() {
   try {
     if (typeof MidiTranspose === "undefined") throw new Error("Restart the MIDI server and reload the page");
     const voices = selectedTransposeVoices();
+    const options = transposeOptions();
     const result = MidiTranspose.findBest(S.composition.originalEvents,
-      MidiTranspose.targetPitches(S.mapping, S.count), {
-        mode: document.getElementById("transposeMode").value, voices,
-      });
+      MidiTranspose.targetPitches(S.mapping, S.count), { ...options, voices });
     S.composition.events = result.events;
     S.composition.transposition = { ...result, mappingKey: transposeMappingKey(),
+      optionsKey: JSON.stringify(options),
       voiceKeys: JSON.stringify([...voices].sort()) };
     showComposition();
   } catch (e) {
-    showError("Transposition could not be applied: " + e.message);
+    showError("Pitch changes could not be applied: " + e.message);
   }
 }
 
@@ -2968,7 +3095,7 @@ async function play() {
   if (S.playing) { stopPlayback(); return; }
   previewMidiVoice(null);
   if (transpositionIsStale()) {
-    showError("The instrument mapping changed. Click Transpose again or Restore original before playing.");
+    showError("The instrument mapping changed. Click Apply again or Restore original before playing.");
     return;
   }
   hideMessages();
@@ -3087,6 +3214,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.getElementById("transposeBtn").addEventListener("click", applyTransposition);
   document.getElementById("restoreMidiBtn").addEventListener("click", restoreOriginalMidi);
   document.getElementById("transposeMode").addEventListener("change", refreshTransposeControls);
+  ["transposeEnabled", "octaveFoldEnabled", "transposeShiftMode"].forEach(id =>
+    document.getElementById(id).addEventListener("change", refreshTransposeControls));
+  document.getElementById("transposeSemitones").addEventListener("input", refreshTransposeControls);
 
   function readMidiFile(file) {
     const r = new FileReader();
@@ -3663,33 +3793,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       log("firmware build start failed: " + e.message);
     }
   });
-  document.getElementById("firmwareUpdateBtn").addEventListener("click", async () => {
-    const artifact = S.firmware && S.firmware.artifact;
-    if (!artifact) return;
-    const dirtyWarning = artifact.dirty
-      ? "\n\nWARNING: the server checkout had uncommitted changes when this was built."
-      : "";
-    const ok = window.confirm(
-      `Update all ${S.count} actuator(s) with this firmware?\n\n` +
-      `CRC32: ${artifact.image_crc32_hex}\n` +
-      `Version: ${artifact.image_version}\n` +
-      `Source: ${artifact.commit || "unknown"}${artifact.dirty ? " + dirty" : ""}` +
-      dirtyWarning +
-      "\n\nPlayback will stop. Do not remove power; all actuators must be re-homed afterward."
-    );
-    if (!ok) return;
-    try {
-      hideMessages();
-      log(`starting ring firmware update crc=${artifact.image_crc32_hex}…`);
-      renderFirmware(await api("POST", "/api/firmware/update", {
-        confirm: true,
-        expected_crc32: artifact.image_crc32,
-      }));
-    } catch (e) {
-      showError("Firmware update could not start: " + e.message);
-      log("firmware update start failed: " + e.message);
-    }
-  });
+  document.getElementById("firmwareUpdateBtn").addEventListener("click", startFirmwareUpdate);
   document.getElementById("resetMapBtn").addEventListener("click", () => {
     S.mapping = Array.from({length: S.count}, (_, i) => DEFAULT_MAPPING[i] ?? null);
     rebuildMappingIfNeeded();

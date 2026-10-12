@@ -47,6 +47,49 @@ port while it is active. Named local pitch mappings are written to
 `instruments.json`; an existing `mapping.json` is imported on first use.
 The file is machine/instrument state and is ignored by Git.
 
+### FTDI serial latency at startup (Windows)
+
+Before opening any ring port, the server checks the saved FTDI latency timer
+for every configured port (including the automatically selected single port).
+It matches the present adapter's VID/PID/serial identity to its registry entry
+and verifies that entry's COM assignment. Each identified FTDI adapter must
+have a valid timer of 1–2 ms. A higher, unreadable, or ambiguous FTDI setting
+stops startup before any ring is opened or enumerated. Other adapter types and
+non-Windows hosts retain their existing behavior; the log explicitly says
+when this Windows-specific setting was not checked.
+
+The 2 ms setting persists per adapter across normal server restarts. A new
+adapter or driver reinstallation can require setup again. Normal startup is
+read-only: it never elevates, changes registry settings, or opens other ports.
+Check the configured adapters without opening serial connections, even while
+the server is running:
+
+```powershell
+py scripts/ring_midi_server.py --ring jameson=COM29,10 --ring retuned=COM48,10 --check-serial-latency
+```
+
+If the check reports a slow FTDI timer, stop the drum server and run this
+explicit maintenance command from an **Administrator terminal** at the
+repository root, using only the affected drum ports:
+
+```powershell
+py scripts/serial_latency.py --port COM29 --port COM48 --set-2ms
+```
+
+Then start the drum server normally. The helper verifies every selected
+adapter and its write access before changing values, reads each write back,
+and attempts to restore the original values if a write fails. It does not
+change any unlisted adapters or global driver defaults. Saved settings are
+checked before opening; they are not a measurement of live adapter latency.
+
+The 2026-10-05 COM29/COM48 non-motion trial collected 3,600 RTT samples per
+setting. Changing 16 ms to 2 ms reduced continuous-poll median RTT from about
+15.99 ms to 5.95 ms on both rings, with no communication errors in either
+capture. The user subsequently reported audibly improved fast-passage playback.
+RTT improvement does not quantify acoustic impact alignment. Raw evidence and
+comparison are retained in `outputs/serial_baseline_20261005/` and
+`outputs/serial_latency_2ms_20261005/`.
+
 ### Multiple rings on one server
 
 The wire protocol supports **16 actuators per ring**, addressed 0–15. Use
@@ -115,8 +158,13 @@ Re-enumeration stops playback. A wrong count leaves that ring unavailable,
 preserves all global slot positions, and blocks a new song until discovery
 succeeds. A disconnected ring during playback reports transport failures while
 other rings continue. Stop/cancel reports per-slot failures; an unreachable
-adapter cannot acknowledge a stop. Firmware updates remain a single-ring
-operation: close the multi-ring server and use `-p PORT` for the ring to update.
+adapter cannot acknowledge a stop. The Firmware panel lists each ring by name,
+port and actuator count. Leave every ring checked to update all, or select a
+subset, then click **Update selected**. The server updates them one after
+another in configured ring order using the same frozen build. All rings stay
+in maintenance mode until the queue finishes; the first failure stops the queue
+and identifies completed, failed and skipped rings. Each ring's freshly
+discovered count must match its configured count before any loader entry.
 
 Software checks: `py -m unittest discover -s tests -p test_ring_fleet.py`
 simulates 14+10 actuators and checks routing, HTTP pitch playback, concurrent
@@ -332,9 +380,10 @@ on the drum or compatibility with a particular phone/microphone.
 
 ### Transpose an imported MIDI
 
-Files open with their original pitches. Click **Transpose**, above the piano
-roll, to choose and apply the best uniform shift for the pitches assigned to
-the enumerated instrument. Each click starts from the original imported notes.
+Files open with their original pitches. Choose the pitch controls above the
+piano roll, then click **Apply**. Each click starts from the original imported
+notes. **Transpose** and **Octave folding** are independent checkboxes; both
+start enabled, with **Automatic best fit** retaining the existing algorithm.
 
 Candidates are ranked by fewest substituted or unplayable notes, then fewest
 unplayable notes, most exact matches, least folding/substitution movement,
@@ -343,16 +392,30 @@ Each criterion only breaks ties in the preceding criteria. Note timing,
 same-mallet collisions, and playback speed do not affect the chosen shift;
 restrike handling is applied separately when building the playback schedule.
 
-- **Transpose only** keeps intervals and leaves unavailable notes unplayable.
-- **Transpose + octave folding** (the initial button option) also moves notes
-  into available octaves of the same pitch class.
-- **Also substitute missing notes** permits nearby pitch-class substitutions.
+- **Transpose** enabled with **Automatic best fit** chooses the best uniform
+  shift using the ranking above. With folding disabled, unavailable shifted
+  notes remain unplayable.
+- **Manual shift** replaces the automatic search with the entered whole-number
+  semitone offset, from -127 to +127. Positive moves up; negative moves down;
+  zero leaves the global pitch unchanged. The requested offset is used exactly,
+  even when another shift would fit more notes.
+- **Octave folding** moves unavailable notes into the nearest available octave
+  of the same pitch class. With Transpose unchecked, the global shift stays
+  zero, preserving the original key. With both enabled, folding happens after
+  the automatic or manual shift.
+- With both unchecked, pitches stay unchanged; **Apply** still applies track
+  inclusion and reports exact matches and unplayable notes.
+- **Missing notes: Substitute nearby pitch classes** retains the optional
+  approximation for pitch classes absent from the instrument. It requires
+  octave folding; **Leave unplayable** is the default. Transposition method
+  and manual entry are disabled when Transpose is unchecked.
 
-Open **Tracks to include when transposing** to choose voices. Track and channel
+Open **Inspect tracks and choose what to include** to choose voices. Track and channel
 identities are retained, including multichannel Type 0 files. Channel 10 is
 initially unchecked as the General MIDI percussion channel; enable it explicitly
 for files that use that channel melodically. Changing options or selections
-does nothing to the notes until **Transpose** is clicked.
+does nothing to the notes until **Apply** is clicked. The summary flags pending
+changes; playback continues to use the last applied view.
 
 Each track/channel row shows its note count, pitch range, and instrument metadata
 (or GM family/program number when present). Controls sit directly below each
@@ -387,19 +450,22 @@ schedule; notes are never delayed to make them fit. The 50 ms value is an
 instrument guideline, not a measurement of physical impact timing.
 
 **Restore original** returns to the imported notes and existing manual fallback
-routing. Transposed playback uses the instrument's exact pitch map instead of
-saved fallback routes. A changed instrument mapping requires transposing again
-or restoring before playback. Transpose and restore are disabled during playback.
+routing. Adapted playback uses the instrument's exact pitch map instead of
+saved fallback routes. A changed instrument mapping requires applying again
+or restoring before playback. Apply, restore, and pitch controls are disabled
+during playback, playback startup, and firmware updates.
 
 Adaptation applies only to the current playback view. Opening any file, including
-the next library track, starts from its original notes. **Save original** copies
+the next library track, starts from its original notes and resets the controls
+to automatic transposition plus octave folding. **Save original** copies
 the unchanged source MIDI to the library; this feature does not export a rewritten
-MIDI file or change the instrument's pitch assignments. Restart the MIDI server
-and reload the page after installing this change so it can serve the new
-`player/midi_transpose.js` asset.
+MIDI file or change the instrument's pitch assignments. Reload the MIDI player
+after updating to pick up the controls and `player/midi_transpose.js` asset;
+no firmware flash is needed.
 
 Software validation: `node --test tests/test_midi_transpose.cjs` exercises the
-fitting engine, MIDI import/restore, tempo and channel handling, collision rules,
+fitting engine, standalone folding, signed manual shifts, independent controls,
+MIDI import/restore, tempo and channel handling, collision rules,
 and the schedule submitted to a simulated server. Run the existing playback
 suite with `py -m unittest discover -s tests -p test_ring_playback.py`. Browser
 checks use an isolated simulated instrument; musical quality and physical
@@ -471,17 +537,23 @@ panel is the normal operator path:
    `make` command in its checkout, validates `build/m2003-motor.bin`, and freezes
    that exact image in memory. The panel shows source commit/dirty state, byte
    count, CRC-32, and version.
-2. Review those values and click **Update ring**. After explicit confirmation,
-   the server stops playback, reserves its existing serial connection, performs
-   the protocol-3 broadcast data phase, verifies/repairs/commits every actuator
-   individually, and requires every application to re-enumerate.
-3. Re-home the complete ring before playback.
+2. Review those values. In named-ring mode, select the rings to update and click
+   **Update selected**; single-ring mode uses **Update ring**. The confirmation
+   names the selected rings and ports. The server stops playback, reserves its
+   existing connections, then updates one complete ring at a time using the
+   protocol-3 broadcast data phase and per-actuator verify/repair/commit/restart.
+3. Re-home the updated actuators before playback.
 
 The GUI intentionally does not run `git pull` or accept an ELF/file upload in
 this first version: the checked-out server source is the single build input and
 the frozen validated `.bin` is the single update artifact. A failed update may
 leave one or more actuators resident in LDROM; correct the cause and retry the
-same prepared artifact.
+same prepared artifact. In named-ring mode, completed rings retain their
+results; select the failed and skipped rings for a retry. A failed ring's status
+is invalidated until a successful update or enumeration restores its expected
+count. Software tests cover selection, sequential routing, maintenance, count
+validation and partial failure; multi-ring updating still needs a hardware
+trial.
 
 The standalone CLI remains available for recovery and bench work. Stop the MIDI
 server before running it because a separate process cannot share the serial

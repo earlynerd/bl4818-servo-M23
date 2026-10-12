@@ -80,7 +80,7 @@ class RingFleet:
     shift every later ring's pitch mapping onto different actuators.
     """
 
-    firmware_update_supported = False
+    firmware_update_supported = True
 
     def __init__(self, specs, bridge_factory, *, baud, timeout_ms=1000,
                  trace=False, mapping_file: Path):
@@ -168,8 +168,12 @@ class RingFleet:
     def enumerate(self):
         # The player lock excludes new schedules until discovery is complete.
         if self.player is None:
+            if self.maintenance.is_set():
+                raise RuntimeError("firmware update in progress")
             return self._enumerate()
         with self.player._play_lock:
+            if self.maintenance.is_set():
+                raise RuntimeError("firmware update in progress")
             self.player._stop_and_join()
             return self._enumerate()
 

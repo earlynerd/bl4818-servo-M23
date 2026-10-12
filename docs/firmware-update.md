@@ -401,8 +401,12 @@ The browser player exposes the same protocol-3 path without opening a second
 serial connection. **Build** runs the fixed `make` command in the server's
 repository checkout, validates `build/m2003-motor.bin`, and freezes the prepared
 bytes plus image size, CRC-32, version, Git commit, and dirty status in server
-memory. **Update ring** requires a second explicit confirmation tied to the
-displayed CRC, then uses the MIDI server's already-open `RingClientV2` instance.
+memory. **Update ring** (single-ring mode) or **Update selected** (named-ring
+mode) requires a second explicit confirmation tied to the displayed CRC, then
+uses the MIDI server's already-open `RingClientV2` connections. In named-ring
+mode the panel provides one checkbox per ring, initially all checked. Selected
+rings update sequentially in configured order with the same frozen image;
+the confirmation lists their names, ports and total actuator count.
 
 The update transaction sets an exclusive maintenance flag before stopping the
 playback worker. New strike, home, enumerate, status, tuning, and active bus
@@ -411,6 +415,16 @@ operation fails. The worker also holds the bridge ring lock for the entire
 loader transaction. Build output and structured update progress remain
 available through `GET /api/firmware`; the browser polls that endpoint because
 normal ring status is intentionally unavailable during maintenance.
+
+The shared maintenance flag remains set across the entire multi-ring queue.
+Before entering a ring's loaders, fresh enumeration must match its configured
+actuator count. Progress identifies the current ring and its position in the
+queue; per-ring states are pending, updating, complete, failed or skipped.
+The first failure stops the queue and invalidates that ring's cached status,
+while retaining completed results and the frozen artifact. Correct the cause,
+select failed/skipped rings and retry. Updated actuators must be re-homed.
+This queue behavior is covered by host/API/browser tests; physical multi-ring
+update validation remains pending.
 
 The first GUI version has no Git synchronization and no uploaded ELF/binary
 path. Operators update the checkout outside the GUI, inspect the displayed

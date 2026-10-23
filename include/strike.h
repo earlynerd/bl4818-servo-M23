@@ -6,6 +6,11 @@
  *   → COASTING (phases floating through impact) → CATCHING
  *   (position servo captures the rebound back to home) → IDLE
  *
+ * Impact and rebound come from the motor layer's raw-encoder contact watch:
+ * impact is the interpolated crossing of the contact point, rebound is a
+ * retreat from the deepest point. A coasting mallet that stops making
+ * progress (resting on the surface, or stalled short) is lifted early.
+ *
  * Dead strikes (STRIKE_TYPE_DEAD) insert a MUTING state at impact:
  *   COASTING → MUTING (velocity-0 brake kills the rebound, then a small
  *   torque presses the mallet into the surface to damp the note)
@@ -62,9 +67,11 @@ typedef enum {
 #define STRIKE_TIMING_REBOUND_TIMEOUT  0x0020u
 #define STRIKE_TIMING_VELOCITY_VALID   0x0040u
 #define STRIKE_TIMING_RETRIGGER_READY_VALID 0x0080u
-#define STRIKE_TIMING_IMPACT_VALID     0x0100u  /* trigger->mallet-stops time */
+#define STRIKE_TIMING_IMPACT_VALID     0x0100u  /* trigger->contact-point crossing time */
 #define STRIKE_TIMING_DEAD             0x0200u  /* strike was a dead (muted) strike; rebound fields never valid */
 #define STRIKE_WARNING_HOME_SHIFT      0x0400u  /* latest home moved significantly from prior calibration */
+#define STRIKE_TIMING_STALLED          0x0800u  /* lifted because the coasting mallet stopped, not on a rebound */
+#define STRIKE_TIMING_NO_CONTACT       0x1000u  /* approach ended without crossing the contact point */
 
 typedef struct {
     uint16_t flags;
@@ -94,6 +101,7 @@ typedef struct {
     uint16_t trigger_to_impact_ms;
     uint16_t trigger_to_rebound_ms;
     uint16_t estimated_strike_velocity_dps;
+    uint16_t trigger_to_impact_01ms;   /* same instant as trigger_to_impact_ms, 0.1 ms units */
 } strike_compact_t;
 
 void strike_init(void);

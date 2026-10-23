@@ -190,9 +190,14 @@ the values actually used.
 Sending a strike command and waiting for the mallet to physically hit
 the tine isn't instantaneous — it's tens of milliseconds, varies with
 strike current, and varies slot-to-slot. The bridge keeps a per-slot
-per-current-bucket EMA of `trigger_to_impact_ms` (the
+EMA of `trigger_to_impact_ms` against strike current (the
 `LatencyTracker`), fed by every strike that flows through it (browser
-or motif). Motif playback uses that table to fire each strike command
+or motif). Current bins are log-spaced, four per octave from 25 mA, so
+100–500 mA has ten bins; estimates interpolate between learned currents
+and borrow the all-slot curve's shape outside a slot's own data.
+Retriggered and muted strikes are not learned. The 0.1 ms impact time is
+used when the firmware reports it. `player/latency_model.js` is the
+browser's copy of the same model. Motif playback uses that table to fire each strike command
 *early* enough that the mallet impact lands on the intended beat. You
 don't need to do anything to opt in — just send `t_ms` values that
 reflect when you want the *impact* to happen, and the bridge handles
@@ -264,10 +269,12 @@ server playback or bus contention.
       "homing_duty": 600,
       "last_timing": {
         "address": 0, "sequence": 41, "flags": 1,
-        "trigger_to_coast_ms": 22.5, "trigger_to_impact_ms": 38.1,
+        "trigger_to_coast_ms": 22.5, "trigger_to_impact_ms": 38,
+        "trigger_to_impact_ms_precise": 38.1,
         "trigger_to_rebound_ms": 52.0,
         "estimated_strike_velocity_dps": 1450,
-        "rebound_timeout": false
+        "rebound_timeout": false, "retriggered": false,
+        "stalled": false, "no_contact": false
       }
     }
   ]

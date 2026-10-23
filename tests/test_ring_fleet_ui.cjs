@@ -33,6 +33,7 @@ function page(filename) {
     localStorage: { getItem: key => storage.get(key) ?? null,
                     setItem: (key, value) => storage.set(key, value) },
     MidiTranspose: require('../player/midi_transpose.js'),
+    LatencyModel: require('../player/latency_model.js'),
   });
   const html = fs.readFileSync(path.join(__dirname, '../player', filename), 'utf8');
   vm.runInContext(html.match(/<script>([\s\S]*?)<\/script>/)[1], context);

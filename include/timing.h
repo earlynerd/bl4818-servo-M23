@@ -29,6 +29,8 @@ typedef struct {
 void timing_init(void);
 uint32_t timing_capture_stamp(void);
 uint32_t timing_elapsed_us(uint32_t start_stamp);
+/* Microseconds between two stamps, correct across the 24-bit timer wrap. */
+uint32_t timing_stamp_delta_us(uint32_t start_stamp, uint32_t end_stamp);
 void timing_record_control_tick(uint32_t start_stamp);
 void timing_record_hall_isr(uint32_t start_stamp);
 void timing_record_uart_isr(uint32_t start_stamp);

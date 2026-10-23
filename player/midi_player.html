@@ -705,6 +705,7 @@
   <p style="font-size:12px;color:var(--text-muted)">Phone microphone access needs a trusted HTTPS address. On the server PC, localhost works. Reference: A4 = 440 Hz; detection range 80–1500 Hz.</p>
 </dialog>
 <script src="midi_transpose.js"></script>
+<script src="latency_model.js"></script>
 <script src="pitch_detector.js"></script>
 <script>
 // ─── Config ──────────────────────────────────────────────────
@@ -726,15 +727,17 @@ const STRIKE_MA_MAX = 3000;
 const DEFAULT_VEL_FLOOR = 0.5; // 50% — softest note still strikes meaningfully
 const DEFAULT_COMP_MS = 50;    // assumed mallet trigger→impact latency before any sample
 const COMP_MAX_MS = 150;
-const COMP_EMA_ALPHA = 0.3;    // weight on each fresh sample; rest carried from prior EMA
-// Bucket strike currents into 500 mA bins so the EMA can capture the
-// velocity-dependent part of trigger→impact latency (higher current accelerates
-// faster, so the mallet hits sooner). 0 mA → bucket 0, 2999 mA → bucket 5.
-const COMP_BUCKET_WIDTH_MA = 500;
-const COMP_BUCKET_COUNT = 6;
-function currentBucket(currentMa) {
-  if (!Number.isFinite(currentMa)) return -1;
-  return Math.max(0, Math.min(COMP_BUCKET_COUNT - 1, Math.floor(currentMa / COMP_BUCKET_WIDTH_MA)));
+// Trigger→impact latency depends strongly on strike current (higher current
+// accelerates faster, so the mallet hits sooner). latency_model.js keeps
+// log-spaced current bins and interpolates between them; it mirrors the
+// server's LatencyTracker.
+const STRIKE_TIMING_RETRIGGERED = 0x0010;
+const STRIKE_TIMING_DEAD = 0x0200;
+// Impact time at 0.1 ms resolution when the firmware reports it.
+function impactMs(metrics) {
+  if (!metrics) return null;
+  if (Number.isFinite(metrics.trigger_to_impact_ms_precise)) return metrics.trigger_to_impact_ms_precise;
+  return Number.isFinite(metrics.trigger_to_impact_ms) ? metrics.trigger_to_impact_ms : null;
 }
 
 // Default pitch per address slot, matching the steel-tongue scale
@@ -787,22 +790,21 @@ const S = {
   cfgSlot: -1,   // slot currently shown in the strike-config modal, -1 = closed
   configBySlot: {}, // full on-demand tuning readback; keyed by ring address
   strikeTiming: {}, // strikeTiming[slot] = last metrics dict from the bridge
-  // Latency compensation. compEma[slot] is { [bucketIdx]: emaMs } — a smoothed
-  // trigger_to_impact_ms per current bucket — used to fire each strike that
-  // many real wall-clock ms early so the mallet impact lands on the intended
-  // beat. Empty slots/buckets fall back to nearest-occupied-bucket, then
-  // compDefaultMs. lastStrikeCurrent tracks the per-slot current of the most
-  // recent strike we sent so we can attribute incoming ACK metrics (which
-  // describe the *previous* completed strike) to the right bucket.
+  // Latency compensation. compEma[slot] is a LatencyModel table
+  // ({ [binIdx]: emaMs }, smoothed trigger_to_impact_ms per current bin) used
+  // to fire each strike that many real wall-clock ms early so the mallet
+  // impact lands on the intended beat. Without data it falls back to the
+  // shared table, then compDefaultMs. lastStrikeCurrent tracks the per-slot
+  // current of the most recent strike we sent so legacy reports (which lack
+  // their own current) can be attributed to the right bin.
   compEnabled: true,
   compDefaultMs: DEFAULT_COMP_MS,
   compEma: {},
   compSequence: {},
   lastStrikeSequence: {},
-  // Cross-slot per-bucket EMA. Folded in parallel with the per-slot EMA so a
-  // fresh current band gets a usable estimate from any slot's sample, instead
-  // of falling all the way through to compDefaultMs while the per-slot tables
-  // build up. Same bucket index as compEma[slot].
+  // Cross-slot table, folded in parallel with the per-slot tables. It gives a
+  // fresh slot a usable estimate and supplies the curve's shape beyond the
+  // currents a slot has learned. Same bin index as compEma[slot].
   compEmaGlobal: {},
   lastStrikeCurrent: {},
   // Predicted compensation (ms) snapshot per slot at the moment its most-recent
@@ -1085,65 +1087,31 @@ function startFirmwareMonitor() {
   S.firmwarePollIntervalId = setInterval(firmwareTick, 500);
 }
 
-// Fold a fresh trigger_to_impact_ms reading into the per-slot EMA used by
-// the playback scheduler. Bridge already gates on STRIKE_TIMING_IMPACT_VALID
-// (it nulls the field when invalid), so a finite number here is trustworthy.
 // Wall-clock ms to fire a strike command early so the mallet's actual impact
-// lands on the intended musical beat. Looks up the per-slot, per-current-bucket
-// EMA. If the targeted bucket has no sample yet, walks outward to the nearest
-// populated bucket (motor latency varies smoothly with drive current). Falls
-// through to S.compDefaultMs only if no slot has any data. Cross-slot data
-// for the targeted bucket beats this-slot data from a distant bucket: motor
-// latency tracks drive current more strongly than slot-to-slot offset varies,
-// so a bucket-correct estimate from a different slot is closer than a
-// bucket-wrong estimate from this slot.
+// lands on the intended musical beat (see latency_model.js for the lookup).
 function compensationMs(slot, currentMa) {
   if (!S.compEnabled) return 0;
-  const idx = currentBucket(currentMa);
-  if (idx < 0) return S.compDefaultMs;
-  const buckets = S.compEma[slot];
-  // Tier 1: this slot, this bucket.
-  if (buckets && Number.isFinite(buckets[idx])) return buckets[idx];
-  // Tier 2: cross-slot, this bucket.
-  if (Number.isFinite(S.compEmaGlobal[idx])) return S.compEmaGlobal[idx];
-  // Tier 3: this slot, nearest neighbor bucket.
-  if (buckets) {
-    for (let d = 1; d < COMP_BUCKET_COUNT; d++) {
-      if (Number.isFinite(buckets[idx - d])) return buckets[idx - d];
-      if (Number.isFinite(buckets[idx + d])) return buckets[idx + d];
-    }
-  }
-  // Tier 4: cross-slot, nearest neighbor bucket.
-  for (let d = 1; d < COMP_BUCKET_COUNT; d++) {
-    if (Number.isFinite(S.compEmaGlobal[idx - d])) return S.compEmaGlobal[idx - d];
-    if (Number.isFinite(S.compEmaGlobal[idx + d])) return S.compEmaGlobal[idx + d];
-  }
-  return S.compDefaultMs;
+  const estimate = LatencyModel.estimate(S.compEma[slot], S.compEmaGlobal, currentMa);
+  return estimate === null ? S.compDefaultMs : estimate;
 }
 
-// Fold a fresh trigger_to_impact_ms reading into the per-slot, per-bucket EMA.
+// Fold a fresh impact reading into the per-slot and shared tables.
 // `currentMa` is the strike current that *produced* this measurement, not the
 // current of the strike whose ACK delivered it (the firmware reports the
-// previously-completed strike on each ACK). The bridge has already gated on
-// STRIKE_TIMING_IMPACT_VALID, so a finite trigger_to_impact_ms here is real.
+// previously-completed strike on each ACK); newer reports carry their own.
+// The bridge has already gated on STRIKE_TIMING_IMPACT_VALID. Muted strikes
+// and retriggers (launched before the previous strike was caught) are kept
+// out of the model.
 function updateLatencyEma(slot, currentMa, metrics) {
   if (!metrics) return;
-  const sample = metrics.trigger_to_impact_ms;
-  if (!Number.isFinite(sample) || (metrics.flags & 0x0200)) return false;
+  const sample = impactMs(metrics);
+  if (sample === null || (metrics.flags & (STRIKE_TIMING_DEAD | STRIKE_TIMING_RETRIGGERED))) return false;
   if (Number.isFinite(metrics.strike_current_ma)) currentMa = Math.abs(metrics.strike_current_ma);
-  const idx = currentBucket(currentMa);
-  if (idx < 0 || S.compSequence[slot] === metrics.sequence) return false;
+  if (LatencyModel.position(currentMa) === null || S.compSequence[slot] === metrics.sequence) return false;
   S.compSequence[slot] = metrics.sequence;
-  let buckets = S.compEma[slot];
-  if (!buckets) buckets = S.compEma[slot] = {};
-  const prev = buckets[idx];
-  buckets[idx] = Number.isFinite(prev)
-    ? (1 - COMP_EMA_ALPHA) * prev + COMP_EMA_ALPHA * sample
-    : sample;
-  const prevG = S.compEmaGlobal[idx];
-  S.compEmaGlobal[idx] = Number.isFinite(prevG)
-    ? (1 - COMP_EMA_ALPHA) * prevG + COMP_EMA_ALPHA * sample
-    : sample;
+  if (!S.compEma[slot]) S.compEma[slot] = {};
+  LatencyModel.learn(S.compEma[slot], currentMa, sample);
+  LatencyModel.learn(S.compEmaGlobal, currentMa, sample);
   return true;
 }
 
@@ -1159,7 +1127,7 @@ function strikeAsync(addr, currentMa, label, strikeType = "normal") {
   // The ACK we're about to receive carries metrics for the *previous*
   // completed strike on this slot, not for the strike we're sending now.
   // Snapshot the prior current here so the ACK handler can attribute the
-  // measurement to the right bucket; then record this strike's current for
+  // measurement to the right bin; then record this strike's current for
   // the next ACK. Out-of-order ACKs aren't an issue because the bridge
   // serializes the ring lock per request.
   const priorCurrent = S.lastStrikeCurrent[addr];
@@ -1202,7 +1170,7 @@ function strikeAsync(addr, currentMa, label, strikeType = "normal") {
     if (j.metrics) {
       S.strikeTiming[addr] = j.metrics;
       const fresh = updateLatencyEma(addr, priorCurrent, j.metrics);
-      const sample = j.metrics.trigger_to_impact_ms;
+      const sample = impactMs(j.metrics);
       if (fresh && j.metrics.sequence === priorSequence &&
           Number.isFinite(sample) && Number.isFinite(priorPredictedMs)) {
         recordResidual(addr, sample - priorPredictedMs);
@@ -1251,7 +1219,7 @@ async function refreshStatus() {
       // Mirror the bridge's last_timing for cfg-modal display only. Don't
       // fold it into the EMA: the bridge cache has no record of which
       // current produced that snapshot, so we couldn't attribute it to a
-      // bucket. The first in-session strike on this slot will seed the EMA.
+      // bin. The first in-session strike on this slot will seed the EMA.
       if (S.slots[i] && S.slots[i].last_timing) S.strikeTiming[i] = S.slots[i].last_timing;
     }
     const ringCount = Array.isArray(j.rings) ? j.rings.length : 1;
@@ -2045,19 +2013,9 @@ function refreshCfgTiming() {
     } else {
       const masterMa = getCurrentMa();
       const applied = compensationMs(slot, masterMa);
-      const buckets = S.compEma[slot];
-      const populated = buckets ? Object.keys(buckets).filter(k => Number.isFinite(buckets[k])).length : 0;
-      const targetIdx = currentBucket(masterMa);
-      const haveSlotTarget = !!(buckets && Number.isFinite(buckets[targetIdx]));
-      const haveGlobalTarget = Number.isFinite(S.compEmaGlobal[targetIdx]);
-      const anyGlobal = Object.values(S.compEmaGlobal).some(v => Number.isFinite(v));
-      let source;
-      if (haveSlotTarget)        source = "smoothed";
-      else if (haveGlobalTarget) source = "cross-slot";
-      else if (populated > 0)    source = "nearest";
-      else if (anyGlobal)        source = "cross-slot nearest";
-      else                       source = "default";
-      compEl.textContent = `${applied.toFixed(1)} ms @ ${masterMa} mA · ${source} (${populated}/${COMP_BUCKET_COUNT} buckets)`;
+      const populated = LatencyModel.learned(S.compEma[slot]).length;
+      const source = LatencyModel.source(S.compEma[slot], S.compEmaGlobal, masterMa);
+      compEl.textContent = `${applied.toFixed(1)} ms @ ${masterMa} mA · ${source} (${populated}/${LatencyModel.BIN_COUNT} bins)`;
     }
   }
   // Residual: prefer the server's view during playback (strikeAsync isn't
@@ -2962,7 +2920,7 @@ function getTempoScale() {
 }
 
 // Strike each homed slot ascending then descending at the current master so
-// the timing EMA (per-slot and cross-slot) gets seeded across the bucket the
+// the timing EMA (per-slot and cross-slot) gets seeded at the current the
 // user is currently playing in. Each slot's second strike's ACK is what folds
 // the first strike's metrics into the EMA — by hitting each slot twice we
 // guarantee one usable sample per slot.
@@ -2993,15 +2951,15 @@ async function runArpeggio() {
       await new Promise(r => setTimeout(r, 180));
     }
     // Give the final ACKs time to land so the EMA reflects every sample
-    // before we report bucket coverage.
+    // before we report bin coverage.
     await new Promise(r => setTimeout(r, 400));
-    const populatedGlobal = Object.values(S.compEmaGlobal).filter(v => Number.isFinite(v)).length;
+    const populatedGlobal = LatencyModel.learned(S.compEmaGlobal).length;
     let slotsWithData = 0;
     for (const i of slots) {
       const b = S.compEma[i];
       if (b && Object.values(b).some(v => Number.isFinite(v))) slotsWithData++;
     }
-    log(`arpeggio done: ${slotsWithData}/${slots.length} slot tables seeded, ${populatedGlobal}/${COMP_BUCKET_COUNT} global buckets populated`);
+    log(`arpeggio done: ${slotsWithData}/${slots.length} slot tables seeded, ${populatedGlobal}/${LatencyModel.BIN_COUNT} shared bins populated`);
     if (S.cfgSlot >= 0) refreshCfgTiming();
   } finally {
     S.arpRunning = false;

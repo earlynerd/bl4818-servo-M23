@@ -159,8 +159,17 @@
 #define STRIKE_HOMING_TIMEOUT_MS         5000    /* generous backstop; travel normally limits first */
 #define STRIKE_HOME_SHIFT_WARN_COUNTS    1024    /* 1/16 rev (22.5 deg) change from prior calibration */
 #define STRIKE_COAST_TIMEOUT_MS         500
-#define STRIKE_REBOUND_THRESHOLD        5       /* RPM away from drum to confirm rebound */
-#define STRIKE_IMPACT_VEL_THRESHOLD     0       /* RPM toward drum: at/below = impact (velocity zero-cross during coast) */
+#define STRIKE_IMPACT_VEL_THRESHOLD     0       /* RPM toward drum: at/below = filtered stop (dead-strike stalled-short fallback only) */
+
+/* Raw-encoder contact watch, checked on every encoder sample while a strike
+ * is armed. Impact is stamped at the contact-point crossing; a retreat of the
+ * hysteresis from the deepest point is the rebound; a coasting mallet that
+ * makes no progress for the stall time is lifted (resting on the surface or
+ * stalled short) instead of waiting for the coast timeout. */
+#define STRIKE_CONTACT_MARGIN_COUNTS    32      /* contact point: this far before the learned drum surface */
+#define STRIKE_REVERSAL_HYST_COUNTS     12      /* retreat that confirms a rebound (encoder noise is ~2 counts) */
+#define STRIKE_STALL_TIME_MS            10
+#define STRIKE_STALL_COUNTS             4       /* toward-drum progress at/below this per window = stalled */
 
 /* Dead-strike mute phase: at impact the velocity loop brakes the rebound
  * (setpoint 0, self-scales to rebound energy), then a small torque presses
@@ -173,5 +182,6 @@
 #define STRIKE_SETTLE_TICKS HZ_TICKS_FROM_MS(STRIKE_LOOP_HZ, STRIKE_SETTLE_TIME_MS)
 #define STRIKE_HOMING_STALL_TICKS HZ_TICKS_FROM_MS(STRIKE_LOOP_HZ, STRIKE_HOMING_STALL_TIME_MS)
 #define STRIKE_COAST_TIMEOUT_TICKS HZ_TICKS_FROM_MS(STRIKE_LOOP_HZ, STRIKE_COAST_TIMEOUT_MS)
+#define STRIKE_STALL_TICKS HZ_TICKS_FROM_MS(STRIKE_LOOP_HZ, STRIKE_STALL_TIME_MS)
 
 #endif /* M2003_CONFIG_H */

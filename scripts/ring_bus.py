@@ -111,6 +111,13 @@ STRIKE_TIMING_RETRIGGER_READY_VALID = 0x0080
 STRIKE_TIMING_IMPACT_VALID    = 0x0100
 STRIKE_TIMING_DEAD            = 0x0200
 STRIKE_WARNING_HOME_SHIFT     = 0x0400
+STRIKE_TIMING_STALLED         = 0x0800  # lifted because the coasting mallet stopped
+STRIKE_TIMING_NO_CONTACT      = 0x1000  # approach ended short of the contact point
+
+# ACK_TIMED payload lengths: 5-byte ACK header + 12/14/16-byte timing tail;
+# tagged STRIKE replies append a 4-byte command ID to the 14/16-byte forms.
+ACK_TIMED_LENGTHS = (17, 19, 21)
+TAGGED_ACK_TIMED_LENGTHS = (23, 25)
 
 CONFIG_FLAG_PERSIST_VALID = 0x0001
 CONFIG_FLAG_ZERO_VALID = 0x0002
@@ -361,6 +368,8 @@ class StrikeTiming:
     trigger_to_rebound_ms: Optional[int]
     estimated_strike_velocity_dps: Optional[int]
     strike_current_ma: Optional[int] = None
+    # Same instant as trigger_to_impact_ms at 0.1 ms resolution (newer firmware).
+    trigger_to_impact_ms_precise: Optional[float] = None
 
     @property
     def coast_valid(self) -> bool:
@@ -385,6 +394,18 @@ class StrikeTiming:
     @property
     def home_shift_warning(self) -> bool:
         return bool(self.flags & STRIKE_WARNING_HOME_SHIFT)
+
+    @property
+    def retriggered(self) -> bool:
+        return bool(self.flags & STRIKE_TIMING_RETRIGGERED)
+
+    @property
+    def stalled(self) -> bool:
+        return bool(self.flags & STRIKE_TIMING_STALLED)
+
+    @property
+    def no_contact(self) -> bool:
+        return bool(self.flags & STRIKE_TIMING_NO_CONTACT)
 
     @property
     def has_data(self) -> bool:
@@ -539,14 +560,15 @@ AddressedReply = MotorStatus | CommandAck | TimingStatus | None
 
 
 def _parse_strike_timing_payload(address: int, body: bytes) -> StrikeTiming:
-    """Parse the legacy 12-byte or current 14-byte timing tail shared by ACK_TIMED and
-    QUERY_STRIKE_TIMING. Layout:
-        seq:u16 | flags:u16 | t_coast:u16 | t_impact:u16 | t_rebound:u16 | vel:u16 | current:i16
-    Each value's "valid" bit decides whether the corresponding field on
-    the returned StrikeTiming is reported or left as ``None``.
+    """Parse the timing tail shared by ACK_TIMED and QUERY_STRIKE_TIMING:
+        seq:u16 | flags:u16 | t_coast:u16 | t_impact:u16 | t_rebound:u16 | vel:u16
+        [| current:i16 [| t_impact_01ms:u16]]
+    Legacy firmware sends 12 bytes; 14 adds the completed strike's current and
+    16 adds the impact time in 0.1 ms. Each value's "valid" bit decides whether
+    the corresponding field is reported or left as ``None``.
     """
-    if len(body) not in (12, 14):
-        raise RingError(f"strike timing payload must be 12 or 14 bytes, got {len(body)}")
+    if len(body) not in (12, 14, 16):
+        raise RingError(f"strike timing payload must be 12, 14 or 16 bytes, got {len(body)}")
     seq = struct.unpack(">H", body[0:2])[0]
     flags = struct.unpack(">H", body[2:4])[0]
     t_coast = struct.unpack(">H", body[4:6])[0]
@@ -556,12 +578,15 @@ def _parse_strike_timing_payload(address: int, body: bytes) -> StrikeTiming:
     return StrikeTiming(
         address=address,
         sequence=seq,
-        strike_current_ma=struct.unpack(">h", body[12:14])[0] if len(body) == 14 else None,
+        strike_current_ma=struct.unpack(">h", body[12:14])[0] if len(body) >= 14 else None,
         flags=flags,
         trigger_to_coast_ms=t_coast if (flags & STRIKE_TIMING_COAST_VALID) else None,
         trigger_to_impact_ms=t_impact if (flags & STRIKE_TIMING_IMPACT_VALID) else None,
         trigger_to_rebound_ms=t_rebound if (flags & STRIKE_TIMING_REBOUND_VALID) else None,
         estimated_strike_velocity_dps=vel if (flags & STRIKE_TIMING_VELOCITY_VALID) else None,
+        trigger_to_impact_ms_precise=(struct.unpack(">H", body[14:16])[0] / 10.0
+                                      if len(body) == 16 and flags & STRIKE_TIMING_IMPACT_VALID
+                                      else None),
     )
 
 
@@ -898,7 +923,7 @@ class RingClientV2:
                 error or RingTimeout("timed out waiting for tagged strike ACK"))
 
     def _route_received(self, payload):
-        if (len(payload) == 23 and CMD_ACK_BASE <= payload[0] < CMD_ACK_END
+        if (len(payload) in TAGGED_ACK_TIMED_LENGTHS and CMD_ACK_BASE <= payload[0] < CMD_ACK_END
                 and payload[1] & SUBCMD_MASK == SUBCMD_STRIKE):
             ack = self._parse_ack_payload(payload[0] & 0x0f, SUBCMD_STRIKE, payload)
             with self._pending_lock:
@@ -1111,7 +1136,7 @@ class RingClientV2:
 
     @staticmethod
     def _parse_ack_payload(address: int, subcmd: int, payload: bytes) -> Optional[CommandAck]:
-        if len(payload) not in (5, 17, 19, 23):
+        if len(payload) not in (5,) + ACK_TIMED_LENGTHS + TAGGED_ACK_TIMED_LENGTHS:
             return None
         if payload[0] != (CMD_ACK_BASE | address):
             return None
@@ -1119,15 +1144,20 @@ class RingClientV2:
         if payload_subcmd != (subcmd & SUBCMD_MASK):
             return None
         metrics = None
-        if len(payload) >= 17:
-            metrics = _parse_strike_timing_payload(address, payload[5:19] if len(payload) >= 19 else payload[5:17])
+        command_id = None
+        tail_end = len(payload)
+        if len(payload) in TAGGED_ACK_TIMED_LENGTHS:
+            tail_end -= 4
+            command_id = struct.unpack(">I", payload[tail_end:])[0]
+        if tail_end > 5:
+            metrics = _parse_strike_timing_payload(address, payload[5:tail_end])
         return CommandAck(
             address=address,
             subcmd=payload_subcmd,
             result=payload[2],
             detail=struct.unpack(">H", payload[3:5])[0],
             metrics=metrics,
-            command_id=struct.unpack(">I", payload[19:23])[0] if len(payload) == 23 else None,
+            command_id=command_id,
         )
 
     def _addressed_command(
@@ -1427,7 +1457,7 @@ class RingClientV2:
             self._trace("skip", payload)
 
     def query_strike_timing(self, address: int) -> StrikeTiming:
-        """Poll the completed-strike snapshot (15 bytes; legacy 13 accepted)."""
+        """Poll the completed-strike snapshot (17 bytes; legacy 13/15 accepted)."""
         self._check_address(address)
         self._flush_rx()
         self._send_frame(self._build_addressed_payload(address, SUBCMD_QUERY_STRIKE_TIMING))
@@ -1441,18 +1471,18 @@ class RingClientV2:
                 raise RingTimeout(_format_timeout_context(
                     f"timeout waiting for strike timing addr={address} "
                     f"expected_cmd=0x{expected_cmd:02X}({_cmd_name(expected_cmd)}) "
-                    f"expected_len=13/15",
+                    f"expected_len=13/15/17",
                     skipped,
                     exc,
                 )) from exc
             cmd = payload[0] if payload else 0
-            if cmd == expected_cmd and len(payload) in (13, 15):
+            if cmd == expected_cmd and len(payload) in (13, 15, 17):
                 return _parse_strike_timing_payload(address, payload[1:])
             if cmd == expected_cmd:
                 self._print_unexpected_reply(
                     f"expected strike timing reply addr={address} "
                     f"expected_cmd=0x{expected_cmd:02X}({_cmd_name(expected_cmd)}) "
-                    f"expected_len=13/15",
+                    f"expected_len=13/15/17",
                     payload,
                 )
             _remember_event(skipped, payload)
@@ -1869,7 +1899,9 @@ __all__ = [
     "STRIKE_TIMING_REBOUND_VALID",
     "STRIKE_TIMING_READY_VALID",
     "STRIKE_TIMING_RETRIGGER_READY_VALID",
+    "STRIKE_TIMING_NO_CONTACT",
     "STRIKE_TIMING_RETRIGGERED",
+    "STRIKE_TIMING_STALLED",
     "STRIKE_TIMING_VELOCITY_VALID",
     "STRIKE_WARNING_HOME_SHIFT",
     "SUBCMD_CLEAR_FAULT",

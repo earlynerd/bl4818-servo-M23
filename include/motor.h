@@ -68,9 +68,27 @@ void motor_arm_coast(int32_t threshold, int8_t direction);  /* Auto-coast at pos
 /* Two-stage: coast at coast_threshold, then velocity-0 brake at brake_threshold
  * (dead strikes). Both trip on raw encoder position at the encoder cadence. */
 void motor_arm_coast_then_brake(int32_t coast_threshold, int32_t brake_threshold, int8_t direction);
-void motor_disarm_coast(void);
+void motor_disarm_coast(void);         /* also disarms the contact watch */
 uint8_t motor_is_coasting(void);
 uint8_t motor_is_brake_engaged(void);  /* latched when the brake stage tripped; cleared on arm/disarm */
+
+/* Strike contact watch, evaluated on raw encoder samples like the coast
+ * trip. Latches the first crossing of contact_pos toward the drum, with its
+ * time interpolated inside the sample and the travel of the last full sample
+ * before it. Once coasting or in contact, it also latches the first retreat
+ * of STRIKE_REVERSAL_HYST_COUNTS from the deepest toward-drum position, then
+ * disarms itself. Stamps are timing_capture_stamp() values. */
+typedef struct {
+    uint8_t  contact;
+    uint8_t  reversed;
+    int16_t  approach_counts;   /* toward-drum travel over the last pre-contact sample */
+    uint16_t approach_us;       /* duration of that sample */
+    uint32_t contact_stamp;
+    uint32_t reversal_stamp;
+} motor_contact_t;
+
+void motor_arm_contact_watch(int32_t contact_pos, int8_t direction);
+const motor_contact_t *motor_get_contact_watch(void);
 void motor_raise_fault(fault_code_t code); /* immediate PWM-safe fault for higher-level motion guards */
 void motor_clear_fault(void);
 

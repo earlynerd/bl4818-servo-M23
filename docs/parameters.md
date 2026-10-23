@@ -92,7 +92,8 @@ firmware build and fleet update.
 | Encoder health | 1000 ms without motion while meaningful duty is applied | Detects a failed/stale encoder path. |
 | ADC health | 20 missed 6 kHz fast ticks (about 3.33 ms) | Detects loss of the current-sampling pipeline. |
 | Position clamps | 2000 RPM output, 4000 RPM integral clamp | Bounds outer-loop requests. |
-| Strike recovery | 500 ms coast timeout; 512-count overshoot/retrigger windows; 20 ms settle | Defines rebound recognition and safe return behavior. |
+| Strike recovery | 500 ms coast timeout; 512-count overshoot/retrigger windows; 20 ms settle | Defines safe return behavior. |
+| Contact watch | contact point 32 counts before the learned surface; 12-count rebound retreat; lift after 10 ms without 4 counts of progress | Raw-encoder impact time, impact speed and rebound; lifts a mallet resting on the surface or stalled short. |
 | Dead-strike ceiling | 1000 ms dwell | Limits heating while the mallet is intentionally held at the surface. |
 
 The authoritative numeric definitions are in `include/m2003_config.h`; the

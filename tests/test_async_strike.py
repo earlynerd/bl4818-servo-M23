@@ -14,9 +14,13 @@ import ring_midi_server as server
 
 
 def ack_frame(client, address, command_id, *, sequence=1, current=-1200,
-              impact=27, result=0, completed=0):
-    metrics = struct.pack(">HHHHHHh", completed, bus.STRIKE_TIMING_IMPACT_VALID,
-                          12, impact, 42, 1000, current)
+              impact=27, result=0, completed=0, flags=bus.STRIKE_TIMING_IMPACT_VALID,
+              impact_01ms=None, precise=True):
+    """Timed ACK as current firmware sends it; precise=False omits the 0.1 ms
+    impact field (the intermediate 19/23-byte form)."""
+    metrics = struct.pack(">HHHHHHh", completed, flags, 12, impact, 42, 1000, current)
+    if precise:
+        metrics += struct.pack(">H", impact * 10 if impact_01ms is None else impact_01ms)
     payload = bytes([bus.CMD_ACK_BASE | address, bus.SUBCMD_STRIKE, result])
     payload += struct.pack(">H", sequence) + metrics
     if command_id is not None:
@@ -80,15 +84,34 @@ class AsyncStrikeTests(unittest.TestCase):
 
     def test_new_and_legacy_timing_formats(self):
         c = self.client()
-        frame = ack_frame(c, 2, 0x12345678)
-        ack = c._parse_ack_payload(2, bus.SUBCMD_STRIKE, frame[3:-2])
+        frame = ack_frame(c, 2, 0x12345678, impact_01ms=273)
+        payload = frame[3:-2]
+        self.assertEqual(len(payload), 25)
+        ack = c._parse_ack_payload(2, bus.SUBCMD_STRIKE, payload)
         self.assertEqual(ack.command_id, 0x12345678)
         self.assertEqual(ack.metrics.strike_current_ma, -1200)
         self.assertEqual(ack.metrics.trigger_to_impact_ms, 27)
+        self.assertEqual(ack.metrics.trigger_to_impact_ms_precise, 27.3)
         self.assertEqual(ack.metrics.sequence, 0)  # valid after sequence wrap
-        legacy = c._parse_ack_payload(2, bus.SUBCMD_STRIKE, frame[3:-2][:17])
+        untagged = c._parse_ack_payload(2, bus.SUBCMD_STRIKE, payload[:21])
+        self.assertIsNone(untagged.command_id)
+        self.assertEqual(untagged.metrics.trigger_to_impact_ms_precise, 27.3)
+        intermediate = c._parse_ack_payload(
+            2, bus.SUBCMD_STRIKE, ack_frame(c, 2, 7, precise=False)[3:-2])
+        self.assertEqual((intermediate.command_id, intermediate.metrics.strike_current_ma), (7, -1200))
+        self.assertIsNone(intermediate.metrics.trigger_to_impact_ms_precise)
+        legacy = c._parse_ack_payload(2, bus.SUBCMD_STRIKE, payload[:17])
         self.assertIsNone(legacy.command_id)
         self.assertIsNone(legacy.metrics.strike_current_ma)
+        self.assertIsNone(legacy.metrics.trigger_to_impact_ms_precise)
+
+    def test_contact_flags_and_invalid_impact_hide_precise_time(self):
+        c = self.client()
+        flags = bus.STRIKE_TIMING_STALLED | bus.STRIKE_TIMING_NO_CONTACT
+        ack = c._parse_ack_payload(1, bus.SUBCMD_STRIKE, ack_frame(c, 1, 3, flags=flags)[3:-2])
+        self.assertTrue(ack.metrics.stalled and ack.metrics.no_contact)
+        self.assertIsNone(ack.metrics.trigger_to_impact_ms)
+        self.assertIsNone(ack.metrics.trigger_to_impact_ms_precise)
 
     def test_two_notes_send_before_any_reply_and_match_out_of_order(self):
         c = self.client()
@@ -143,18 +166,22 @@ class AsyncStrikeTests(unittest.TestCase):
         done = queue.Queue()
         b.strike_playback(0, 2600, done.put)
         token = struct.unpack(">I", c.ser.writes[-1][7:11])[0]
-        c.ser.inject(ack_frame(c, 0, token, current=-700, impact=21, completed=7))
+        c.ser.inject(ack_frame(c, 0, token, current=-700, impact=21, impact_01ms=214,
+                               completed=7))
         result = done.get(timeout=1)
         self.assertTrue(result["metrics_fresh"])
-        self.assertEqual(b.latency._per_slot[0], {1: 21.0})
+        # Learned at the report's own current, from the 0.1 ms impact time.
+        self.assertAlmostEqual(b.latency.compensation_ms(0, 700), 21.4)
         b.strike_playback(0, 1800, done.put)
         token = struct.unpack(">I", c.ser.writes[-1][7:11])[0]
         c.ser.inject(ack_frame(c, 0, token, current=-700, impact=39, completed=7))
         self.assertFalse(done.get(timeout=1)["metrics_fresh"])
-        self.assertEqual(b.latency._per_slot[0], {1: 21.0})
-        b._fold_metrics_into_ema(0, 2900, {"sequence": 8, "flags": bus.STRIKE_TIMING_DEAD,
-              "strike_current_ma": 700, "trigger_to_impact_ms": 99})
-        self.assertEqual(b.latency._per_slot[0], {1: 21.0})
+        self.assertAlmostEqual(b.latency.compensation_ms(0, 700), 21.4)
+        for flags in (bus.STRIKE_TIMING_DEAD, bus.STRIKE_TIMING_RETRIGGERED):
+            self.assertFalse(b._fold_metrics_into_ema(0, 2900, {
+                "sequence": 8 + flags, "flags": flags | bus.STRIKE_TIMING_IMPACT_VALID,
+                "strike_current_ma": 700, "trigger_to_impact_ms": 99}))
+        self.assertAlmostEqual(b.latency.compensation_ms(0, 700), 21.4)
 
     def test_scheduler_finishes_rapid_sequence_with_all_acks_still_pending(self):
         c = self.client()
@@ -228,6 +255,9 @@ class AsyncStrikeTests(unittest.TestCase):
         c.ser.on_write = lambda _: c.ser.inject(c._build_frame(timing))
         report = c.query_strike_timing(0)
         self.assertEqual((report.strike_current_ma, report.trigger_to_impact_ms), (-1700, 29))
+        c.ser.on_write = lambda _: c.ser.inject(c._build_frame(timing + struct.pack(">H", 287)))
+        report = c.query_strike_timing(0)
+        self.assertEqual((report.trigger_to_impact_ms, report.trigger_to_impact_ms_precise), (29, 28.7))
         from ring_bootload import BootloaderClient, BOOT_SUB_VERIFY_IMAGE
         loader_reply = bytes([0x80, BOOT_SUB_VERIFY_IMAGE, 0, 1, 2, 3, 4])
         c.ser.on_write = lambda _: c.ser.inject(c._build_frame(loader_reply))

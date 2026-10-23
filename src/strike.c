@@ -6,6 +6,12 @@
  *   2. COASTING  — phases floating, momentum carries mallet to drum
  *   3. CATCHING  — position servo captures the rebound back to home
  *
+ * Impact, impact speed and rebound come from the motor layer's raw-encoder
+ * contact watch (no velocity-filter or strike-tick lag). A coasting mallet
+ * that stops making progress — resting on the surface after a soft hit, or
+ * stalled short of it — is lifted after STRIKE_STALL_TIME_MS rather than
+ * left damping the note until the coast timeout.
+ *
  * Dead strikes (STRIKE_TYPE_DEAD) insert a MUTING state between COASTING
  * and CATCHING: at detected impact the velocity loop brakes to setpoint 0
  * (braking current self-scales to rebound energy), then a small torque
@@ -81,6 +87,8 @@ static int32_t        stall_prev_pos;
 static uint16_t       coast_timeout;
 static uint32_t       timebase_ticks;
 static uint32_t       active_start_tick;
+static uint32_t       trigger_stamp;    /* timing_capture_stamp() at strike acceptance */
+static uint8_t        filtered_stop;    /* dead strike: filtered velocity fell to zero */
 static uint16_t       strike_sequence;
 static uint16_t       timing_flags;
 static uint16_t       warning_flags;
@@ -91,6 +99,7 @@ static uint32_t       homing_start_stamp;
 static int16_t        last_current_ma;
 static uint16_t       trigger_to_coast_ms;
 static uint16_t       trigger_to_impact_ms;
+static uint16_t       trigger_to_impact_01ms;
 static uint16_t       trigger_to_rebound_ms;
 static uint16_t       trigger_to_retrigger_ready_ms;
 static uint16_t       trigger_to_ready_ms;
@@ -164,15 +173,34 @@ static void abort_motion(fault_code_t code)
     state = STRIKE_IDLE;
 }
 
-static uint16_t elapsed_ms_since(uint32_t start_tick)
+/* Microseconds from strike acceptance to a timing stamp. The 1 MHz timebase
+ * wraps after 16.7 s; anything that late saturates every ms field instead
+ * of aliasing. */
+static uint32_t us_since_trigger(uint32_t stamp)
 {
-    uint32_t elapsed_ticks = timebase_ticks - start_tick;
-    uint64_t elapsed_ms = ((uint64_t)elapsed_ticks * 1000ULL) / STRIKE_LOOP_HZ;
+    if (timebase_ticks - active_start_tick >= STRIKE_LOOP_HZ * 16u)
+        return 65535000u;
 
-    if (elapsed_ms > 0xFFFFu)
-        return 0xFFFFu;
+    return timing_stamp_delta_us(trigger_stamp, stamp);
+}
 
-    return (uint16_t)elapsed_ms;
+static uint16_t ms_from_us(uint32_t us)
+{
+    return (uint16_t)((us + 500u) / 1000u);
+}
+
+static uint16_t ms_since_trigger(void)
+{
+    return ms_from_us(us_since_trigger(timing_capture_stamp()));
+}
+
+static void record_impact_us(uint32_t us)
+{
+    uint32_t tenths = (us + 50u) / 100u;
+
+    trigger_to_impact_ms = ms_from_us(us);
+    trigger_to_impact_01ms = (tenths > 0xFFFFu) ? 0xFFFFu : (uint16_t)tenths;
+    timing_flags |= STRIKE_TIMING_IMPACT_VALID;
 }
 
 static int32_t orient_strike_current(int32_t current_ma)
@@ -289,6 +317,9 @@ static void enter_muting(void)
  * state and resets the loop PIDs for a clean brake start. */
 static void start_muting(void)
 {
+    if ((timing_flags & STRIKE_TIMING_IMPACT_VALID) == 0u)
+        timing_flags |= STRIKE_TIMING_NO_CONTACT;
+
     motor_disarm_coast();
 
     motor_set_velocity(0);
@@ -306,13 +337,11 @@ static void start_muting(void)
 static void on_brake_engaged(void)
 {
     if ((timing_flags & STRIKE_TIMING_COAST_VALID) == 0u) {
-        trigger_to_coast_ms = elapsed_ms_since(active_start_tick);
+        trigger_to_coast_ms = ms_since_trigger();
         timing_flags |= STRIKE_TIMING_COAST_VALID;
     }
-    if ((timing_flags & STRIKE_TIMING_IMPACT_VALID) == 0u) {
-        trigger_to_impact_ms = elapsed_ms_since(active_start_tick);
-        timing_flags |= STRIKE_TIMING_IMPACT_VALID;
-    }
+    if ((timing_flags & STRIKE_TIMING_IMPACT_VALID) == 0u)
+        record_impact_us(us_since_trigger(timing_capture_stamp()));
 
     enter_muting();
 }
@@ -350,26 +379,52 @@ static void maybe_mark_retrigger_ready(int32_t pos, int32_t vel)
     if (!retrigger_ready_now(pos, vel))
         return;
 
-    trigger_to_retrigger_ready_ms = elapsed_ms_since(active_start_tick);
+    trigger_to_retrigger_ready_ms = ms_since_trigger();
     timing_flags |= STRIKE_TIMING_RETRIGGER_READY_VALID;
 }
 
-/* Record drum impact: the first sample where toward-drum velocity falls to
- * (or below) zero after the mallet has had a meaningful forward swing.
- * The VELOCITY_VALID guard ensures we don't latch impact on a noisy first
- * tick before the mallet has actually accelerated. Cost per coast tick is
- * one already-computed-int compare and one branch. */
-static void maybe_record_impact(int32_t toward_drum_rpm)
+/* Filtered peak speed: the strike velocity estimate until a contact speed
+ * replaces it. */
+static void track_peak_velocity(int32_t toward_drum_rpm)
 {
-    if ((timing_flags & STRIKE_TIMING_IMPACT_VALID) != 0u)
-        return;
-    if ((timing_flags & STRIKE_TIMING_VELOCITY_VALID) == 0u)
-        return;
-    if (toward_drum_rpm > STRIKE_IMPACT_VEL_THRESHOLD)
+    uint16_t velocity_dps;
+
+    if (toward_drum_rpm <= 0 || (timing_flags & STRIKE_TIMING_IMPACT_VALID) != 0u)
         return;
 
-    trigger_to_impact_ms = elapsed_ms_since(active_start_tick);
-    timing_flags |= STRIKE_TIMING_IMPACT_VALID;
+    velocity_dps = rpm_to_dps_clamped(toward_drum_rpm);
+    if (velocity_dps > estimated_strike_velocity_dps) {
+        estimated_strike_velocity_dps = velocity_dps;
+        timing_flags |= STRIKE_TIMING_VELOCITY_VALID;
+    }
+}
+
+/* Dead-strike stalled-short fallback only (validated behaviour): the filtered
+ * toward-drum velocity has fallen to zero after a real forward swing. Raw
+ * contact must not trigger muting while the position-armed brake is pending. */
+static void note_filtered_stop(int32_t toward_drum_rpm)
+{
+    if ((timing_flags & STRIKE_TIMING_VELOCITY_VALID) != 0u &&
+        toward_drum_rpm <= STRIKE_IMPACT_VEL_THRESHOLD)
+        filtered_stop = 1u;
+}
+
+/* Impact is the interpolated contact-point crossing; strike velocity is the
+ * raw speed over the last encoder sample before it. */
+static void absorb_contact(const motor_contact_t *watch)
+{
+    if (!watch->contact || (timing_flags & STRIKE_TIMING_IMPACT_VALID) != 0u)
+        return;
+
+    record_impact_us(us_since_trigger(watch->contact_stamp));
+    if (watch->approach_counts > 0 && watch->approach_us != 0u) {
+        /* counts/us -> deg/s: x 1e6 x 360 / ENCODER_COUNTS_PER_REV */
+        uint32_t dps = ((uint32_t)watch->approach_counts *
+                        ((360000000u + ENCODER_COUNTS_PER_REV / 2u) / ENCODER_COUNTS_PER_REV)) /
+                       watch->approach_us;
+        estimated_strike_velocity_dps = (dps > 0xFFFFu) ? 0xFFFFu : (uint16_t)dps;
+        timing_flags |= STRIKE_TIMING_VELOCITY_VALID;
+    }
 }
 
 static void snapshot_prev_compact(void)
@@ -381,6 +436,7 @@ static void snapshot_prev_compact(void)
     prev_compact.trigger_to_impact_ms = trigger_to_impact_ms;
     prev_compact.trigger_to_rebound_ms = trigger_to_rebound_ms;
     prev_compact.estimated_strike_velocity_dps = estimated_strike_velocity_dps;
+    prev_compact.trigger_to_impact_01ms = trigger_to_impact_01ms;
 }
 
 static void begin_strike(int32_t current_ma, uint8_t retriggered,
@@ -420,11 +476,14 @@ static void begin_strike(int32_t current_ma, uint8_t retriggered,
     last_current_ma = (int16_t)current_ma;
     trigger_to_coast_ms = 0;
     trigger_to_impact_ms = 0;
+    trigger_to_impact_01ms = 0;
     trigger_to_rebound_ms = 0;
     trigger_to_retrigger_ready_ms = 0;
     trigger_to_ready_ms = 0;
     estimated_strike_velocity_dps = 0;
+    filtered_stop = 0;
     motion_guard_start(start_pos);
+    trigger_stamp = timing_capture_stamp();
 
     /* Coast threshold: coast_distance counts from drum, on the home side */
     coast_threshold = drum_position - drum_dir * coast_distance;
@@ -445,6 +504,8 @@ static void begin_strike(int32_t current_ma, uint8_t retriggered,
     } else {
         motor_arm_coast(coast_threshold, drum_dir);
     }
+    motor_arm_contact_watch(drum_position - drum_dir * STRIKE_CONTACT_MARGIN_COUNTS,
+                            drum_dir);
 
     state = STRIKE_DRIVING;
 }
@@ -501,6 +562,7 @@ void strike_init(void)
     prev_compact.trigger_to_impact_ms = 0;
     prev_compact.trigger_to_rebound_ms = 0;
     prev_compact.estimated_strike_velocity_dps = 0;
+    prev_compact.trigger_to_impact_01ms = 0;
 }
 
 /* ── Configuration ───────────────────────────────────────────────────── */
@@ -567,9 +629,7 @@ void strike_shift_position_reference(int32_t delta)
         home_position -= delta;
     }
 
-    if (state == STRIKE_HOMING) {
-        stall_prev_pos -= delta;
-    }
+    stall_prev_pos -= delta;  /* homing and coasting stall anchors */
 
     if (motion_guard_active)
         motion_guard_last_pos -= delta;
@@ -717,7 +777,7 @@ strike_trigger_result_t strike_trigger_ex(int32_t current_ma, uint8_t type, uint
         }
 
         if ((timing_flags & STRIKE_TIMING_RETRIGGER_READY_VALID) == 0u) {
-            trigger_to_retrigger_ready_ms = elapsed_ms_since(active_start_tick);
+            trigger_to_retrigger_ready_ms = ms_since_trigger();
             timing_flags |= STRIKE_TIMING_RETRIGGER_READY_VALID;
         }
     }
@@ -963,26 +1023,21 @@ void strike_tick(void)
 
     /* ── Driving toward drum ─────────────────────────────────────────── */
     case STRIKE_DRIVING:
-        if (toward_drum_rpm > 0) {
-            uint16_t velocity_dps = rpm_to_dps_clamped(toward_drum_rpm);
-            if (velocity_dps > estimated_strike_velocity_dps) {
-                estimated_strike_velocity_dps = velocity_dps;
-                timing_flags |= STRIKE_TIMING_VELOCITY_VALID;
-            }
-        }
+        track_peak_velocity(toward_drum_rpm);
 
-        /* Rare but possible: impact happens before the coast-distance
-         * threshold (e.g. if coast is set wide). Catch it here too. */
-        maybe_record_impact(toward_drum_rpm);
+        /* Contact can precede the coast tick (or the coast point, if coast
+         * is set wide); the watch latched it on the encoder cadence. */
+        absorb_contact(motor_get_contact_watch());
 
         if (active_type == STRIKE_TYPE_DEAD) {
             /* Coast and brake can both trip between strike ticks; the
              * armed brake in motor.c is the primary entry. */
+            note_filtered_stop(toward_drum_rpm);
             if (motor_is_brake_engaged()) {
                 on_brake_engaged();
                 break;
             }
-            if ((timing_flags & STRIKE_TIMING_IMPACT_VALID) != 0u) {
+            if (filtered_stop) {
                 start_muting();
                 break;
             }
@@ -991,24 +1046,22 @@ void strike_tick(void)
         /* Coast is triggered by the faster encoder/velocity cadence
          * (motor_arm_coast). We just detect the transition here. */
         if (motor_is_coasting()) {
-            trigger_to_coast_ms = elapsed_ms_since(active_start_tick);
+            trigger_to_coast_ms = ms_since_trigger();
             timing_flags |= STRIKE_TIMING_COAST_VALID;
             coast_timeout = 0;
+            stall_prev_pos = pos;
+            stall_counter = 0;
             state = STRIKE_COASTING;
         }
         break;
 
     /* ── Coasting through impact ─────────────────────────────────────── */
     case STRIKE_COASTING:
-        if (toward_drum_rpm > 0) {
-            uint16_t velocity_dps = rpm_to_dps_clamped(toward_drum_rpm);
-            if (velocity_dps > estimated_strike_velocity_dps) {
-                estimated_strike_velocity_dps = velocity_dps;
-                timing_flags |= STRIKE_TIMING_VELOCITY_VALID;
-            }
-        }
+    {
+        const motor_contact_t *watch = motor_get_contact_watch();
 
-        maybe_record_impact(toward_drum_rpm);
+        track_peak_velocity(toward_drum_rpm);
+        absorb_contact(watch);
 
         coast_timeout++;
 
@@ -1018,9 +1071,10 @@ void strike_tick(void)
          * short of the brake trip point; the timeout path still presses
          * gently into the surface, which doubles as a damp. */
         if (active_type == STRIKE_TYPE_DEAD) {
+            note_filtered_stop(toward_drum_rpm);
             if (motor_is_brake_engaged()) {
                 on_brake_engaged();
-            } else if ((timing_flags & STRIKE_TIMING_IMPACT_VALID) != 0u) {
+            } else if (filtered_stop) {
                 start_muting();
             } else if (coast_timeout >= STRIKE_COAST_TIMEOUT_TICKS) {
                 timing_flags |= STRIKE_TIMING_REBOUND_TIMEOUT;
@@ -1029,32 +1083,41 @@ void strike_tick(void)
             break;
         }
 
-        /* Rebound: velocity reversed away from drum past threshold */
-        {
-            int32_t home_vel = -vel * drum_dir;  /* positive = toward home */
-            if (home_vel > STRIKE_REBOUND_THRESHOLD ||
-                coast_timeout >= STRIKE_COAST_TIMEOUT_TICKS) {
-                trigger_to_rebound_ms = elapsed_ms_since(active_start_tick);
-                timing_flags |= STRIKE_TIMING_REBOUND_VALID;
-                if (coast_timeout >= STRIKE_COAST_TIMEOUT_TICKS)
-                    timing_flags |= STRIKE_TIMING_REBOUND_TIMEOUT;
-                else
-                    timing_flags &= (uint16_t)~STRIKE_TIMING_REBOUND_TIMEOUT;
-
-                /* Take a snapshot now: the major timing fields (coast,
-                 * impact, rebound, peak velocity) are all in. The host
-                 * gets fully-formed metrics from the next ACK_TIMED or a
-                 * compact STRIKE_TIMING query without us having to wait
-                 * for catch/settle. */
-                snapshot_prev_compact();
-
-                /* Re-enter control directly in position mode and let the
-                 * cascaded position -> velocity -> current loops catch the
-                 * rebound at home. motor_set_mode() resets stale coast state. */
-                start_catching();
+        /* Lift on the raw rebound; otherwise when the mallet stops making
+         * progress (resting on the surface damps the note; stalled short is
+         * a missed note); otherwise at the coast timeout. "Rebound" time is
+         * when the catch began, and the flags say why. */
+        if (watch->reversed) {
+            trigger_to_rebound_ms = ms_from_us(us_since_trigger(watch->reversal_stamp));
+        } else {
+            if (drum_dir * (pos - stall_prev_pos) > STRIKE_STALL_COUNTS) {
+                stall_prev_pos = pos;
+                stall_counter = 0;
+            } else if (++stall_counter >= STRIKE_STALL_TICKS) {
+                timing_flags |= STRIKE_TIMING_STALLED;
             }
+            if (coast_timeout >= STRIKE_COAST_TIMEOUT_TICKS)
+                timing_flags |= STRIKE_TIMING_REBOUND_TIMEOUT;
+            if ((timing_flags & (STRIKE_TIMING_STALLED | STRIKE_TIMING_REBOUND_TIMEOUT)) == 0u)
+                break;
+            trigger_to_rebound_ms = ms_since_trigger();
         }
+        if ((timing_flags & STRIKE_TIMING_IMPACT_VALID) == 0u)
+            timing_flags |= STRIKE_TIMING_NO_CONTACT;
+        timing_flags |= STRIKE_TIMING_REBOUND_VALID;
+
+        /* Take a snapshot now: the major timing fields (coast, impact,
+         * rebound, strike velocity) are all in. The host gets fully-formed
+         * metrics from the next ACK_TIMED or a compact STRIKE_TIMING query
+         * without us having to wait for catch/settle. */
+        snapshot_prev_compact();
+
+        /* Re-enter control directly in position mode and let the cascaded
+         * position -> velocity -> current loops catch the rebound at home.
+         * motor_set_mode() resets stale coast state. */
+        start_catching();
         break;
+    }
 
     /* ── Muting: dead strike holds the mallet against the surface ────── */
     case STRIKE_MUTING:
@@ -1084,7 +1147,7 @@ void strike_tick(void)
 
         if (settle_counter >= STRIKE_SETTLE_TICKS)
         {
-            trigger_to_ready_ms = elapsed_ms_since(active_start_tick);
+            trigger_to_ready_ms = ms_since_trigger();
             timing_flags |= STRIKE_TIMING_READY_VALID;
             timing_flags &= (uint16_t)~STRIKE_TIMING_ACTIVE;
             motion_guard_active = 0u;

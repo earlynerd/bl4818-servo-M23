@@ -84,6 +84,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import ssl
 import subprocess
 import sys
@@ -110,6 +111,7 @@ from ring_bus import (
     REPLY_MODE_ACK,
     REPLY_MODE_ACK_TIMED,
     STRIKE_TIMING_DEAD,
+    STRIKE_TIMING_RETRIGGERED,
     REPLY_MODE_NONE,
     STRIKE_PARAM_HOME_OFFSET,
     STRIKE_PARAM_COAST_DISTANCE,
@@ -142,21 +144,28 @@ def midi_name(pitch: int) -> str:
 
 
 class LatencyTracker:
-    """Per-slot, per-current-bucket EMA of trigger_to_impact_ms.
+    """Per-slot model of trigger_to_impact_ms versus strike current.
 
-    Mirrors the playback compensation logic in player/midi_player.html so
-    motif playback fires each strike command early enough that the mallet's
-    physical impact lands on the intended beat. The browser maintains its
-    own EMA in JS; this is the bridge's parallel copy, fed by every strike
-    that flows through the bridge (browser or motif).
+    Playback fires each strike command this early so the mallet's physical
+    impact lands on the intended beat. Mirrors player/latency_model.js (the
+    browser's copy); keep the two in step. Fed by every strike that flows
+    through the bridge (browser or playback).
 
-    Lookup falls through: this slot+bucket -> cross-slot+bucket ->
-    this slot nearest bucket -> cross-slot nearest bucket -> DEFAULT_MS.
+    Bins are log-spaced, four per octave from 25 mA (25..3200 mA), so the
+    commonly played 100-500 mA range has ten bins where latency changes
+    fastest. A sample is scaled to its bin's centre current with the
+    constant-torque relation t ~ I^-1/2 (at most a 9% current shift) before
+    the EMA. Lookup: this slot where it has bins on both sides of the
+    current; otherwise this slot's nearest bin carried along the all-slot
+    curve; otherwise the all-slot curve; otherwise DEFAULT_MS. Curves
+    interpolate geometrically and follow t ~ I^-1/2 beyond their data, so one
+    sample is reproduced exactly at its own current.
     """
 
     EMA_ALPHA = 0.3
-    BUCKET_WIDTH_MA = 500
-    BUCKET_COUNT = 6
+    BASE_MA = 25.0
+    PER_OCTAVE = 4
+    BIN_COUNT = 29
     DEFAULT_MS = 50.0
 
     def __init__(self) -> None:
@@ -170,11 +179,37 @@ class LatencyTracker:
         self._lock = threading.Lock()
 
     @classmethod
-    def _bucket(cls, current_ma: int) -> int:
-        if current_ma is None or current_ma < 0:
-            return 0
-        idx = current_ma // cls.BUCKET_WIDTH_MA
-        return max(0, min(cls.BUCKET_COUNT - 1, int(idx)))
+    def _position(cls, current_ma) -> float | None:
+        """Fractional bin position of a current, or None for no usable current."""
+        if not current_ma:
+            return None
+        x = cls.PER_OCTAVE * math.log2(max(abs(current_ma), cls.BASE_MA) / cls.BASE_MA)
+        return min(x, cls.BIN_COUNT - 1)
+
+    @classmethod
+    def _prior(cls, bins: float) -> float:
+        """t ~ I^-1/2: moving `bins` toward higher current scales latency by this."""
+        return 2.0 ** (-bins / (2 * cls.PER_OCTAVE))
+
+    @staticmethod
+    def _bracket(table: dict[int, float], x: float) -> tuple[int | None, int | None]:
+        lo = max((i for i in table if i <= x), default=None)
+        hi = min((i for i in table if i >= x), default=None)
+        return lo, hi
+
+    @classmethod
+    def _curve(cls, table: dict[int, float], x: float) -> float | None:
+        lo, hi = cls._bracket(table, x)
+        if lo is None and hi is None:
+            return None
+        if lo is None:
+            return table[hi] * cls._prior(x - hi)
+        if hi is None:
+            return table[lo] * cls._prior(x - lo)
+        if lo == hi:
+            return table[lo]
+        f = (x - lo) / (hi - lo)
+        return table[lo] ** (1 - f) * table[hi] ** f
 
     def last_accepted_current(self, slot: int) -> int | None:
         with self._lock:
@@ -190,42 +225,31 @@ class LatencyTracker:
             self._last_accepted_current.pop(slot, None)
 
     def update(self, slot: int, current_ma: int, impact_ms: float) -> None:
-        if impact_ms is None:
+        x = self._position(current_ma)
+        if impact_ms is None or impact_ms <= 0 or x is None:
             return
-        idx = self._bucket(current_ma)
+        idx = int(x + 0.5)
+        at_centre = impact_ms / self._prior(x - idx)
         with self._lock:
-            buckets = self._per_slot.setdefault(slot, {})
-            prev = buckets.get(idx)
-            buckets[idx] = (
-                impact_ms if prev is None
-                else (1 - self.EMA_ALPHA) * prev + self.EMA_ALPHA * impact_ms
-            )
-            prev_g = self._global.get(idx)
-            self._global[idx] = (
-                impact_ms if prev_g is None
-                else (1 - self.EMA_ALPHA) * prev_g + self.EMA_ALPHA * impact_ms
-            )
+            for table in (self._per_slot.setdefault(slot, {}), self._global):
+                prev = table.get(idx)
+                table[idx] = at_centre if prev is None else prev + self.EMA_ALPHA * (at_centre - prev)
 
     def compensation_ms(self, slot: int, current_ma: int) -> float:
-        idx = self._bucket(current_ma)
-        with self._lock:
-            buckets = self._per_slot.get(slot)
-            if buckets is not None and idx in buckets:
-                return buckets[idx]
-            if idx in self._global:
-                return self._global[idx]
-            if buckets is not None:
-                for d in range(1, self.BUCKET_COUNT):
-                    if (idx - d) in buckets:
-                        return buckets[idx - d]
-                    if (idx + d) in buckets:
-                        return buckets[idx + d]
-            for d in range(1, self.BUCKET_COUNT):
-                if (idx - d) in self._global:
-                    return self._global[idx - d]
-                if (idx + d) in self._global:
-                    return self._global[idx + d]
+        x = self._position(current_ma)
+        if x is None:
             return self.DEFAULT_MS
+        with self._lock:
+            table = self._per_slot.get(slot) or {}
+            lo, hi = self._bracket(table, x)
+            if lo is not None and hi is not None:
+                return self._curve(table, x)
+            if table:
+                anchor = lo if lo is not None else hi
+                # The shared table holds every bin this slot has learned.
+                return table[anchor] * self._curve(self._global, x) / self._curve(self._global, anchor)
+            shared = self._curve(self._global, x)
+            return self.DEFAULT_MS if shared is None else shared
 
 ROOT = Path(__file__).resolve().parent.parent
 PLAYER_HTML = ROOT / "player" / "midi_player.html"
@@ -789,7 +813,10 @@ class Bridge:
         """New reports carry their own current; old synchronous reports retain fallback."""
         if not metrics or metrics.get("trigger_to_impact_ms") is None:
             return False
-        if metrics["flags"] & STRIKE_TIMING_DEAD:
+        # Muted strikes and retriggers (launched before the previous strike
+        # was caught, so from a different position and speed) would skew
+        # the model for ordinary notes.
+        if metrics["flags"] & (STRIKE_TIMING_DEAD | STRIKE_TIMING_RETRIGGERED):
             return False
         current = metrics.get("strike_current_ma")
         if current is None:
@@ -802,7 +829,7 @@ class Bridge:
             if self._learned_timing.get(address) == metrics["sequence"]:
                 return False
             self._learned_timing[address] = metrics["sequence"]
-            self.latency.update(address, abs(current), float(metrics["trigger_to_impact_ms"]))
+            self.latency.update(address, abs(current), impact_ms(metrics))
         return True
 
     def query_strike_timing(self, address: int) -> dict:
@@ -1087,10 +1114,23 @@ class Bridge:
             "flags": timing.flags,
             "trigger_to_coast_ms": timing.trigger_to_coast_ms,
             "trigger_to_impact_ms": timing.trigger_to_impact_ms,
+            "trigger_to_impact_ms_precise": timing.trigger_to_impact_ms_precise,
             "trigger_to_rebound_ms": timing.trigger_to_rebound_ms,
             "estimated_strike_velocity_dps": timing.estimated_strike_velocity_dps,
             "rebound_timeout": timing.rebound_timeout,
+            "retriggered": timing.retriggered,
+            "stalled": timing.stalled,
+            "no_contact": timing.no_contact,
         }
+
+
+def impact_ms(metrics: dict) -> float | None:
+    """Trigger-to-impact time, at 0.1 ms resolution when the firmware sends it."""
+    precise = metrics.get("trigger_to_impact_ms_precise")
+    if precise is not None:
+        return float(precise)
+    coarse = metrics.get("trigger_to_impact_ms")
+    return None if coarse is None else float(coarse)
 
 
 STRIKE_MA_MIN = 0
@@ -1479,7 +1519,7 @@ class Player:
                 previous = self._sequence_predictions.get((address, timing.get("sequence")))
                 if result.get("metrics_fresh") and previous is not None:
                     self._fold_stat(self.residual_stats.setdefault(address, self._new_stats_bag()),
-                                    timing["trigger_to_impact_ms"] - previous)
+                                    impact_ms(timing) - previous)
                 if result.get("accepted"):
                     self._sequence_predictions[(address, result["detail"])] = prediction
                     while len(self._sequence_predictions) > 1024:
@@ -1492,7 +1532,7 @@ class Player:
                                previous_prediction_ms: float | None) -> None:
         st = result.get("server_timing_us") or {}
         metrics = result.get("metrics") or {}
-        impact = metrics.get("trigger_to_impact_ms")
+        impact = impact_ms(metrics)
         with self._control_lock:
             if "lock_wait" in st:
                 self._fold_stat(self.timing_stats["lock_wait_ms"],
@@ -2093,6 +2133,7 @@ class Handler(BaseHTTPRequestHandler):
             "/midi_transpose.js": ROOT / "player" / "midi_transpose.js",
             "/pitch_detector.js": ROOT / "player" / "pitch_detector.js",
             "/pitch_assignment.js": ROOT / "player" / "pitch_assignment.js",
+            "/latency_model.js": ROOT / "player" / "latency_model.js",
         }
         if self.path in player_assets:
             asset_path = player_assets[self.path]

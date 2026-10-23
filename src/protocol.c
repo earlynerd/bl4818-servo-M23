@@ -252,7 +252,7 @@ static uint8_t prepare_set_position(int32_t counts)
 #define FULL_REPLY_STATUS            0u
 #define FULL_REPLY_STRIKE_STATUS     1u
 #define FULL_REPLY_TIMING_STATUS     2u
-#define FULL_REPLY_STRIKE_TIMING     3u  /* compact 15-byte strike-timing payload */
+#define FULL_REPLY_STRIKE_TIMING     3u  /* compact 17-byte strike-timing payload */
 #define FULL_REPLY_CONFIG            4u
 
 static void proto_debug_note_addressed_cmd(
@@ -522,36 +522,45 @@ static void send_strike_status_reply(void)
  *   [t_rebound_hi] [t_rebound_lo] [vel_hi] [vel_lo]
  * Reads from the prev_compact snapshot, so the values describe the most
  * recently completed (or interrupted) strike — never an in-progress one. */
-static void send_strike_timing_reply(void)
+/* Completed-strike timing tail shared by QUERY_STRIKE_TIMING and ACK_TIMED,
+ * eight big-endian u16 (16 bytes): seq, flags, t_coast, t_impact, t_rebound,
+ * vel, current (signed), t_impact in 0.1 ms. */
+static void put_strike_timing(uint8_t *dst)
 {
     strike_compact_t compact;
-    uint8_t buf[18];
-    uint16_t crc;
+    uint16_t fields[8];
+    uint8_t i;
 
     strike_get_compact_metrics(&compact);
+    fields[0] = compact.sequence;
+    fields[1] = compact.flags;
+    fields[2] = compact.trigger_to_coast_ms;
+    fields[3] = compact.trigger_to_impact_ms;
+    fields[4] = compact.trigger_to_rebound_ms;
+    fields[5] = compact.estimated_strike_velocity_dps;
+    fields[6] = (uint16_t)compact.last_current_ma;
+    fields[7] = compact.trigger_to_impact_01ms;
 
-    buf[0]  = 15u;                                  /* LEN */
+    for (i = 0u; i < 8u; i++) {
+        *dst++ = (uint8_t)(fields[i] >> 8);
+        *dst++ = (uint8_t)(fields[i] & 0xFFu);
+    }
+}
+
+static void send_strike_timing_reply(void)
+{
+    uint8_t buf[20];
+    uint16_t crc;
+
+    buf[0]  = 17u;                                  /* LEN */
     buf[1]  = CMD_STATUS_BASE | device_addr;
-    buf[2]  = (uint8_t)(compact.sequence >> 8);
-    buf[3]  = (uint8_t)(compact.sequence & 0xFFu);
-    buf[4]  = (uint8_t)(compact.flags >> 8);
-    buf[5]  = (uint8_t)(compact.flags & 0xFFu);
-    buf[6]  = (uint8_t)(compact.trigger_to_coast_ms >> 8);
-    buf[7]  = (uint8_t)(compact.trigger_to_coast_ms & 0xFFu);
-    buf[8]  = (uint8_t)(compact.trigger_to_impact_ms >> 8);
-    buf[9]  = (uint8_t)(compact.trigger_to_impact_ms & 0xFFu);
-    buf[10] = (uint8_t)(compact.trigger_to_rebound_ms >> 8);
-    buf[11] = (uint8_t)(compact.trigger_to_rebound_ms & 0xFFu);
-    buf[12] = (uint8_t)(compact.estimated_strike_velocity_dps >> 8);
-    buf[13] = (uint8_t)(compact.estimated_strike_velocity_dps & 0xFFu);
+    put_strike_timing(&buf[2]);
 
-    buf[14] = (uint8_t)((uint16_t)compact.last_current_ma >> 8);
-    buf[15] = (uint8_t)((uint16_t)compact.last_current_ma & 0xFFu);
-    crc = crc16_ccitt(buf, 16);
-    buf[16] = (uint8_t)(crc >> 8);
-    buf[17] = (uint8_t)(crc & 0xFFu);
+    crc = crc16_ccitt(buf, 18);
+    buf[18] = (uint8_t)(crc >> 8);
+    buf[19] = (uint8_t)(crc & 0xFFu);
 
-    send_frame(buf, 18);
+    send_frame(buf, 20);
 }
 
 static void send_timing_status_reply(void)
@@ -654,53 +663,37 @@ static void send_ack_reply(uint8_t subcmd, uint8_t result, uint16_t detail)
     send_frame(buf, 8);
 }
 
-/* ACK + self-contained last-completed strike metrics. 19-byte payload:
+/* ACK + self-contained last-completed strike metrics. 21-byte payload:
  *   [type] [subcmd] [result] [detail_hi] [detail_lo]
  *   [seq_hi] [seq_lo] [flags_hi] [flags_lo]
  *   [t_coast_hi] [t_coast_lo] [t_impact_hi] [t_impact_lo]
  *   [t_rebound_hi] [t_rebound_lo] [vel_hi] [vel_lo]
- * Followed by signed current_mA:i16; tagged STRIKE adds command_id:u32.
- * Net cost vs plain ACK: 14 extra payload bytes (~560 us at 250 kbaud).
+ *   [current_hi] [current_lo] [t_impact_01ms_hi] [t_impact_01ms_lo]
+ * Tagged STRIKE appends command_id:u32 (25 bytes).
+ * Net cost vs plain ACK: 16 extra payload bytes (~640 us at 250 kbaud).
  * The host correlates by sequence number — the metrics never describe the
  * strike whose ACK they ride on; they describe the most recent strike
  * that has been snapshotted into prev_compact. */
 static void send_ack_timed_reply(uint8_t subcmd, uint8_t result, uint16_t detail,
                                  uint32_t command_id, uint8_t tagged)
 {
-    strike_compact_t compact;
-    uint8_t buf[26];
+    uint8_t buf[28];
     uint16_t crc;
-    uint8_t body_len = tagged ? 24u : 20u;
+    uint8_t body_len = tagged ? 26u : 22u;
 
-    strike_get_compact_metrics(&compact);
-
-    buf[0]  = tagged ? 23u : 19u;
+    buf[0]  = tagged ? 25u : 21u;
     buf[1]  = CMD_ACK_BASE | device_addr;
     buf[2]  = subcmd;
     buf[3]  = result;
     buf[4]  = (uint8_t)(detail >> 8);
     buf[5]  = (uint8_t)(detail & 0xFFu);
-    buf[6]  = (uint8_t)(compact.sequence >> 8);
-    buf[7]  = (uint8_t)(compact.sequence & 0xFFu);
-    buf[8]  = (uint8_t)(compact.flags >> 8);
-    buf[9]  = (uint8_t)(compact.flags & 0xFFu);
-    buf[10] = (uint8_t)(compact.trigger_to_coast_ms >> 8);
-    buf[11] = (uint8_t)(compact.trigger_to_coast_ms & 0xFFu);
-    buf[12] = (uint8_t)(compact.trigger_to_impact_ms >> 8);
-    buf[13] = (uint8_t)(compact.trigger_to_impact_ms & 0xFFu);
-    buf[14] = (uint8_t)(compact.trigger_to_rebound_ms >> 8);
-    buf[15] = (uint8_t)(compact.trigger_to_rebound_ms & 0xFFu);
-    buf[16] = (uint8_t)(compact.estimated_strike_velocity_dps >> 8);
-    buf[17] = (uint8_t)(compact.estimated_strike_velocity_dps & 0xFFu);
-
-    buf[18] = (uint8_t)((uint16_t)compact.last_current_ma >> 8);
-    buf[19] = (uint8_t)((uint16_t)compact.last_current_ma & 0xFFu);
+    put_strike_timing(&buf[6]);
     if (tagged)
     {
-        buf[20] = (uint8_t)(command_id >> 24);
-        buf[21] = (uint8_t)(command_id >> 16);
-        buf[22] = (uint8_t)(command_id >> 8);
-        buf[23] = (uint8_t)command_id;
+        buf[22] = (uint8_t)(command_id >> 24);
+        buf[23] = (uint8_t)(command_id >> 16);
+        buf[24] = (uint8_t)(command_id >> 8);
+        buf[25] = (uint8_t)command_id;
     }
     crc = crc16_ccitt(buf, body_len);
     buf[body_len] = (uint8_t)(crc >> 8);

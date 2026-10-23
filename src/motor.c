@@ -61,6 +61,18 @@ static uint8_t       coast_armed;        /* 1 = watching for coast trigger on en
 static int32_t       brake_trip_pos;     /* dead strike: velocity-0 brake position threshold */
 static uint8_t       brake_stage;        /* 0 = none, 1 = brake follows coast, 2 = brake armed */
 static uint8_t       brake_engaged;      /* latched when brake stage tripped */
+/* Strike contact watch (see motor.h). One struct keeps the encoder-rate
+ * code to a single base address. */
+static struct {
+    uint8_t  armed;
+    uint8_t  tracking;           /* 1 = following the deepest point for reversal */
+    int8_t   dir;
+    int32_t  contact_pos;
+    int32_t  prev_depth;         /* toward-drum depth past contact_pos */
+    int32_t  peak_depth;
+    uint32_t prev_stamp;
+    motor_contact_t out;
+} watch;
 static pid_t         vel_pid;
 static pid_t         pos_pid;
 static pid_t         cur_pid;
@@ -177,6 +189,53 @@ static int32_t run_current_loop(int32_t setpoint_ma)
     return (setpoint_ma >= 0) ? duty : -duty;
 }
 
+/* Toward-drum depth past the contact point; survives reference shifts. */
+static int32_t contact_watch_depth(void)
+{
+    return (-encoder_get_position() - watch.contact_pos) * watch.dir;
+}
+
+/* One raw encoder sample of the strike contact watch. */
+static void contact_watch_sample(void)
+{
+    uint32_t stamp = timing_capture_stamp();
+    int32_t depth = contact_watch_depth();
+    int32_t step = depth - watch.prev_depth;
+    uint32_t dt = timing_stamp_delta_us(watch.prev_stamp, stamp);
+
+    if (dt > 0xFFFFu)
+        dt = 0xFFFFu;
+
+    if (!watch.out.contact) {
+        if (depth >= 0 && watch.prev_depth < 0) {
+            /* Interpolate the crossing inside this sample; the approach
+             * speed stays that of the last full sample before it. */
+            watch.out.contact_stamp = watch.prev_stamp +
+                (dt * (uint32_t)(-watch.prev_depth)) / (uint32_t)step;
+            watch.out.contact = 1u;
+        } else {
+            watch.out.approach_counts = (int16_t)step;  /* |step| <= half a turn */
+            watch.out.approach_us = (uint16_t)dt;
+        }
+    }
+
+    /* Reversal is only meaningful once drive has stopped or the ball is in
+     * contact; a retrigger may start out moving away from the drum. */
+    if (watch.out.contact || coasting) {
+        if (!watch.tracking || depth > watch.peak_depth) {
+            watch.tracking = 1u;
+            watch.peak_depth = depth;
+        } else if (watch.peak_depth - depth >= STRIKE_REVERSAL_HYST_COUNTS) {
+            watch.out.reversed = 1u;
+            watch.out.reversal_stamp = stamp;
+            watch.armed = 0u;
+        }
+    }
+
+    watch.prev_depth = depth;
+    watch.prev_stamp = stamp;
+}
+
 static void reset_current_protection_state(void)
 {
     current_filt_q8 = 0;
@@ -199,6 +258,7 @@ static void enter_fault(fault_code_t code)
     coast_armed = 0;
     brake_stage = 0;
     brake_engaged = 0;
+    watch.armed = 0;
     reset_current_protection_state();
     state = MOTOR_FAULT;
     fault = code;
@@ -232,6 +292,7 @@ void motor_init(void)
     coast_armed = 0;
     brake_stage = 0;
     brake_engaged = 0;
+    watch.armed = 0;
     current_setpoint = 0;
     last_enc_pos_seen = 0;
     enc_stall_samples = 0u;
@@ -361,6 +422,7 @@ void motor_shift_position_reference(int32_t delta)
     pos_pid.prev_meas -= delta;
     coast_trip_pos -= delta;
     brake_trip_pos -= delta;
+    watch.contact_pos -= delta;
 
     /* encoder_position moves to encoder_position + delta when re-zeroed */
     prev_enc_position += delta;
@@ -510,6 +572,7 @@ void motor_stop(void)
     coast_armed = 0;
     brake_stage = 0;
     brake_engaged = 0;
+    watch.armed = 0;
     reset_current_protection_state();
     /* STOP removes drive but only CLEAR_FAULT may release a fault latch. */
     if (state != MOTOR_FAULT)
@@ -561,7 +624,29 @@ void motor_disarm_coast(void)
     coast_armed = 0;
     brake_stage = 0;
     brake_engaged = 0;
+    watch.armed = 0;
     irq_restore(irq_state);
+}
+
+void motor_arm_contact_watch(int32_t contact_pos, int8_t direction)
+{
+    uint32_t irq_state = irq_save();
+    watch.contact_pos = contact_pos;
+    watch.dir = direction;
+    watch.prev_depth = contact_watch_depth();
+    watch.prev_stamp = timing_capture_stamp();
+    watch.tracking = 0;
+    watch.out.contact = 0;
+    watch.out.reversed = 0;
+    watch.out.approach_counts = 0;
+    watch.out.approach_us = 0;
+    watch.armed = 1;
+    irq_restore(irq_state);
+}
+
+const motor_contact_t *motor_get_contact_watch(void)
+{
+    return &watch.out;
 }
 
 uint8_t motor_is_brake_engaged(void)
@@ -601,6 +686,7 @@ void motor_clear_fault(void)
     coast_armed = 0;
     brake_stage = 0;
     brake_engaged = 0;
+    watch.armed = 0;
     reset_current_protection_state();
     state = MOTOR_IDLE;
     irq_restore(irq_state);
@@ -803,6 +889,9 @@ uint16_t motor_tick_control(void)
                 }
             }
         }
+
+        if (watch.armed && state == MOTOR_RUN)
+            contact_watch_sample();
     }
 
     if (schedule_latest_from_samples(&position_sched_accum, elapsed_samples,

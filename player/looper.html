@@ -386,6 +386,7 @@
   </div><!-- /main -->
 </div>
 
+<script src="latency_model.js"></script>
 <script>
 // ─── Shared config (same keys as midi_player.html so calibration carries over) ───
 const API_BASE = "";
@@ -402,9 +403,8 @@ const STRIKE_MA_MAX = 3000;
 const DEFAULT_VEL_FLOOR = 0.5;
 const DEFAULT_COMP_MS = 50;
 const COMP_MAX_MS = 150;
-const COMP_EMA_ALPHA = 0.3;
-const COMP_BUCKET_WIDTH_MA = 500;
-const COMP_BUCKET_COUNT = 6;
+const STRIKE_TIMING_RETRIGGERED = 0x0010;
+const STRIKE_TIMING_DEAD = 0x0200;
 
 const DEFAULT_MAPPING = [52, 55, 57, 60, 62, 64, 65, 67, 69, 72];
 const SLOT_COLORS = [
@@ -455,7 +455,9 @@ const LP = {
   velFloor: DEFAULT_VEL_FLOOR,
   compEnabled: true,
   compDefaultMs: DEFAULT_COMP_MS,
-  compEma: {},               // compEma[slot] = { [bucketIdx]: ms }
+  compEma: {},               // compEma[slot] = LatencyModel table { [binIdx]: ms }
+  compEmaGlobal: {},         // all-slot table: fresh slots and curve shape
+  compSequence: {},          // last learned report per slot (dedup)
   lastStrikeCurrent: {},     // for ACK-metric attribution
   // looper-specific project
   loops: [],                 // see makeLoop()
@@ -669,36 +671,25 @@ function effectiveCurrentForSlot(slot, velocity = 127) {
   return Math.max(STRIKE_MA_MIN, Math.min(STRIKE_MA_MAX, Math.round(scaled)));
 }
 
-// ─── Latency compensation ───
-function currentBucket(currentMa) {
-  if (!Number.isFinite(currentMa)) return -1;
-  return Math.max(0, Math.min(COMP_BUCKET_COUNT - 1, Math.floor(currentMa / COMP_BUCKET_WIDTH_MA)));
-}
+// ─── Latency compensation (latency_model.js, mirrors the server) ───
 function compensationMs(slot, currentMa) {
   if (!LP.compEnabled) return 0;
-  const buckets = LP.compEma[slot];
-  const idx = currentBucket(currentMa);
-  if (buckets && idx >= 0) {
-    if (Number.isFinite(buckets[idx])) return buckets[idx];
-    for (let d = 1; d < COMP_BUCKET_COUNT; d++) {
-      if (Number.isFinite(buckets[idx - d])) return buckets[idx - d];
-      if (Number.isFinite(buckets[idx + d])) return buckets[idx + d];
-    }
-  }
-  return LP.compDefaultMs;
+  const estimate = LatencyModel.estimate(LP.compEma[slot], LP.compEmaGlobal, currentMa);
+  return estimate === null ? LP.compDefaultMs : estimate;
 }
+// Muted strikes and retriggers stay out of the model; newer reports carry
+// their own current and a 0.1 ms impact time.
 function updateLatencyEma(slot, currentMa, metrics) {
-  if (!metrics) return;
-  const sample = metrics.trigger_to_impact_ms;
-  if (!Number.isFinite(sample)) return;
-  const idx = currentBucket(currentMa);
-  if (idx < 0) return;
-  let buckets = LP.compEma[slot];
-  if (!buckets) buckets = LP.compEma[slot] = {};
-  const prev = buckets[idx];
-  buckets[idx] = Number.isFinite(prev)
-    ? (1 - COMP_EMA_ALPHA) * prev + COMP_EMA_ALPHA * sample
-    : sample;
+  if (!metrics || (metrics.flags & (STRIKE_TIMING_DEAD | STRIKE_TIMING_RETRIGGERED))) return;
+  const sample = Number.isFinite(metrics.trigger_to_impact_ms_precise)
+    ? metrics.trigger_to_impact_ms_precise : metrics.trigger_to_impact_ms;
+  if (!Number.isFinite(sample) || LP.compSequence[slot] === metrics.sequence) return;
+  if (Number.isFinite(metrics.strike_current_ma)) currentMa = Math.abs(metrics.strike_current_ma);
+  if (LatencyModel.position(currentMa) === null) return;
+  LP.compSequence[slot] = metrics.sequence;
+  if (!LP.compEma[slot]) LP.compEma[slot] = {};
+  LatencyModel.learn(LP.compEma[slot], currentMa, sample);
+  LatencyModel.learn(LP.compEmaGlobal, currentMa, sample);
 }
 
 // ─── Strike (fire-and-forget, harvests metrics into the EMA) ───
@@ -715,9 +706,7 @@ function strikeAsync(addr, currentMa) {
     if (!j.accepted && j.result_name && j.result_name !== "OK") {
       log(`strike addr=${addr} -> ${j.result_name}`);
     }
-    if (j.metrics && Number.isFinite(priorCurrent)) {
-      updateLatencyEma(addr, priorCurrent, j.metrics);
-    }
+    if (j.metrics) updateLatencyEma(addr, priorCurrent, j.metrics);
   }).catch(e => log(`strike addr=${addr} failed: ${e.message}`));
 }
 
@@ -1097,7 +1086,7 @@ function schedulerTick() {
 
 function scheduleNoteFire(loop, note, delayFromNow) {
   // Project the strike current at schedule time so we pick the right
-  // compensation bucket. The actual strike re-reads live current at fire
+  // compensation bin. The actual strike re-reads live current at fire
   // time so master/trim/volume changes apply.
   const slot = slotForPitch(note.pitch);
   if (slot < 0) return;

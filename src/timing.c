@@ -153,6 +153,11 @@ uint32_t timing_elapsed_us(uint32_t start_stamp)
     return timing_counts_to_us(timing_delta_counts(start_stamp, timing_now()));
 }
 
+uint32_t timing_stamp_delta_us(uint32_t start_stamp, uint32_t end_stamp)
+{
+    return timing_counts_to_us(timing_delta_counts(start_stamp, end_stamp));
+}
+
 void timing_record_control_tick(uint32_t start_stamp)
 {
     uint32_t end_stamp = timing_now();

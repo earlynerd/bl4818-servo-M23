@@ -797,6 +797,8 @@ const S = {
   compEnabled: true,
   compDefaultMs: DEFAULT_COMP_MS,
   compEma: {},
+  compSequence: {},
+  lastStrikeSequence: {},
   // Cross-slot per-bucket EMA. Folded in parallel with the per-slot EMA so a
   // fresh current band gets a usable estimate from any slot's sample, instead
   // of falling all the way through to compDefaultMs while the per-slot tables
@@ -1127,9 +1129,11 @@ function compensationMs(slot, currentMa) {
 function updateLatencyEma(slot, currentMa, metrics) {
   if (!metrics) return;
   const sample = metrics.trigger_to_impact_ms;
-  if (!Number.isFinite(sample)) return;
+  if (!Number.isFinite(sample) || (metrics.flags & 0x0200)) return false;
+  if (Number.isFinite(metrics.strike_current_ma)) currentMa = Math.abs(metrics.strike_current_ma);
   const idx = currentBucket(currentMa);
-  if (idx < 0) return;
+  if (idx < 0 || S.compSequence[slot] === metrics.sequence) return false;
+  S.compSequence[slot] = metrics.sequence;
   let buckets = S.compEma[slot];
   if (!buckets) buckets = S.compEma[slot] = {};
   const prev = buckets[idx];
@@ -1140,6 +1144,7 @@ function updateLatencyEma(slot, currentMa, metrics) {
   S.compEmaGlobal[idx] = Number.isFinite(prevG)
     ? (1 - COMP_EMA_ALPHA) * prevG + COMP_EMA_ALPHA * sample
     : sample;
+  return true;
 }
 
 // Fire-and-forget strike — used by the playback scheduler. We don't
@@ -1159,6 +1164,7 @@ function strikeAsync(addr, currentMa, label, strikeType = "normal") {
   // serializes the ring lock per request.
   const priorCurrent = S.lastStrikeCurrent[addr];
   const priorPredictedMs = S.lastStrikePredictedMs[addr];
+  const priorSequence = S.lastStrikeSequence[addr];
   S.lastStrikeCurrent[addr] = currentMa;
   // Snapshot what our EMA predicts impact latency to be for THIS strike. When
   // the next ACK on this slot lands, it'll carry the measured impact for this
@@ -1195,15 +1201,16 @@ function strikeAsync(addr, currentMa, label, strikeType = "normal") {
     }
     if (j.metrics) {
       S.strikeTiming[addr] = j.metrics;
-      if (Number.isFinite(priorCurrent)) {
-        updateLatencyEma(addr, priorCurrent, j.metrics);
-      }
+      const fresh = updateLatencyEma(addr, priorCurrent, j.metrics);
       const sample = j.metrics.trigger_to_impact_ms;
-      if (Number.isFinite(sample) && Number.isFinite(priorPredictedMs)) {
+      if (fresh && j.metrics.sequence === priorSequence &&
+          Number.isFinite(sample) && Number.isFinite(priorPredictedMs)) {
         recordResidual(addr, sample - priorPredictedMs);
       }
       if (S.cfgSlot === addr) refreshCfgTiming();
     }
+    if (j.accepted) S.lastStrikeSequence[addr] = j.detail;
+    else delete S.lastStrikeSequence[addr];
   }).catch(e => log(`strike addr=${addr} ${label||""} failed: ${e.message}`));
 }
 
@@ -3056,16 +3063,17 @@ function startPlayPolling() {
         const transport = Number(ds.transport_failed || 0);
         const accepted = Number(ds.accepted || 0);
         const unacknowledged = Number(ds.unacknowledged || 0);
+        const pending = Number(ds.pending || 0);
         if (rejected || transport) {
           const reasons = Object.entries(ds.reasons || {})
             .map(([name, count]) => `${name}=${count}`).join(", ");
           const summary = `playback: accepted=${accepted}, rejected=${rejected}, ` +
-            `unacknowledged=${unacknowledged}, transport=${transport}` +
+            `unacknowledged=${unacknowledged}, pending=${pending}, transport=${transport}` +
             `${reasons ? ` (${reasons})` : ""}`;
           log(summary);
           showError(summary);
         } else {
-          log(`playback: accepted=${accepted}, unacknowledged=${unacknowledged}, ` +
+          log(`playback: accepted=${accepted}, unacknowledged=${unacknowledged}, pending=${pending}, ` +
               `bursts=${Number(ds.bursts || 0)}`);
         }
         stopPlayback("ended");

@@ -119,6 +119,11 @@ class FakeBridge:
         self.single_calls.append((address, current_ma))
         return dict(self.single_result)
 
+    def strike_playback(self, address, current_ma, completion):
+        result = self.strike(address, current_ma)
+        result.setdefault("detail", 1)
+        completion(result)
+
     def strike_chord(self, items):
         self.chord_calls.append([dict(item) for item in items])
         return [

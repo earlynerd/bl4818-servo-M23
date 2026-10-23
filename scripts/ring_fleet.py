@@ -229,6 +229,20 @@ class RingFleet:
     def strike(self, address, current_ma, strike_type="normal"):
         return self._one("strike", address, current_ma, strike_type)
 
+    def prepare_playback(self, addresses):
+        groups = [[] for _ in self.rings]
+        for address in addresses:
+            lane, local = self.locate(address)
+            groups[lane].append(local)
+        self._parallel(lambda lane: self.rings[lane].prepare_playback(groups[lane])
+                       if groups[lane] else None)
+
+    def strike_playback(self, address, current_ma, completion):
+        lane, local = self.locate(address)
+        self._ready(lane)
+        self.rings[lane].strike_playback(local, current_ma,
+            lambda result: completion(self._translate(result, lane) if result is not None else None))
+
     def query_config(self, address):
         return self._one("query_config", address)
 

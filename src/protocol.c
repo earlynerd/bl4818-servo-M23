@@ -252,7 +252,7 @@ static uint8_t prepare_set_position(int32_t counts)
 #define FULL_REPLY_STATUS            0u
 #define FULL_REPLY_STRIKE_STATUS     1u
 #define FULL_REPLY_TIMING_STATUS     2u
-#define FULL_REPLY_STRIKE_TIMING     3u  /* compact 13-byte strike-timing payload */
+#define FULL_REPLY_STRIKE_TIMING     3u  /* compact 15-byte strike-timing payload */
 #define FULL_REPLY_CONFIG            4u
 
 static void proto_debug_note_addressed_cmd(
@@ -525,12 +525,12 @@ static void send_strike_status_reply(void)
 static void send_strike_timing_reply(void)
 {
     strike_compact_t compact;
-    uint8_t buf[16];
+    uint8_t buf[18];
     uint16_t crc;
 
     strike_get_compact_metrics(&compact);
 
-    buf[0]  = 13u;                                  /* LEN */
+    buf[0]  = 15u;                                  /* LEN */
     buf[1]  = CMD_STATUS_BASE | device_addr;
     buf[2]  = (uint8_t)(compact.sequence >> 8);
     buf[3]  = (uint8_t)(compact.sequence & 0xFFu);
@@ -545,11 +545,13 @@ static void send_strike_timing_reply(void)
     buf[12] = (uint8_t)(compact.estimated_strike_velocity_dps >> 8);
     buf[13] = (uint8_t)(compact.estimated_strike_velocity_dps & 0xFFu);
 
-    crc = crc16_ccitt(buf, 14);
-    buf[14] = (uint8_t)(crc >> 8);
-    buf[15] = (uint8_t)(crc & 0xFFu);
+    buf[14] = (uint8_t)((uint16_t)compact.last_current_ma >> 8);
+    buf[15] = (uint8_t)((uint16_t)compact.last_current_ma & 0xFFu);
+    crc = crc16_ccitt(buf, 16);
+    buf[16] = (uint8_t)(crc >> 8);
+    buf[17] = (uint8_t)(crc & 0xFFu);
 
-    send_frame(buf, 16);
+    send_frame(buf, 18);
 }
 
 static void send_timing_status_reply(void)
@@ -652,24 +654,27 @@ static void send_ack_reply(uint8_t subcmd, uint8_t result, uint16_t detail)
     send_frame(buf, 8);
 }
 
-/* ACK + last-completed strike metrics piggyback. 17-byte payload:
+/* ACK + self-contained last-completed strike metrics. 19-byte payload:
  *   [type] [subcmd] [result] [detail_hi] [detail_lo]
  *   [seq_hi] [seq_lo] [flags_hi] [flags_lo]
  *   [t_coast_hi] [t_coast_lo] [t_impact_hi] [t_impact_lo]
  *   [t_rebound_hi] [t_rebound_lo] [vel_hi] [vel_lo]
- * Net cost vs plain ACK: 12 extra payload bytes (~480 us at 250 kbaud).
+ * Followed by signed current_mA:i16; tagged STRIKE adds command_id:u32.
+ * Net cost vs plain ACK: 14 extra payload bytes (~560 us at 250 kbaud).
  * The host correlates by sequence number — the metrics never describe the
  * strike whose ACK they ride on; they describe the most recent strike
  * that has been snapshotted into prev_compact. */
-static void send_ack_timed_reply(uint8_t subcmd, uint8_t result, uint16_t detail)
+static void send_ack_timed_reply(uint8_t subcmd, uint8_t result, uint16_t detail,
+                                 uint32_t command_id, uint8_t tagged)
 {
     strike_compact_t compact;
-    uint8_t buf[20];
+    uint8_t buf[26];
     uint16_t crc;
+    uint8_t body_len = tagged ? 24u : 20u;
 
     strike_get_compact_metrics(&compact);
 
-    buf[0]  = 17u;
+    buf[0]  = tagged ? 23u : 19u;
     buf[1]  = CMD_ACK_BASE | device_addr;
     buf[2]  = subcmd;
     buf[3]  = result;
@@ -688,11 +693,19 @@ static void send_ack_timed_reply(uint8_t subcmd, uint8_t result, uint16_t detail
     buf[16] = (uint8_t)(compact.estimated_strike_velocity_dps >> 8);
     buf[17] = (uint8_t)(compact.estimated_strike_velocity_dps & 0xFFu);
 
-    crc = crc16_ccitt(buf, 18);
-    buf[18] = (uint8_t)(crc >> 8);
-    buf[19] = (uint8_t)(crc & 0xFFu);
-
-    send_frame(buf, 20);
+    buf[18] = (uint8_t)((uint16_t)compact.last_current_ma >> 8);
+    buf[19] = (uint8_t)((uint16_t)compact.last_current_ma & 0xFFu);
+    if (tagged)
+    {
+        buf[20] = (uint8_t)(command_id >> 24);
+        buf[21] = (uint8_t)(command_id >> 16);
+        buf[22] = (uint8_t)(command_id >> 8);
+        buf[23] = (uint8_t)command_id;
+    }
+    crc = crc16_ccitt(buf, body_len);
+    buf[body_len] = (uint8_t)(crc >> 8);
+    buf[body_len + 1u] = (uint8_t)(crc & 0xFFu);
+    send_frame(buf, body_len + 2u);
 }
 
 static uint8_t ack_result_from_strike_trigger(strike_trigger_result_t result)
@@ -749,7 +762,7 @@ static void send_addressed_reply(
     }
 
     if (reply_mode == SUBCMD_REPLY_ACK_TIMED) {
-        send_ack_timed_reply(subcmd, ack_result, ack_detail);
+        send_ack_timed_reply(subcmd, ack_result, ack_detail, 0u, 0u);
         return;
     }
 
@@ -986,12 +999,23 @@ static void handle_addressed_cmd(uint8_t cmd_type, const uint8_t *payload, uint8
     case SUBCMD_STRIKE:
         ack_result = ACK_RESULT_INVALID_ARGUMENT;
         ack_detail = strike_get_sequence();
-        if (len >= 4u) {
+        if (len == 4u || len == 8u) {
             int16_t current_ma = (int16_t)(((uint16_t)payload[2] << 8) | payload[3]);
             ack_result = ack_result_from_strike_trigger(strike_trigger((int32_t)current_ma));
             ack_detail = strike_get_sequence();
         }
-        send_addressed_reply(reply_mode, subcmd, ack_result, ack_detail, FULL_REPLY_STATUS);
+        if (len == 8u && reply_mode == SUBCMD_REPLY_ACK_TIMED)
+        {
+            uint32_t command_id = ((uint32_t)payload[4] << 24)
+                                | ((uint32_t)payload[5] << 16)
+                                | ((uint32_t)payload[6] << 8) | payload[7];
+            proto_debug_note_reply(reply_mode, subcmd, ack_result, ack_detail, FULL_REPLY_STATUS);
+            send_ack_timed_reply(subcmd, ack_result, ack_detail, command_id, 1u);
+        }
+        else
+        {
+            send_addressed_reply(reply_mode, subcmd, ack_result, ack_detail, FULL_REPLY_STATUS);
+        }
         break;
     case SUBCMD_STRIKE_EX:
         ack_result = ACK_RESULT_INVALID_ARGUMENT;

@@ -205,8 +205,22 @@ compensation gives it a similar transmission deadline. Chord members whose
 compensated trigger deadlines fall within 1 ms are emitted farthest-address
 first without waiting between commands. Playback chord commands request no
 reply, so a missing ACK cannot stall the real-time scheduler. Isolated notes
-retain `ACK_TIMED`, and explicit timing polls remain available for learning and
-diagnostics.
+use tagged `ACK_TIMED` with an independent receiver, so ACK waits/timeouts do
+not block later notes. Singles and chords share one farthest-first batch sender;
+chords retain the existing no-reply bytes and single-write behavior. Explicit
+timing polls remain available. Reports now include `strike_current_ma` from the
+completed strike; learning uses its magnitude and deduplicates by sequence.
+Before playback's clock starts, a cached per-address capability probe selects
+asynchronous singles on new firmware and the original synchronous path on legacy
+firmware. Both the host and actuator firmware must be updated for this benefit.
+
+`dispatch_stats.pending` counts singles awaiting feedback; receipt moves each
+into `accepted` or `rejected`, and expiry increments `transport_failed`.
+`unacknowledged` counts intentionally unacknowledged chords and unresolved singles
+when playback is explicitly cancelled. Feedback may settle after the last note
+has been transmitted. Late feedback from an older play never alters a newer
+play's counters. `metrics.strike_current_ma` and ACK `command_id` are null for
+legacy replies. Manual `/api/strike` remains synchronous.
 The EMA needs a handful of strikes to converge on a slot if the bridge
 has just started; the first few strikes use a 50 ms default.
 

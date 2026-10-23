@@ -87,7 +87,7 @@ sub-command ID; the top 2 bits select reply policy.
 | 0x09 | SET_POSITION | `[pos_b3] [pos_b2] [pos_b1] [pos_b0]` | 4 |
 | 0x0A | SET_POS_PID | `[kp_hi] [kp_lo] [ki_hi] [ki_lo] [kd_hi] [kd_lo]` | 6 |
 | 0x0B | ZERO_POSITION | -- | 0 |
-| 0x0C | STRIKE | `[current_hi] [current_lo]` | 2 |
+| 0x0C | STRIKE | `[current_hi] [current_lo]` optionally followed by `command_id:u32` | 2 or 6 |
 | 0x0D | STRIKE_HOME | -- | 0 |
 | 0x0E | STRIKE_CANCEL | -- | 0 |
 | 0x0F | SET_STRIKE_PARAM | `[param_id] [value_hi] [value_lo]` | 3 |
@@ -328,7 +328,7 @@ bits 5:0 = sub-command ID
 | `00` | FULL | Current/default behavior. Device emits the normal full reply. |
 | `01` | ACK | Device emits a compact `ACK_REPLY`. |
 | `10` | NONE | Device suppresses the device-generated reply. |
-| `11` | ACK_TIMED | Device emits an `ACK_REPLY` with the last completed strike's compact metrics piggybacked on the end. 17 payload bytes total. |
+| `11` | ACK_TIMED | Device emits an `ACK_REPLY` with the last completed strike's compact metrics piggybacked on the end. 19 payload bytes; tagged `STRIKE` replies have 23. |
 
 Notes:
 
@@ -339,7 +339,7 @@ Notes:
   command frame itself still propagates around the ring and returns to the
   master RX path.
 - `ACK_TIMED` is the recommended reply mode for interactive and isolated
-  `STRIKE` commands: it costs 12 extra payload bytes (~480 µs at 250 kbaud) but
+  `STRIKE` commands: it costs 14 extra payload bytes (~560 µs at 250 kbaud) but
   eliminates the need for a separate `QUERY_STRIKE` round trip to harvest the
   previous strike's timing. The server's real-time MIDI chord trains use
   `NONE`; reply loss must not become scheduler flow control during playback.
@@ -355,7 +355,7 @@ Addressed commands sent with reply mode `ACK` reply with type `0x50 + addr` and
 
 `subcmd` is the low-6-bit sub-command ID without the reply-mode bits.
 
-Reply mode `ACK_TIMED` returns the same 5-byte ACK header with 12 additional
+Reply mode `ACK_TIMED` returns the same 5-byte ACK header with 14 additional
 bytes describing the most recently completed strike (read from the firmware's
 `prev_compact` snapshot — never the in-flight strike whose ACK these bytes
 ride on; correlate by sequence number):
@@ -365,11 +365,31 @@ ride on; correlate by sequence number):
 [seq_hi] [seq_lo] [flags_hi] [flags_lo]
 [t_coast_hi] [t_coast_lo] [t_impact_hi] [t_impact_lo]
 [t_rebound_hi] [t_rebound_lo] [vel_hi] [vel_lo]
+[current_hi] [current_lo]
 ```
 
-Total payload is 17 bytes. If the device has not yet completed any strike
+Total payload is 19 bytes. `current` is the signed, direction-oriented current
+command captured in the **same completed-strike snapshot** as these timings;
+use its magnitude for current bins. It is not the current of the new command. If the device has not yet completed any strike
 since boot, `seq` is 0 and `flags` has no validity bits set; hosts should
 treat the timing fields as missing in that case.
+
+For asynchronous playback, `STRIKE` optionally appends a big-endian unsigned
+32-bit host command ID after its signed 16-bit current (8 payload bytes total,
+including type and subcommand). With `ACK_TIMED`, firmware appends that ID after
+the completed-strike current: 23 reply payload bytes. The ID is echoed for both
+accepted and rejected commands; it is unrelated to either device strike sequence.
+The host uses `(port, address, command_id)` only for acknowledgement accounting
+and monotonic round-trip measurement. Lag learning uses the report's own current
+and sequence, and excludes muted strikes and invalid/repeated impact samples.
+
+Legacy 17-byte timed ACKs and 13-byte timing polls remain readable by the new
+host. Before starting the musical clock, the server probes timing-poll length
+once per used address after enumeration/update. A 15-byte reply enables tagged
+asynchronous singles; older firmware retains synchronous singles with a warning.
+Install the new host before flashing this firmware: old host parsers do not
+understand the extended timing payloads. A firmware update or enumeration clears
+the capability cache. No loader format or flash layout changes.
 
 `result` codes currently used by firmware:
 
@@ -467,7 +487,7 @@ during coast — a direct lower bound on drum contact, suitable for scheduling
 strikes ahead of their musical time. `t_rebound` is the older "velocity
 reversed past threshold" proxy, slightly later than impact.
 
-`QUERY_STRIKE_TIMING` replies with type `0x40 + addr` and 13 payload bytes —
+`QUERY_STRIKE_TIMING` replies with type `0x40 + addr` and 15 payload bytes —
 a compact subset of the strike status focused on the timing fields the host
 needs to schedule ahead. Reads from the firmware's `prev_compact` snapshot,
 so the values describe the last completed strike, never an in-progress one:
@@ -476,10 +496,11 @@ so the values describe the last completed strike, never an in-progress one:
 [type] [seq_hi] [seq_lo] [flags_hi] [flags_lo]
 [t_coast_hi] [t_coast_lo] [t_impact_hi] [t_impact_lo]
 [t_rebound_hi] [t_rebound_lo] [vel_hi] [vel_lo]
+[current_hi] [current_lo]
 ```
 
 Use this rather than `QUERY_STRIKE` when only the timing fields are needed —
-saves ~70% of the round-trip byte cost (16 wire bytes vs 38).
+Its response is 20 wire bytes including preamble, length and CRC.
 
 The `STRIKE` payload is a signed 16-bit current command in mA. Firmware
 orients that current toward the learned drum direction for the outbound hit.

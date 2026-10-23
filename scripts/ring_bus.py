@@ -8,6 +8,8 @@ from __future__ import annotations
 import dataclasses
 import struct
 import time
+import threading
+import queue
 from collections import deque
 from typing import Iterable, Optional
 
@@ -358,6 +360,7 @@ class StrikeTiming:
     trigger_to_impact_ms: Optional[int]
     trigger_to_rebound_ms: Optional[int]
     estimated_strike_velocity_dps: Optional[int]
+    strike_current_ma: Optional[int] = None
 
     @property
     def coast_valid(self) -> bool:
@@ -401,6 +404,7 @@ class CommandAck:
     result: int
     detail: int
     metrics: Optional[StrikeTiming] = None
+    command_id: Optional[int] = None
 
     @property
     def subcmd_name(self) -> str:
@@ -535,14 +539,14 @@ AddressedReply = MotorStatus | CommandAck | TimingStatus | None
 
 
 def _parse_strike_timing_payload(address: int, body: bytes) -> StrikeTiming:
-    """Parse the 12-byte timing tail shared by REPLY_MODE_ACK_TIMED and
+    """Parse the legacy 12-byte or current 14-byte timing tail shared by ACK_TIMED and
     QUERY_STRIKE_TIMING. Layout:
-        seq:u16 | flags:u16 | t_coast:u16 | t_impact:u16 | t_rebound:u16 | vel:u16
+        seq:u16 | flags:u16 | t_coast:u16 | t_impact:u16 | t_rebound:u16 | vel:u16 | current:i16
     Each value's "valid" bit decides whether the corresponding field on
     the returned StrikeTiming is reported or left as ``None``.
     """
-    if len(body) != 12:
-        raise RingError(f"strike timing payload must be 12 bytes, got {len(body)}")
+    if len(body) not in (12, 14):
+        raise RingError(f"strike timing payload must be 12 or 14 bytes, got {len(body)}")
     seq = struct.unpack(">H", body[0:2])[0]
     flags = struct.unpack(">H", body[2:4])[0]
     t_coast = struct.unpack(">H", body[4:6])[0]
@@ -552,6 +556,7 @@ def _parse_strike_timing_payload(address: int, body: bytes) -> StrikeTiming:
     return StrikeTiming(
         address=address,
         sequence=seq,
+        strike_current_ma=struct.unpack(">h", body[12:14])[0] if len(body) == 14 else None,
         flags=flags,
         trigger_to_coast_ms=t_coast if (flags & STRIKE_TIMING_COAST_VALID) else None,
         trigger_to_impact_ms=t_impact if (flags & STRIKE_TIMING_IMPACT_VALID) else None,
@@ -595,6 +600,13 @@ class RingClientV2:
         self.last_strike_status_payload_len: Optional[int] = None
         self._last_tx_frame: bytes = b""
         self._last_tx_payload: bytes = b""
+        self._rx_thread = None
+        self._rx_stop = threading.Event()
+        self._rx_queue = queue.Queue(maxsize=256)
+        self._rx_error = None
+        self._pending_lock = threading.Lock()
+        self._pending = {}
+        self._next_command_id = 0
 
     def open(self) -> None:
         self.ser = serial.Serial(
@@ -611,11 +623,21 @@ class RingClientV2:
         self._flush_rx()
 
     def close(self) -> None:
+        self._rx_stop.set()
+        if self._rx_thread is not None:
+            self._rx_thread.join(timeout=2)
+            if self._rx_thread.is_alive():
+                raise RingError("serial receiver did not stop")
+            self._rx_thread = None
+        self._expire_async(RingError("serial connection closed"))
         if self.ser and self.ser.is_open:
             self.ser.close()
         self.ser = None
 
     def _flush_rx(self) -> None:
+        if self._rx_thread is not None:
+            self._discard_rx_available()
+            return
         if not self.ser:
             return
         while True:
@@ -627,6 +649,12 @@ class RingClientV2:
 
     def _discard_rx_available(self) -> None:
         """Discard bytes already buffered without waiting for the ring to idle."""
+        if self._rx_thread is not None:
+            while True:
+                try:
+                    self._rx_queue.get_nowait()
+                except queue.Empty:
+                    return
         if not self.ser:
             return
         waiting = self.ser.in_waiting
@@ -640,15 +668,30 @@ class RingClientV2:
         return PREAMBLE + body + struct.pack(">H", crc)
 
     def _send_frame(self, payload: bytes) -> None:
+        self._send_frames([payload])
+
+    def _send_frames(self, payloads) -> None:
+        """One serial write for the entire ordered batch (including batches of one)."""
         assert self.ser is not None
-        frame = self._build_frame(payload)
-        self._last_tx_frame = frame
-        self._last_tx_payload = payload
-        self._trace("tx", frame)
-        self.ser.write(frame)
+        frames = [self._build_frame(payload) for payload in payloads]
+        self._last_tx_frame = frames[-1]
+        self._last_tx_payload = payloads[-1]
+        for frame in frames:
+            self._trace("tx", frame)
+        wire = b"".join(frames)
+        written = self.ser.write(wire)
         self.ser.flush()
+        if written != len(wire):
+            raise RingError(f"short serial write: {written}/{len(wire)} bytes")
 
     def _recv_frame(self, timeout_ms: Optional[int] = None) -> bytes:
+        if self._rx_thread is not None:
+            if self._rx_error is not None:
+                raise RingError(str(self._rx_error))
+            try:
+                return self._rx_queue.get(timeout=(timeout_ms or self.timeout_ms) / 1000.0)
+            except queue.Empty:
+                raise RingTimeout("timeout waiting for frame from serial receiver") from None
         assert self.ser is not None
         timeout_s = (timeout_ms or self.timeout_ms) / 1000.0
         deadline = time.monotonic() + timeout_s
@@ -766,6 +809,150 @@ class RingClientV2:
                     phase = scan_0
                     buf.clear()
                     expected = 0
+
+    def start_receiver(self) -> None:
+        """Called under the owner's transaction lock; this becomes the sole reader."""
+        if self._rx_thread is not None:
+            return
+        self._rx_stop.clear()
+        self._rx_error = None
+        self._rx_thread = threading.Thread(target=self._receive_loop,
+                                           name=f"ring-rx-{self.port}", daemon=True)
+        self._rx_thread.start()
+
+    def strike_async(self, address: int, current_ma: int, callback) -> int:
+        """Single-note wrapper around the shared playback batch sender."""
+        ids = self.send_playback([(address, current_ma)],
+            lambda address, ack, rtt, error: callback(ack, rtt, error))
+        return ids[0]
+
+    def send_playback(self, strikes, callback=None):
+        """Transmit farthest-first in one write, without waiting for any reply.
+
+        callback(address, ack, rtt_us, error) enables tagged feedback. Without
+        it, preserve the proven no-reply chord wire format and RX drain.
+        """
+        items = list(strikes)
+        if not items:
+            return []
+        if len({address for address, _ in items}) != len(items):
+            raise RingError("playback batch requires unique addresses")
+        for address, current in items:
+            self._check_address(address)
+            if not -32768 <= current <= 32767:
+                raise RingError("strike current must fit in int16")
+        if callback is not None:
+            self.start_receiver()
+        if self._rx_error is not None:
+            raise RingError(str(self._rx_error))
+        ids = []
+        payloads = []
+        registered = []
+        with self._pending_lock:
+            if callback is not None and len(self._pending) + len(items) > 1024:
+                raise RingError("too many outstanding strike acknowledgements")
+            for address, current in sorted(items, reverse=True):
+                data = struct.pack(">h", current)
+                mode = REPLY_MODE_NONE
+                if callback is not None:
+                    command_id = self._next_command_id
+                    self._next_command_id = (command_id + 1) & 0xffffffff
+                    key = (address, command_id)
+                    if key in self._pending:
+                        raise RingError("command ID still outstanding")
+                    completion = lambda ack, rtt, error, a=address: callback(a, ack, rtt, error)
+                    self._pending[key] = (time.monotonic(), completion)
+                    registered.append(key)
+                    ids.append(command_id)
+                    data += struct.pack(">I", command_id)
+                    mode = REPLY_MODE_ACK_TIMED
+                payloads.append(self._build_addressed_payload(address, SUBCMD_STRIKE, data, mode))
+        try:
+            if callback is None:
+                self._discard_rx_available()
+            self._send_frames(payloads)
+        except Exception:
+            with self._pending_lock:
+                for key in registered:
+                    self._pending.pop(key, None)
+            raise
+        return ids
+
+    @staticmethod
+    def _deliver_async(callback, ack, rtt_us, error):
+        try:
+            callback(ack, rtt_us, error)
+        except Exception:
+            # A telemetry consumer must not terminate the serial receiver.
+            import traceback
+            traceback.print_exc()
+
+    def _expire_async(self, error=None):
+        now = time.monotonic()
+        with self._pending_lock:
+            expired = [key for key, (sent, _) in self._pending.items()
+                       if error is not None or now - sent >= self.timeout_ms / 1000.0]
+            callbacks = [self._pending.pop(key)[1] for key in expired]
+        for callback in callbacks:
+            self._deliver_async(callback, None, None,
+                error or RingTimeout("timed out waiting for tagged strike ACK"))
+
+    def _route_received(self, payload):
+        if (len(payload) == 23 and CMD_ACK_BASE <= payload[0] < CMD_ACK_END
+                and payload[1] & SUBCMD_MASK == SUBCMD_STRIKE):
+            ack = self._parse_ack_payload(payload[0] & 0x0f, SUBCMD_STRIKE, payload)
+            with self._pending_lock:
+                pending = self._pending.pop((ack.address, ack.command_id), None)
+            if pending is not None:
+                sent, callback = pending
+                self._deliver_async(callback, ack, (time.monotonic() - sent) * 1e6, None)
+            return  # Late/duplicate tagged ACKs cannot satisfy synchronous requests.
+        # Command echoes are not replies; keep them out of the idle queue.
+        if payload and CMD_ADDR_BASE <= payload[0] < CMD_ADDR_END:
+            return
+        try:
+            self._rx_queue.put_nowait(payload)
+        except queue.Full:
+            # Bound unsolicited traffic; foreground callers will detect missing replies.
+            try:
+                self._rx_queue.get_nowait()
+            except queue.Empty:
+                pass
+            self._rx_queue.put_nowait(payload)
+
+    def _receive_loop(self):
+        buf = bytearray()
+        try:
+            while not self._rx_stop.is_set():
+                buf.extend(self.ser.read(max(1, min(self.ser.in_waiting, 4096))))
+                while len(buf) >= 3:
+                    start = buf.find(PREAMBLE)
+                    if start < 0:
+                        buf[:] = buf[-1:] if buf[-1] == PREAMBLE[0] else b""
+                        break
+                    if start:
+                        del buf[:start]
+                    if len(buf) < 3:
+                        break
+                    length = buf[2]
+                    if not 0 < length <= MAX_PAYLOAD:
+                        del buf[0]
+                        continue
+                    size = length + 5
+                    if len(buf) < size:
+                        break
+                    frame = bytes(buf[:size])
+                    if crc16_ccitt(frame[2:-2]) != struct.unpack(">H", frame[-2:])[0]:
+                        self._trace("rx-crc-fail", frame)
+                        del buf[0]
+                        continue
+                    del buf[:size]
+                    self._trace("rx", frame)
+                    self._route_received(frame[3:-2])
+                self._expire_async()
+        except Exception as exc:
+            self._rx_error = exc
+            self._expire_async(exc)
 
     def _trace(self, label: str, data: bytes) -> None:
         if self.trace:
@@ -924,7 +1111,7 @@ class RingClientV2:
 
     @staticmethod
     def _parse_ack_payload(address: int, subcmd: int, payload: bytes) -> Optional[CommandAck]:
-        if len(payload) not in (5, 17):
+        if len(payload) not in (5, 17, 19, 23):
             return None
         if payload[0] != (CMD_ACK_BASE | address):
             return None
@@ -932,14 +1119,15 @@ class RingClientV2:
         if payload_subcmd != (subcmd & SUBCMD_MASK):
             return None
         metrics = None
-        if len(payload) == 17:
-            metrics = _parse_strike_timing_payload(address, payload[5:17])
+        if len(payload) >= 17:
+            metrics = _parse_strike_timing_payload(address, payload[5:19] if len(payload) >= 19 else payload[5:17])
         return CommandAck(
             address=address,
             subcmd=payload_subcmd,
             result=payload[2],
             detail=struct.unpack(">H", payload[3:5])[0],
             metrics=metrics,
+            command_id=struct.unpack(">I", payload[19:23])[0] if len(payload) == 23 else None,
         )
 
     def _addressed_command(
@@ -960,10 +1148,8 @@ class RingClientV2:
         encoded_reply_mode = self._encode_reply_mode(reply_mode)
         if encoded_reply_mode == SUBCMD_REPLY_NONE:
             return None
-        # Both ACK and ACK_TIMED come back as type 0x50+addr — they only
-        # differ in payload length (5 vs 17). _recv_ack_reply already
-        # handles both lengths and attaches the piggyback metrics from the
-        # 17-byte form.
+        # ACK and ACK_TIMED share type 0x50+addr. The parser accepts legacy
+        # timing reports and the extended current/tag forms.
         if encoded_reply_mode == SUBCMD_REPLY_ACK or encoded_reply_mode == SUBCMD_REPLY_ACK_TIMED:
             return self._recv_ack_reply(address, subcmd)
         return self._recv_status_reply(address)
@@ -1122,6 +1308,9 @@ class RingClientV2:
         items = [(int(address), int(current_ma)) for address, current_ma in strikes]
         if not items:
             return []
+        if reply_mode == REPLY_MODE_NONE:
+            self.send_playback(items)
+            return [None] * len(items)
         addresses = [address for address, _ in items]
         if len(set(addresses)) != len(addresses):
             raise RingError("strike burst requires unique addresses")
@@ -1148,28 +1337,11 @@ class RingClientV2:
             )
             frames.append((original_index, address, payload, self._build_frame(payload)))
 
-        # Fire-and-forget playback must not wait for the complete command echo
-        # to circle back before the next musical deadline. Drain only bytes
-        # already present; acknowledged transactions retain the stronger
-        # idle-boundary flush before reply matching.
-        if encoded_reply_mode == SUBCMD_REPLY_NONE:
-            self._discard_rx_available()
-        else:
-            self._flush_rx()
-        wire = b"".join(frame for _, _, _, frame in frames)
-        for _, _, _, frame in frames:
-            self._trace("tx-burst", frame)
-        written = self.ser.write(wire)
-        self.ser.flush()
-        if written != len(wire):
-            raise RingError(f"short serial burst write: {written}/{len(wire)} bytes")
-        self._last_tx_payload = frames[-1][2]
-        self._last_tx_frame = frames[-1][3]
+        # Synchronous callers retain reply collection after the complete batch.
+        self._flush_rx()
+        self._send_frames([payload for _, _, payload, _ in frames])
 
         results: list[Optional[CommandAck]] = [None] * len(items)
-        if encoded_reply_mode == SUBCMD_REPLY_NONE:
-            return results
-
         index_by_address = {address: original_index for original_index, address, _, _ in frames}
         pending = set(index_by_address)
         deadline = time.monotonic() + self.timeout_ms / 1000.0
@@ -1255,9 +1427,7 @@ class RingClientV2:
             self._trace("skip", payload)
 
     def query_strike_timing(self, address: int) -> StrikeTiming:
-        """Compact 13-byte poll of the last completed strike's metrics. ~70%
-        less wire traffic than ``query_strike``; useful for harvesting timing
-        without paying for the full strike-status payload."""
+        """Poll the completed-strike snapshot (15 bytes; legacy 13 accepted)."""
         self._check_address(address)
         self._flush_rx()
         self._send_frame(self._build_addressed_payload(address, SUBCMD_QUERY_STRIKE_TIMING))
@@ -1271,18 +1441,18 @@ class RingClientV2:
                 raise RingTimeout(_format_timeout_context(
                     f"timeout waiting for strike timing addr={address} "
                     f"expected_cmd=0x{expected_cmd:02X}({_cmd_name(expected_cmd)}) "
-                    f"expected_len=13",
+                    f"expected_len=13/15",
                     skipped,
                     exc,
                 )) from exc
             cmd = payload[0] if payload else 0
-            if cmd == expected_cmd and len(payload) == 13:
-                return _parse_strike_timing_payload(address, payload[1:13])
+            if cmd == expected_cmd and len(payload) in (13, 15):
+                return _parse_strike_timing_payload(address, payload[1:])
             if cmd == expected_cmd:
                 self._print_unexpected_reply(
                     f"expected strike timing reply addr={address} "
                     f"expected_cmd=0x{expected_cmd:02X}({_cmd_name(expected_cmd)}) "
-                    f"expected_len=13",
+                    f"expected_len=13/15",
                     payload,
                 )
             _remember_event(skipped, payload)

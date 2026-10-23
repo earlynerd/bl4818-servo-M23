@@ -15,7 +15,7 @@ from urllib.error import HTTPError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from ring_bus import CommandAck, RingTimeout, REPLY_MODE_NONE
+from ring_bus import StrikeTiming, CommandAck, RingTimeout, REPLY_MODE_NONE
 from ring_fleet import RingFleet, parse_ring_specs
 from ring_midi_server import Bridge, Player, Handler, FirmwareUpdateManager
 from firmware_image import prepare_image, image_metadata
@@ -52,6 +52,16 @@ class SerialRing:
         if self.on_strike:
             self.on_strike()
         return CommandAck(address, 0, 0, 0)
+
+    def query_strike_timing(self, address):
+        return StrikeTiming(address, 0, 0, None, None, None, None, 0)
+
+    def start_receiver(self):
+        pass
+
+    def strike_async(self, address, current_ma, callback):
+        ack = self.strike(address, current_ma, "ack-timed")
+        callback(ack, 1000, None)
 
     def strike_burst(self, pairs, reply_mode):
         self.calls.append(("chord", list(pairs), reply_mode))

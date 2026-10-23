@@ -109,6 +109,7 @@ from ring_bus import (
     DEFAULT_BAUD,
     REPLY_MODE_ACK,
     REPLY_MODE_ACK_TIMED,
+    STRIKE_TIMING_DEAD,
     REPLY_MODE_NONE,
     STRIKE_PARAM_HOME_OFFSET,
     STRIKE_PARAM_COAST_DISTANCE,
@@ -364,6 +365,10 @@ class Bridge:
         # on strike replies and by explicit /api/strike-timing polls. Each
         # entry is the dict shape produced by _strike_timing_to_dict.
         self.strike_timing: dict[int, dict] = {}
+        self._timing_lock = threading.RLock()
+        self._learned_timing: dict[int, int] = {}
+        self._async_supported: dict[int, bool] = {}
+        self._timing_generation = 0
         # Latency EMA used by motif playback for trigger-to-impact compensation.
         # Fed by every strike that goes through this bridge (browser too), so
         # the player's arpeggio warm-up also warms the bridge's table.
@@ -384,6 +389,10 @@ class Bridge:
 
     def reset_status_cache(self, count: int) -> None:
         """Discard old address identities after enumeration or firmware update."""
+        with self._timing_lock:
+            self._timing_generation += 1
+            self._learned_timing.clear()
+            self._async_supported.clear()
         with self._status_lock:
             self.count = count
             self._status_generation += 1
@@ -573,7 +582,7 @@ class Bridge:
     def strike(self, address: int, current_ma: int, strike_type: str = "normal") -> dict:
         if strike_type not in ("normal", "dead"):
             raise ValueError("strike_type must be 'normal' or 'dead'")
-        # ACK_TIMED costs 12 extra payload bytes (~480 us at 250 kbaud) and
+        # ACK_TIMED costs 14 extra payload bytes (~560 us at 250 kbaud) and
         # replaces the otherwise-needed query_strike round trip. Net: less
         # ring traffic per strike, plus the host gets timing for free.
         # Stamps below let the browser decompose total beat error into
@@ -608,13 +617,51 @@ class Bridge:
                 else:
                     self.latency.record_accepted(address, current_ma)
         self.health.record_ok(address, (t_post_ack - t_lock) * 1_000_000)
-        self._fold_metrics_into_ema(address, prev_current, result.get("metrics"))
+        result["metrics_fresh"] = self._fold_metrics_into_ema(address, prev_current, result.get("metrics"))
         result["server_timing_us"] = {
             "lock_wait": int((t_lock - t_recv) * 1_000_000),
             "serial_rtt": int((t_post_ack - t_lock) * 1_000_000),
             "handler_total": int((time.monotonic() - t_recv) * 1_000_000),
         }
         return result
+
+    def prepare_playback(self, addresses) -> None:
+        """Probe once per enumeration, before starting the musical clock."""
+        with self.lock:
+            for address in sorted(set(addresses)):
+                if address not in self._async_supported:
+                    timing = self.client.query_strike_timing(address)
+                    supported = timing.strike_current_ma is not None
+                    self._async_supported[address] = supported
+                    if not supported:
+                        print(f"{self.client.port} address {address}: legacy timing firmware; "
+                              "single notes retain synchronous ACKs until firmware is updated")
+            if any(self._async_supported.values()):
+                self.client.start_receiver()
+
+    def strike_playback(self, address: int, current_ma: int, completion) -> None:
+        """Only transmission holds the bus lock; ACKs never gate the next note."""
+        generation = self._timing_generation
+        def received(ack, rtt_us, error):
+            if error is not None:
+                self._record_bus_exc(address, error)
+                completion(None)
+                return
+            with self._timing_lock:
+                if generation != self._timing_generation:
+                    result = None
+                else:
+                    result = self._ack_to_dict(address, ack, cache_metrics=True)
+                    result["metrics_fresh"] = self._fold_metrics_into_ema(address, None, result.get("metrics"))
+                    self.health.record_ok(address, rtt_us)
+                    result["server_timing_us"] = {"serial_rtt": rtt_us}
+            completion(result)
+
+        if not self._async_supported.get(address, False):
+            completion(self.strike(address, current_ma))
+            return
+        with self.lock:
+            self.client.strike_async(address, current_ma, received)
 
     def strike_burst(self, items: list[dict]) -> list[dict]:
         """Fire a same-deadline chord in one far-to-near serial burst.
@@ -671,7 +718,7 @@ class Bridge:
 
         Playback cannot use replies as flow control: a missing chord ACK used
         to stall the absolute-time scheduler for up to the serial timeout.
-        Manual and isolated playback strikes keep their timed ACK path.
+        Manual strikes wait for timed ACKs; playback singles collect them asynchronously.
         """
         if not items:
             return []
@@ -738,17 +785,25 @@ class Bridge:
         return results
 
     def _fold_metrics_into_ema(self, address: int, prev_current: int | None,
-                                metrics: dict | None) -> None:
-        """Attribute incoming impact-time metrics to the prior strike's current
-        bucket. Skips if we have no record of the prior strike yet (first
-        strike on this slot since bridge launch) or if the impact flag was
-        invalid (in which case the bridge already nulled the field)."""
-        if metrics is None or prev_current is None:
-            return
-        impact = metrics.get("trigger_to_impact_ms")
-        if impact is None:
-            return
-        self.latency.update(address, prev_current, float(impact))
+                               metrics: dict | None) -> bool:
+        """New reports carry their own current; old synchronous reports retain fallback."""
+        if not metrics or metrics.get("trigger_to_impact_ms") is None:
+            return False
+        if metrics["flags"] & STRIKE_TIMING_DEAD:
+            return False
+        current = metrics.get("strike_current_ma")
+        if current is None:
+            current = prev_current
+        if current is None:
+            return False
+        # Serialize deduplication and learning across manual requests and RX.
+        # Sequence zero is valid after uint16 wrap if the snapshot has valid data.
+        with self._timing_lock:
+            if self._learned_timing.get(address) == metrics["sequence"]:
+                return False
+            self._learned_timing[address] = metrics["sequence"]
+            self.latency.update(address, abs(current), float(metrics["trigger_to_impact_ms"]))
+        return True
 
     def query_strike_timing(self, address: int) -> dict:
         """Compact poll. Use this to harvest the very last strike's timing
@@ -759,6 +814,7 @@ class Bridge:
         snap = self._strike_timing_to_dict(timing)
         if snap is not None:
             self.strike_timing[address] = snap
+            self._fold_metrics_into_ema(address, None, snap)
         return snap or {"address": address, "sequence": 0, "flags": 0}
 
     def set_strike_param(self, address: int, param_id: int, value: int) -> dict:
@@ -1000,6 +1056,7 @@ class Bridge:
                 "result": reply.result,
                 "result_name": reply.result_name,
                 "detail": reply.detail,
+                "command_id": reply.command_id,
             }
             metrics_dict = self._strike_timing_to_dict(reply.metrics)
             if metrics_dict is not None:
@@ -1026,6 +1083,7 @@ class Bridge:
         return {
             "address": timing.address,
             "sequence": timing.sequence,
+            "strike_current_ma": timing.strike_current_ma,
             "flags": timing.flags,
             "trigger_to_coast_ms": timing.trigger_to_coast_ms,
             "trigger_to_impact_ms": timing.trigger_to_impact_ms,
@@ -1150,6 +1208,7 @@ class Player:
         # we hold the prediction we made for THIS strike here, and pair
         # it with the NEXT strike's returned metric.
         self._last_prediction_ms: dict[int, float] = {}
+        self._sequence_predictions: dict[tuple[int, int], float] = {}
 
     @staticmethod
     def _new_stats_bag() -> dict:
@@ -1161,6 +1220,7 @@ class Player:
             "attempted": 0,
             "accepted": 0,
             "unacknowledged": 0,
+            "pending": 0,
             "rejected": 0,
             "transport_failed": 0,
             "muted": 0,
@@ -1288,7 +1348,10 @@ class Player:
             if hasattr(self.bridge, "validate_playback"):
                 self.bridge.validate_playback()
             self._stop_and_join()
+            if hasattr(self.bridge, "prepare_playback"):
+                self.bridge.prepare_playback(ev["address"] for ev in resolved)
             with self._control_lock:
+                self._sequence_predictions.clear()
                 self._stop_event = threading.Event()
                 self._master_scale = 1.0
                 self._muted = set()
@@ -1353,6 +1416,8 @@ class Player:
             if self._thread is thread:
                 self._thread = None
                 self._id = None
+                self._dispatch_stats["unacknowledged"] += self._dispatch_stats["pending"]
+                self._dispatch_stats["pending"] = 0
 
     def _is_current_play(self, stop: threading.Event, play_id: str) -> bool:
         with self._control_lock:
@@ -1379,6 +1444,49 @@ class Player:
                 reason = str(result.get("result_name") or "REJECTED")
             reasons = self._dispatch_stats["reasons"]
             reasons[reason] = int(reasons.get(reason, 0)) + 1
+
+    def _single_completion(self, play_id, address, prediction):
+        once = threading.Lock()
+        completed = False
+        def finish(result):
+            nonlocal completed
+            with once:
+                if completed:
+                    return
+                completed = True
+            self._single_feedback(play_id, address, prediction, result)
+        return finish
+
+    def _single_feedback(self, play_id, address, prediction, result):
+        with self._control_lock:
+            if self._id != play_id:
+                return
+            self._dispatch_stats["pending"] -= 1
+            if result is None:
+                self._dispatch_stats["transport_failed"] += 1
+                reason = "TRANSPORT"
+            elif result.get("accepted"):
+                self._dispatch_stats["accepted"] += 1
+                reason = None
+            else:
+                self._dispatch_stats["rejected"] += 1
+                reason = result.get("result_name", "REJECTED")
+            if reason is not None:
+                reasons = self._dispatch_stats["reasons"]
+                reasons[reason] = reasons.get(reason, 0) + 1
+            if result:
+                timing = result.get("metrics") or {}
+                previous = self._sequence_predictions.get((address, timing.get("sequence")))
+                if result.get("metrics_fresh") and previous is not None:
+                    self._fold_stat(self.residual_stats.setdefault(address, self._new_stats_bag()),
+                                    timing["trigger_to_impact_ms"] - previous)
+                if result.get("accepted"):
+                    self._sequence_predictions[(address, result["detail"])] = prediction
+                    while len(self._sequence_predictions) > 1024:
+                        del self._sequence_predictions[next(iter(self._sequence_predictions))]
+                rtt = result.get("server_timing_us", {}).get("serial_rtt")
+                if rtt is not None:
+                    self._fold_stat(self.timing_stats["serial_rtt_ms"], rtt / 1000.0)
 
     def _fold_dispatch_metrics(self, address: int, result: dict,
                                previous_prediction_ms: float | None) -> None:
@@ -1513,7 +1621,19 @@ class Player:
                     results = self.bridge.strike_chord(active)
                 else:
                     item = active[0]
-                    results = [self.bridge.strike(item["address"], item["current_ma"])]
+                    addr = item["address"]
+                    prediction = current_predictions[addr]
+                    with self._control_lock:
+                        self._dispatch_stats["attempted"] += 1
+                        self._dispatch_stats["pending"] += 1
+                    # Register accounting before TX: a fast ACK can arrive before write returns.
+                    callback = self._single_completion(play_id, addr, prediction)
+                    try:
+                        self.bridge.strike_playback(addr, item["current_ma"], callback)
+                    except Exception:
+                        callback(None)
+                        traceback.print_exc()
+                    continue
             except Exception:
                 traceback.print_exc()
                 for item in active:

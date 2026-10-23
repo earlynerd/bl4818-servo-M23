@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from ring_bus import CommandAck, RingTimeout, ACK_RESULT_OK, SUBCMD_STRIKE
+from ring_bus import StrikeTiming, CommandAck, RingTimeout, ACK_RESULT_OK, SUBCMD_STRIKE
 from ring_midi_server import Bridge, BusLock, Player
 
 
@@ -31,6 +31,12 @@ class StatusClient:
             self.on_query(address)
         return SimpleNamespace(homed=self.homed, home_shift_warning=False,
                                home_offset=1024, coast_distance=300, homing_duty=100)
+
+    def query_strike_timing(self, address):
+        return StrikeTiming(address, 0, 0, None, None, None, None, 0)
+
+    def start_receiver(self):
+        pass
 
     def query_status(self, address):
         self.calls.append(("motor", address))

@@ -346,3 +346,11 @@ When a decision is reversed or superseded, append a new entry rather than rewrit
 - **Why:** The COM29/COM48 trial reduced median transaction RTT from roughly 16 ms to 6 ms, and the user reported that previously difficult fast passages now play cleanly. Persisted adapter settings should not silently regress after replacement or driver setup.
 - **Supersedes:** Unchecked FTDI driver defaults at MIDI server startup.
 - **Affects:** MIDI server startup, `scripts/serial_latency.py`, and `docs/host-software.md`. This verifies saved configuration, not live latency or acoustic synchronization.
+
+
+## 2026-10-11 — Self-contained strike timing and asynchronous single-note feedback
+
+- **Decision:** Append completed-strike current to timing reports; tag playback singles with an echoed host ID. One serial receiver routes feedback independently of transmission. Singles and chords share a farthest-first batch sender; chords retain their no-reply format. Probe capabilities before playback starts and retain synchronous singles on legacy firmware.
+- **Why:** Current/lag pairs belong together in firmware. Reply delays must not stall rapid singles, while the physically validated chord transmission behavior is preserved. IDs serve RTT and acceptance accounting, not current-bin attribution.
+- **Supersedes:** The isolated-note ACK-wait behavior in “Playback chords are MIDI-time groups and do not wait for replies.”
+- **Affects:** `src/protocol.c`, ring client/bridge/fleet, player telemetry, `protocol.md`, and host/API documentation. Requires host-first deployment followed by firmware update; physical validation remains pending.

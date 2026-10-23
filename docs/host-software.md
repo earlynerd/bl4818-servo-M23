@@ -479,9 +479,22 @@ documented in `midi_server_api.md`.
 During MIDI playback, only events with the same requested impact time are
 treated as a chord. Chord commands are pipelined farthest-address first with
 firmware replies suppressed, preventing a missing reply from blocking later
-notes. Isolated notes retain timed acknowledgments. The browser follows the
+notes. Singles use that same batch sender with tagged timed acknowledgments
+collected by one receiver thread per port. Their replies and timeouts do not
+block the next scheduled transmission. Chords retain their proven no-reply wire
+format. The browser follows the
 server's playback state through completion and never cancels a song merely
 because its nominal wall-clock duration elapsed.
+
+The new firmware reports completed-strike current alongside its lag, so the host
+bins measurements directly and skips duplicate sequences and muted strikes.
+Update the host before the actuator firmware. Before starting the musical clock,
+a timing-poll capability check selects asynchronous singles for updated actuators;
+legacy actuators retain synchronous singles and produce a server warning. This
+capability cache resets after enumeration or firmware updates. The upgrade is
+covered by simulated-wire tests and an ARM build; audible playback validation
+of this upgrade remains pending. It does not synchronize device clocks or queue
+future strike deadlines in firmware.
 
 Status refreshes and bus-health probes yield to playback on the server, even
 when requested from another browser or an integration. During playback they

@@ -640,8 +640,9 @@
         <div><div style="font-size:10px;color:var(--text-dim);text-transform:uppercase">coast</div><div id="cfgTimingCoast" style="color:var(--accent)">—</div></div>
         <div><div style="font-size:10px;color:var(--text-dim);text-transform:uppercase">impact</div><div id="cfgTimingImpact" style="color:var(--accent-bright)">—</div></div>
         <div><div style="font-size:10px;color:var(--text-dim);text-transform:uppercase">rebound</div><div id="cfgTimingRebound" style="color:var(--accent)">—</div></div>
-        <div><div style="font-size:10px;color:var(--text-dim);text-transform:uppercase">peak vel</div><div id="cfgTimingVel" style="color:var(--accent)">—</div></div>
+        <div title="Raw encoder speed over the last sample before contact (the filtered peak approach speed when no contact was seen)"><div style="font-size:10px;color:var(--text-dim);text-transform:uppercase">impact vel</div><div id="cfgTimingVel" style="color:var(--accent)">—</div></div>
       </div>
+      <div id="cfgTimingFlags" style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-muted)" title="How the last strike ended. Lift: rebound = raw-encoder rebound; stalled = the mallet stopped (resting on the surface or short of it) and was lifted after 10 ms; timeout = 500 ms coast timeout. No contact = the approach never reached the contact point (a missed note, or the drum moved closer than the learned surface: re-home). Retriggered strikes are not used for latency learning.">—</div>
       <div style="display:flex;align-items:baseline;justify-content:space-between;margin-top:4px">
         <span style="font-size:10px;color:var(--text-dim);text-transform:uppercase;letter-spacing:1.2px">Compensation</span>
         <span id="cfgCompApplied" style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--accent)">— ms</span>
@@ -2064,21 +2065,33 @@ function refreshCfgTiming() {
   document.getElementById("cfgPipeServer").textContent = fmtUnsigned(ps.serverTotal);
   document.getElementById("cfgPipeLock").textContent   = fmtUnsigned(pickUnsigned(ps.lockWait, serverLock));
   document.getElementById("cfgPipeSerial").textContent = fmtUnsigned(pickUnsigned(ps.serialRtt, serverSerial));
+  const flagsEl = document.getElementById("cfgTimingFlags");
   if (!t) {
     seqEl.textContent = "no data yet";
     document.getElementById("cfgTimingCoast").textContent = "—";
     document.getElementById("cfgTimingImpact").textContent = "—";
     document.getElementById("cfgTimingRebound").textContent = "—";
     document.getElementById("cfgTimingVel").textContent = "—";
+    flagsEl.textContent = "—";
+    flagsEl.style.color = "var(--text-muted)";
     return;
   }
   seqEl.textContent = `seq #${t.sequence}`;
   document.getElementById("cfgTimingCoast").textContent = fmt(t.trigger_to_coast_ms);
-  document.getElementById("cfgTimingImpact").textContent = fmt(t.trigger_to_impact_ms);
-  const reboundLabel = fmt(t.trigger_to_rebound_ms);
-  document.getElementById("cfgTimingRebound").textContent =
-    t.rebound_timeout ? `${reboundLabel}*` : reboundLabel;
+  const impact = impactMs(t);
+  document.getElementById("cfgTimingImpact").textContent = impact === null ? "—"
+    : Number.isFinite(t.trigger_to_impact_ms_precise) ? `${impact.toFixed(1)} ms` : `${impact} ms`;
+  document.getElementById("cfgTimingRebound").textContent = fmt(t.trigger_to_rebound_ms);
   document.getElementById("cfgTimingVel").textContent = fmtVel(t.estimated_strike_velocity_dps);
+  const notes = [];
+  if (t.flags & STRIKE_TIMING_DEAD) notes.push("dead strike");
+  else if (Number.isFinite(t.trigger_to_rebound_ms)) {
+    notes.push(t.stalled ? "lift: stalled" : t.rebound_timeout ? "lift: timeout" : "lift: rebound");
+  }
+  if (t.no_contact) notes.push("no contact");
+  if (t.retriggered) notes.push("retriggered (not learned)");
+  flagsEl.textContent = notes.length ? notes.join(" · ") : "—";
+  flagsEl.style.color = t.no_contact ? "var(--error)" : "var(--text-muted)";
 }
 async function applyStrikeParam(param, value) {
   const status = document.getElementById("cfgStatus");

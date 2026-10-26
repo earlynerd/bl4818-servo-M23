@@ -377,3 +377,11 @@ When a decision is reversed or superseded, append a new entry rather than rewrit
 - **Why:** The server learns from every strike, including songs it dispatches itself. Each browser page learned only from strikes it sent, so after playing songs the popup read "default (0/29 bins)" and its Residual and Last Strike rows read "no data yet", even though the server had hundreds of samples per actuator, with mean residuals within about ±0.4 ms on all but one actuator.
 - **Supersedes:** browser-local latency learning and residuals as the source for the popup and the looper's schedule. The 2026-05-29 entry used the server's residuals only while a song played and kept the compensation row browser-local.
 - **Affects:** `scripts/ring_midi_server.py` (`LatencyTracker.snapshot`, route), `scripts/ring_fleet.py` (`FleetLatency.snapshot`), `player/midi_player.html`, `player/looper.html`, `midi_server_api.md`, tests.
+
+## 2026-10-25 — Per-mallet trim is a live playback tweak
+
+- **Decision:** `POST /api/play/update` accepts `trim_scale` (`{address: new trim / schedule trim}`), merged per address and reset by each `/api/play`. The playback worker multiplies it into that address's nominal current, alongside the master scale. During playback, the browser sends the ratio for any trim change from the mapping table or the piano-roll trim bar.
+- **Why:** Tuning relative note volume took one song per adjustment, because trims were baked into the schedule at play start. Only master current and mute were live.
+- **Accepted tradeoff:** As with the master slider, trigger times stay as planned from the schedule-start currents. A large live trim change shifts that mallet's impact by a few ms until the next play re-plans it.
+- **Supersedes:** "per-slot trim … frozen at schedule build" in the 2026-05-28 entry's accepted tradeoffs.
+- **Affects:** `scripts/ring_midi_server.py`, `player/midi_player.html`, `midi_server_api.md`, `docs/host-software.md`, tests.

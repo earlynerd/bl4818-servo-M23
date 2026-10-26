@@ -487,7 +487,7 @@ play-time (`name`, `master_current_ma`, `vel_floor` from pitch-style;
 
 - `cursor` is the index of the next event the worker will dispatch.
   `cursor == scheduled` once playback finishes.
-- `master_scale` and `muted` reflect any live tweaks from
+- `master_scale`, `muted` and `trim_scale` reflect any live tweaks from
   `/api/play/update`. They reset on each `/api/play`.
 - `dispatch_stats` is retained after the worker finishes so the final idle
   poll can report accepted firmware ACKs, intentionally unacknowledged chord
@@ -533,7 +533,7 @@ Stop the in-flight playback worker. Does NOT disable motors (use
 
 ### `POST /api/play/update`
 
-Apply live tweaks to in-flight playback. Both fields are optional and
+Apply live tweaks to in-flight playback. All fields are optional and
 independent. Takes effect on the next strike.
 
 **Request body:**
@@ -561,10 +561,11 @@ let the server divide:
 | `master_ma`           | number      | New master mA. Combined with `schedule_master_ma` → ratio                      |
 | `schedule_master_ma`  | number      | Original master used when computing the schedule's nominal currents            |
 | `muted`               | int[]       | Addresses to skip until the next update. `[]` clears the mute set              |
+| `trim_scale`          | object      | `{address: ratio}`, new trim / trim baked into the schedule; merges, 0–10      |
 
 **Response (200):** echoes the new state. Example:
 ```json
-{"ok": true, "master_scale": 1.25, "muted": [3, 7]}
+{"ok": true, "master_scale": 1.25, "muted": [3, 7], "trim_scale": {"3": 0.9}}
 ```
 
 ### `POST /api/cancel`

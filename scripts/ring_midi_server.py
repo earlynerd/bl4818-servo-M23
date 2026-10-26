@@ -62,10 +62,12 @@ POST /api/play                -> Start scheduled playback. Accepts two event sha
                                  Preempts any in-flight playback when its worker exits cleanly.
 POST /api/play/stop           -> stop in-flight playback (does NOT disable motors).
 POST /api/play/update         -> {"master_scale": float?, "master_ma": int?,
-                                  "schedule_master_ma": int?, "muted": [int]?};
+                                  "schedule_master_ma": int?, "muted": [int]?,
+                                  "trim_scale": {addr: float}?};
                                  live tweaks. master_scale wins if set; otherwise
-                                 master_ma/schedule_master_ma form the ratio. Applied
-                                 to the next strike.
+                                 master_ma/schedule_master_ma form the ratio.
+                                 trim_scale entries multiply one address's notes
+                                 (new trim / schedule trim). Applied to the next strike.
 GET  /api/firmware            -> build/update state and frozen image metadata
 POST /api/firmware/build      -> {"image_version": uint32}; build server checkout
 POST /api/firmware/update     -> {"confirm": true, "expected_crc32": uint32,
@@ -1237,6 +1239,7 @@ class Player:
         self._thread: threading.Thread | None = None
         # Mutable per-play state. Reset on each play().
         self._master_scale = 1.0
+        self._trim_scale: dict[int, float] = {}
         self._muted: set[int] = set()
         self._started_monotonic = 0.0
         self._cursor = 0
@@ -1333,6 +1336,7 @@ class Player:
                     "elapsed_ms": None,
                     "remaining_ms": None,
                     "master_scale": self._master_scale,
+                    "trim_scale": dict(self._trim_scale),
                     "muted": sorted(self._muted),
                     "master_current_ma": None,
                     "vel_floor": None,
@@ -1351,6 +1355,7 @@ class Player:
                 "elapsed_ms": elapsed_ms,
                 "remaining_ms": self._duration_ms - elapsed_ms,
                 "master_scale": self._master_scale,
+                "trim_scale": dict(self._trim_scale),
                 "muted": sorted(self._muted),
                 "residual_stats": residual,
                 "timing_stats": timing,
@@ -1409,6 +1414,7 @@ class Player:
                 self._sequence_predictions.clear()
                 self._stop_event = threading.Event()
                 self._master_scale = 1.0
+                self._trim_scale = {}
                 self._muted = set()
                 self._cursor = 0
                 self._total = len(resolved)
@@ -1432,11 +1438,13 @@ class Player:
         }
 
     def update(self, master_scale: float | None = None,
-               muted: list | None = None) -> dict:
-        """Apply live tweaks to in-flight playback. Both args optional and
+               muted: list | None = None,
+               trim_scale: dict | None = None) -> dict:
+        """Apply live tweaks to in-flight playback. All args optional and
         independent. Returns the post-update state for echo/debug. Tweaks
-        take effect on the next strike — the worker re-reads both values
-        at the top of each iteration."""
+        take effect on the next strike — the worker re-reads them at the top
+        of each iteration. trim_scale entries (address -> new trim / the
+        trim baked into the schedule) merge into the current set."""
         with self._control_lock:
             if master_scale is not None:
                 # Cap at 10x so an errant slider can't silently clamp every
@@ -1444,9 +1452,13 @@ class Player:
                 self._master_scale = max(0.0, min(10.0, float(master_scale)))
             if muted is not None:
                 self._muted = {int(a) for a in muted}
+            if trim_scale is not None:
+                for address, ratio in trim_scale.items():
+                    self._trim_scale[int(address)] = max(0.0, min(10.0, float(ratio)))
             return {
                 "master_scale": self._master_scale,
                 "muted": sorted(self._muted),
+                "trim_scale": dict(self._trim_scale),
             }
 
     def cancel(self) -> None:
@@ -1652,6 +1664,7 @@ class Player:
             # changes force on the next dispatched group without reordering it.
             with self._control_lock:
                 scale = self._master_scale
+                trim_scale = dict(self._trim_scale)
                 muted = set(self._muted)
                 self._cursor += len(group)
 
@@ -1663,7 +1676,8 @@ class Player:
                 live_ma = max(
                     STRIKE_MA_MIN,
                     min(STRIKE_MA_MAX,
-                        int(round(ev["nominal_current_ma"] * scale))),
+                        int(round(ev["nominal_current_ma"] * scale
+                                  * trim_scale.get(addr, 1.0)))),
                 )
                 if addr in muted or live_ma <= 0:
                     self._last_prediction_ms.pop(addr, None)
@@ -2723,9 +2737,18 @@ class Handler(BaseHTTPRequestHandler):
                 if muted is not None and not isinstance(muted, list):
                     self._json(400, {"error": "'muted' must be a list of addresses"})
                     return
+                trim_scale = data.get("trim_scale")
+                try:
+                    if trim_scale is not None:
+                        trim_scale = {int(a): float(r) for a, r in trim_scale.items()
+                                      if not isinstance(r, bool)}
+                except (AttributeError, TypeError, ValueError):
+                    self._json(400, {"error": "'trim_scale' must map addresses to numbers"})
+                    return
                 result = self.bridge.player.update(
                     master_scale=float(master_scale) if master_scale is not None else None,
                     muted=muted,
+                    trim_scale=trim_scale,
                 )
                 self._json(200, {"ok": True, **result})
                 return

@@ -437,8 +437,8 @@ trim. Click a note bar or a mapped row label to select that mallet: its notes
 stay highlighted while the others dim, and a trim bar above the roll shows the
 note, address (and ring), trim with −/+ 5% steps and a slider, the resulting
 full-velocity current, and a **strike** button to audition it. This is the same
-trim as the mapping table's slider and saves the same way. A song already
-playing keeps the trims it started with; changes apply from the next play.
+trim as the mapping table's slider and saves the same way. Trim changes from
+either place apply live to the playing song, from that mallet's next note.
 
 **Audition** plays a synthetic sine-tone excerpt on the computer only, beginning
 at that voice's first note and limited to 20 seconds of note starts or 512 notes

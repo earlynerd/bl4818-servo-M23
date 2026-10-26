@@ -862,6 +862,7 @@ const S = {
   // request a scale ratio = newMaster / scheduleMasterMa. Zero outside of
   // active playback. Reset each play().
   scheduleMasterMa: 0,
+  scheduleTrim: [],  // per-slot trims baked into the playing schedule
   // Server-reported stats cache. Populated by polling /api/play during
   // playback; the popup reads from here instead of the local stat bags
   // when S.playing is true. Same bag shape as the local equivalents.
@@ -1920,12 +1921,28 @@ function setSlotTrim(slot, pct) {
   pct = Math.max(25, Math.min(200, Math.round(pct / 5) * 5));
   S.trim[slot] = pct / 100;
   saveTrim();
+  sendLiveTrim(slot);
   const table = document.getElementById("mapTable");
   const slider = table && table.querySelector(`input[data-trim-slot="${slot}"]`);
   if (slider) slider.value = String(pct);
   const label = table && table.querySelector(`[data-trim-label="${slot}"]`);
   if (label) label.textContent = `${pct}%`;
   if (slot === S.rollTrimSlot) refreshRollTrim();
+}
+
+// During playback the schedule's currents already include the trims from play
+// start; send this mallet's new/old trim ratio so its next notes follow the
+// slider, as the master slider does. Fire-and-forget: the next tick supersedes.
+function sendLiveTrim(slot) {
+  if (!S.playing || !(S.scheduleMasterMa > 0)) return;
+  const baked = S.scheduleTrim[slot] ?? 1.0;
+  if (!(baked > 0)) return;
+  fetch(API_BASE + "/api/play/update", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ trim_scale: { [slot]: (S.trim[slot] ?? 1.0) / baked } }),
+    keepalive: true,
+  }).catch(() => {});
 }
 
 function selectRollMallet(slot) {
@@ -1954,8 +1971,7 @@ function refreshRollTrim() {
   document.getElementById("rollTrimSlider").value = String(pct);
   document.getElementById("rollTrimValue").textContent =
     `${pct}% · ${effectiveCurrentForSlot(slot)} mA at full velocity`;
-  // Trims are part of the schedule sent at play start.
-  document.getElementById("rollTrimNote").textContent = S.playing ? "applies from the next play" : "";
+  document.getElementById("rollTrimNote").textContent = S.playing ? "live" : "";
 }
 
 function bindRollTrim() {
@@ -3293,6 +3309,7 @@ async function play() {
   S.startWall = performance.now();
   S.scale = scale;
   S.scheduleMasterMa = cur;
+  S.scheduleTrim = S.trim.slice();
 
   S.playStarting = true;
   refreshTransposeControls();

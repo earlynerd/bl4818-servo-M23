@@ -254,3 +254,20 @@ test('piano roll selects a mallet and trims it in step with the mapping table', 
   assert.equal(p.node('rollTrimBar').hidden, true);
   assert.doesNotMatch(p.node('pianoGrid').innerHTML, /has-selection/);
 });
+
+test('trim changes during playback are sent live as a ratio to the scheduled trim', () => {
+  const p = page('midi_player.html');
+  p.node('mapTable').querySelector = () => null;
+  p.run(`
+    saveTrim = () => {}; sent = [];
+    fetch = (url, opts) => { sent.push([url, JSON.parse(opts.body)]); return Promise.resolve(); };
+    S.count = 2; S.trim = [1.0, 1.2];
+    setSlotTrim(1, 110);                         // not playing: nothing sent
+    S.playing = true; S.scheduleMasterMa = 800; S.scheduleTrim = [1.0, 1.2];
+    setSlotTrim(1, 90);
+  `);
+  assert.equal(p.run('sent.length'), 1);
+  assert.equal(p.run('sent[0][0]'), '/api/play/update');
+  assert.equal(p.run('Object.keys(sent[0][1].trim_scale).join()'), '1');
+  assert.ok(Math.abs(p.run('sent[0][1].trim_scale[1]') - 0.75) < 1e-9);
+});

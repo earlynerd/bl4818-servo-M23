@@ -246,6 +246,18 @@ class FleetTests(unittest.TestCase):
         self.assertIn(("strike", 9, 800), self.clients[1].calls)
         self.assertFalse(any(call[0] == "strike" for call in self.clients[0].calls))
 
+    def test_live_trim_scales_one_address_and_resets_each_play(self):
+        self.fleet.player.play([self.event(0, 400), self.event(14, 400)])
+        state = self.fleet.player.update(trim_scale={14: 1.5})
+        self.assertEqual(state["trim_scale"], {14: 1.5})
+        self.wait_playback()
+        self.assertEqual(self.clients[0].calls, [("chord", [(0, 800)], REPLY_MODE_NONE)])
+        self.assertEqual(self.clients[1].calls, [("chord", [(0, 1200)], REPLY_MODE_NONE)])
+        self.fleet.player.play([self.event(14)])
+        self.wait_playback()
+        self.assertEqual(self.fleet.player.status()["trim_scale"], {})
+        self.assertEqual(self.clients[1].calls[-1], ("strike", 0, 800))
+
     def test_stop_home_save_and_parameters_use_global_addresses(self):
         for method in [self.fleet.home, self.fleet.save_settings, self.fleet.stop]:
             result = method([0, 14, 23])
@@ -506,6 +518,8 @@ class FleetTests(unittest.TestCase):
                 {"t_ms": 0, "pitch": 60, "velocity": 80},
             ]})
             self.assertEqual(response["scheduled"], 2)
+            self.assertEqual(request("/api/play/update", {"trim_scale": {"14": 1.5}})["trim_scale"],
+                             {"14": 1.5})
             self.wait_playback()
             self.assertEqual(request("/api/play")["dispatch_stats"]["unacknowledged"], 2)
             self.assertTrue(request("/api/cancel", {})["ok"])

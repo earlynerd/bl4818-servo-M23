@@ -844,8 +844,11 @@ always be overridden later on one actuator.
 
 Groups are `velocity_pid` (`kp`, `ki`, `kd`), `velocity_ff` (`value`),
 `position_pid` (`kp`, `ki`, `kd`), `current_pi` (`kp`, `ki`), `torque_limit`
-(`value` in mA), and `strike_param` (`param`, `value`). Board-specific CS/LED
-polarity is intentionally excluded from fleet tuning.
+(`value` in mA), `current_sense` (`phase`: 0 = bus average, 1 = duty-scaled
+phase current), and `strike_param` (`param`, `value`). `GET /api/config`
+reports the selection as `current_sense_phase`. Firmware without the command
+times out on `current_sense`, so those addresses appear in `failed`.
+Board-specific CS/LED polarity is intentionally excluded from fleet tuning.
 
 ### `POST /api/stop`
 

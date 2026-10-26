@@ -39,8 +39,10 @@ static int32_t       measured_velocity;  /* signed RPM */
 static int8_t        drive_dir;          /* +1 / -1, commutation direction */
 static uint32_t      torque_limit_ma;
 static uint32_t      current_ma;
-static int32_t       current_filt_q8;    /* filtered current estimate in Q8 mA */
+static int32_t       current_filt_q8;    /* filtered shunt (bus) current in Q8 mA */
+static int32_t       duty_filt_q8;       /* |applied duty| through the same filter, Q8 */
 static uint8_t       current_filt_initialized;
+static uint8_t       phase_current_sense; /* 1 = current_ma is the duty-scaled winding current */
 static uint16_t      overcurrent_samples;
 static uint16_t      peak_overcurrent_samples;
 
@@ -280,7 +282,9 @@ void motor_init(void)
     torque_limit_ma = DEFAULT_TORQUE_LIMIT_MA;
     current_ma = 0;
     current_filt_q8 = 0;
+    duty_filt_q8 = 0;
     current_filt_initialized = 0;
+    phase_current_sense = 0;
     overcurrent_samples = 0;
     peak_overcurrent_samples = 0;
     prev_enc_position = 0;
@@ -441,6 +445,16 @@ void motor_set_torque_limit(uint32_t ma)
 uint32_t motor_get_torque_limit(void)
 {
     return torque_limit_ma;
+}
+
+void motor_set_phase_current_sense(uint8_t enable)
+{
+    phase_current_sense = enable ? 1u : 0u;
+}
+
+uint8_t motor_get_phase_current_sense(void)
+{
+    return phase_current_sense;
 }
 
 void motor_set_vel_pid(int32_t kp, int32_t ki, int32_t kd)
@@ -757,14 +771,30 @@ uint16_t motor_tick_control(void)
         adc_silent_ticks = 0u;
     }
 
-    if (!current_filt_initialized) {
-        current_filt_q8 = (int32_t)(avg_current_ma << PID_SCALE_SHIFT);
-        current_filt_initialized = 1u;
-    } else {
-        int32_t avg_current_q8 = (int32_t)(avg_current_ma << PID_SCALE_SHIFT);
-        current_filt_q8 += (avg_current_q8 - current_filt_q8) / (1 << CURRENT_FILTER_SHIFT);
+    {
+        /* The duty that was applied while this ADC window was sampled. */
+        int32_t duty_q8 = ((last_applied_duty < 0) ? -last_applied_duty : last_applied_duty)
+                          << PID_SCALE_SHIFT;
+
+        if (!current_filt_initialized) {
+            current_filt_q8 = (int32_t)(avg_current_ma << PID_SCALE_SHIFT);
+            duty_filt_q8 = duty_q8;
+            current_filt_initialized = 1u;
+        } else {
+            int32_t avg_current_q8 = (int32_t)(avg_current_ma << PID_SCALE_SHIFT);
+            current_filt_q8 += (avg_current_q8 - current_filt_q8) / (1 << CURRENT_FILTER_SHIFT);
+            duty_filt_q8 += (duty_q8 - duty_filt_q8) / (1 << CURRENT_FILTER_SHIFT);
+        }
     }
     current_ma = (uint32_t)(current_filt_q8 / PID_SCALE);
+    if (phase_current_sense) {
+        /* Low-side-only chopping: off-time current freewheels through the
+         * high side, so the averaged shunt reads winding current x duty. */
+        uint32_t duty_q8 = (duty_filt_q8 > (CURRENT_SENSE_MIN_DUTY << PID_SCALE_SHIFT))
+                           ? (uint32_t)duty_filt_q8
+                           : (uint32_t)(CURRENT_SENSE_MIN_DUTY << PID_SCALE_SHIFT);
+        current_ma = ((uint32_t)current_filt_q8 * PWM_MAX_DUTY) / duty_q8;
+    }
 
     /* Skip overcurrent faulting during intentional coast: outputs are masked,
      * and impact/rebound transients are expected while the strike is floating. */

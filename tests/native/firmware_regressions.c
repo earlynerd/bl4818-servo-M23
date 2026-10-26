@@ -52,6 +52,7 @@ void timing_note_position_drops(uint32_t dropped) { (void)dropped; }
  * encoder, with SysTick ordering of the 6 kHz control and 500 Hz strike ticks. */
 static int32_t (*sim_path)(uint32_t us);
 static uint32_t sim_start, sim_ticks;
+static uint16_t sim_shunt_ma;   /* RC-averaged shunt reading (adc stub: 1 raw = 1 mA) */
 
 void encoder_poll(void)
 {
@@ -61,7 +62,7 @@ void encoder_poll(void)
 void adc_consume_snapshot(adc_snapshot_t *snapshot)
 {
     static const uint16_t samples[3] = {3u, 3u, 4u};  /* 20 kHz PWM / 6 kHz loop */
-    snapshot->latest_current_raw = snapshot->avg_current_raw = snapshot->peak_current_raw = 0u;
+    snapshot->latest_current_raw = snapshot->avg_current_raw = snapshot->peak_current_raw = sim_shunt_ma;
     snapshot->latest_voltage_raw = snapshot->avg_voltage_raw = 0u;
     snapshot->sample_count = samples[sim_ticks % 3u];
 }
@@ -319,13 +320,56 @@ static void test_strike_contact_watch(void)
     sim_path = 0;
 }
 
+/* Low-side-only chopping: the averaged shunt reads winding current x duty.
+ * Phase sense divides that back out (floored at low duty); bus sense is the
+ * original reading. The mode survives SAVE_SETTINGS in the record flags. */
+static void test_phase_current_sense(void)
+{
+    const struct { int32_t duty; uint16_t shunt; uint32_t bus, phase; } cases[] = {
+        {300, 250u, 250u, 1000u},                                   /* 25% duty */
+        /* Below the floor (holding the light mallet) the estimate must not
+         * depend on the live duty: dividing by it amplified ADC steps into a
+         * limit cycle at any tuning (DEBUG_LOG.md 2026-10-23). */
+        {10, 20u, 20u, 20u * PWM_MAX_DUTY / CURRENT_SENSE_MIN_DUTY},
+        {100, 20u, 20u, 20u * PWM_MAX_DUTY / CURRENT_SENSE_MIN_DUTY},
+    };
+    persist_record_t record;
+
+    for (unsigned c = 0; c < sizeof(cases) / sizeof(cases[0]); ++c) {
+        for (uint8_t phase = 0u; phase <= 1u; ++phase) {
+            uint32_t expected = phase ? cases[c].phase : cases[c].bus;
+            uint32_t measured;
+            reset_runtime(1200, 0);
+            sim_ticks = 0u;
+            sim_shunt_ma = cases[c].shunt;
+            motor_set_phase_current_sense(phase);
+            motor_set_duty(cases[c].duty);
+            motor_start();
+            for (unsigned i = 0; i < 160u; ++i)
+                sim_tick();
+            measured = motor_get_current();
+            assert(motor_get_state() == MOTOR_RUN);
+            assert(measured + 2u >= expected && measured <= expected + 2u);
+
+            persist_capture_runtime(&record, 1u);
+            assert(((record.flags & PERSIST_FLAG_PHASE_CURRENT) != 0u) == (phase != 0u));
+            reset_runtime(1200, 0);
+            assert(!motor_get_phase_current_sense());
+            persist_apply_record(&record);
+            assert(motor_get_phase_current_sense() == phase);
+        }
+    }
+    sim_shunt_ma = 0u;
+}
+
 int main(void)
 {
     test_absolute_calibration();
     test_record_migration();
     test_stop_preserves_fault();
     test_strike_contact_watch();
+    test_phase_current_sense();
     puts("Firmware regressions passed: 50 reboot geometries, legacy migration, all six fault latches, "
-         "6 simulated strike paths.");
+         "6 simulated strike paths, bus/phase current sense.");
     return 0;
 }

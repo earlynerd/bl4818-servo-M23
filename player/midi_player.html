@@ -234,7 +234,8 @@
   .tuning-group { display:grid; grid-template-columns:115px 1fr auto; gap:8px; align-items:center; margin-top:9px; }
   .tuning-group label { font:10px 'JetBrains Mono',monospace; color:var(--text-muted); text-transform:uppercase; }
   .tuning-inputs { display:flex; gap:5px; }
-  .tuning-inputs input { width:76px; min-width:0; background:var(--surface-alt); border:1px solid var(--border); border-radius:3px; padding:4px 6px; color:var(--text); font:11px 'JetBrains Mono',monospace; }
+  .tuning-inputs select { width:auto; }
+  .tuning-inputs input, .tuning-inputs select { width:76px; min-width:0; background:var(--surface-alt); border:1px solid var(--border); border-radius:3px; padding:4px 6px; color:var(--text); font:11px 'JetBrains Mono',monospace; }
 </style>
 </head>
 <body>
@@ -627,6 +628,16 @@
         <label>Torque limit</label>
         <div class="tuning-inputs"><input type="number" min="0" max="65535" data-config-group="torque_limit" data-config-name="value" placeholder="mA"></div>
         <button class="pill" data-config-apply="torque_limit">Apply</button>
+      </div>
+      <div class="tuning-group" title="Bus average is the original behaviour. Phase divides the shunt average by duty, so mA means winding current (torque): strikes, mute press and the torque limit get weaker at low speed, and the current, velocity and position loops need retuning. Start with Current PI Kp and Ki about a quarter of the bus-mode values. Save Settings keeps the choice.">
+        <label>Current sense</label>
+        <div class="tuning-inputs">
+          <select data-config-group="current_sense" data-config-name="phase" aria-label="Current sense">
+            <option value="0">Bus average</option>
+            <option value="1">Phase (÷ duty)</option>
+          </select>
+        </div>
+        <button class="pill" data-config-apply="current_sense">Apply</button>
       </div>
       <div id="cfgElectrical" style="margin-top:10px;font:10px 'JetBrains Mono',monospace;color:var(--text-dim)">Electrical calibration: loading…</div>
     </details>
@@ -1902,6 +1913,7 @@ function refreshCfgModalValues() {
     position_pid: {kp:"position_kp", ki:"position_ki", kd:"position_kd"},
     current_pi: {kp:"current_kp", ki:"current_ki"},
     torque_limit: {value:"torque_limit_ma"},
+    current_sense: {phase:"current_sense_phase"},
   };
   for (const [group, fields] of Object.entries(fieldMap)) {
     for (const [name, key] of Object.entries(fields)) {

@@ -860,6 +860,7 @@ class Bridge:
             "zero_valid": config.zero_valid,
             "csn_polarity_valid": config.csn_polarity_valid,
             "strike_calibration_valid": config.strike_calibration_valid,
+            "current_sense_phase": int(config.phase_current_sense),
         })
         return result
 
@@ -898,6 +899,10 @@ class Bridge:
                     elif group == "torque_limit":
                         reply = self.client.set_torque(
                             a, values["value"], reply_mode=REPLY_MODE_ACK
+                        )
+                    elif group == "current_sense":
+                        reply = self.client.set_current_sense(
+                            a, bool(values["phase"]), reply_mode=REPLY_MODE_ACK
                         )
                     elif group == "strike_param":
                         reply = self.client.set_strike_param(
@@ -2481,6 +2486,11 @@ class Handler(BaseHTTPRequestHandler):
                         if value < 0 or value > 65535:
                             raise ValueError("value is outside uint16 range")
                         values = {"value": value}
+                    elif group == "current_sense":
+                        phase = int(data["phase"])
+                        if phase not in (0, 1):
+                            raise ValueError("phase must be 0 (bus) or 1 (phase)")
+                        values = {"phase": phase}
                     elif group == "strike_param":
                         name = str(data.get("param", ""))
                         param_id = STRIKE_PARAM_BY_NAME.get(name)

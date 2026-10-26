@@ -53,3 +53,12 @@
 - **Class:** recovery-validation
 - **Recently-touched?** yes
 - **Time to validate:** about 15 minutes of staged bench testing
+
+## 2026-10-23 — Phase current sense made the holding mallet limit-cycle and hum
+
+- **Observation:** With the new phase current-sense mode, an actuator holding its very light mallet (carbon-fibre stick, small rubber ball) against gravity showed an unstable current reading and limit-cycled audibly, whatever the current-loop tuning. Holding needs only a few percent duty.
+- **Root cause:** `src/motor.c:796` divided the filtered shunt reading by the live duty, floored at 1/32 (`include/m2003_config.h:109`). At holding duty the shunt carries duty × winding current ≈ 2–3 ADC steps of 1.22 mA, truncated and offset-clipped (`src/app_adc.c:84-87,128`), so each step became a ~40 mA jump in the estimate and the current-loop integrator hunted between levels. Above the floor, the duty divisor (`src/motor.c:786`) also lacks the board RC lag, so a duty increase first lowers the estimate.
+- **Fix:** Floor raised to 1/8 duty. Holding sits below it, where the estimate is the shunt reading × 8, independent of the live duty, with ~10 mA steps. Phase mode now reads low below 12.5% duty (bounded at 8×). Bench confirmation pending.
+- **Class:** amplified-quantization-in-derived-feedback (a controlled quantity divided by the controller's own output where the measured signal is a few LSB)
+- **Recently-touched?** yes — phase sense was added in the same session it was bench-tested.
+- **Time to fix:** about 30 minutes

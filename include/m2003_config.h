@@ -102,6 +102,14 @@
 #define CURRENT_PEAK_LIMIT_MA   4500    /* near-instant fault ceiling for real stalls / shoot-through */
 #define CURRENT_PEAK_FAULT_TIME_US 300  /* require this much peak-overlimit time before faulting */
 #define CURRENT_FILTER_SHIFT    3       /* IIR alpha = 1/(1<<N) for reported/clamped current */
+/* Phase current sense (runtime option): low-side-only chopping freewheels the
+ * off-time current through the high side, so the RC-averaged shunt reads
+ * winding current x duty. Below this floor the shunt carries only a few ADC
+ * steps (holding the light mallet needs a few percent duty), so the estimate
+ * is the shunt reading x 8 there: dividing by the live duty amplified 1.2 mA
+ * steps into ~40 mA jumps and made the hold limit-cycle at any tuning. It
+ * reads low below the floor, i.e. bus-like but bounded at 8x. */
+#define CURRENT_SENSE_MIN_DUTY  (PWM_MAX_DUTY / 8)
 #define OVERCURRENT_FAULT_TIME_MS 8     /* sustained over-limit time before faulting */
 #define CURRENT_PEAK_FAULT_SAMPLES HZ_TICKS_FROM_US(PWM_FREQ_HZ, CURRENT_PEAK_FAULT_TIME_US)
 #define OVERCURRENT_FAULT_SAMPLES HZ_TICKS_FROM_MS(PWM_FREQ_HZ, OVERCURRENT_FAULT_TIME_MS)

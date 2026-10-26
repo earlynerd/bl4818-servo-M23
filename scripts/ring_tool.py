@@ -146,6 +146,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("kp", type=int, help="Proportional gain (Q8: 256 = 1.0 duty/mA)")
     sp.add_argument("ki", type=int, help="Integral gain (Q8)")
 
+    sp = sub.add_parser("set-current-sense",
+                        help="Select shunt (bus) average or duty-scaled phase current sensing")
+    sp.add_argument("address", type=int)
+    sp.add_argument("mode", choices=["bus", "phase"])
+
     sp = sub.add_parser("set-current", help="Set current target (mA, auto-sets TORQUE mode)")
     sp.add_argument("address", type=int)
     sp.add_argument("milliamps", type=int, help="Signed int16 target current in mA")
@@ -465,6 +470,10 @@ def main() -> int:
 
         elif args.command == "set-cur-pid":
             print(format_status(retry_after_enumerate(lambda: client.set_cur_pid(args.address, args.kp, args.ki))))
+
+        elif args.command == "set-current-sense":
+            print(format_status(retry_after_enumerate(
+                lambda: client.set_current_sense(args.address, args.mode == "phase"))))
 
         elif args.command == "set-current":
             print(format_status(retry_after_enumerate(lambda: client.set_current(args.address, args.milliamps))))

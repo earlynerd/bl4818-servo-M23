@@ -100,6 +100,24 @@ sub-command ID; the top 2 bits select reply policy.
 | 0x1A | STRIKE_EX | `[type] [current_hi] [current_lo] [param_hi] [param_lo]` | 5 |
 | 0x1B | ENTER_BOOTLOADER | -- | 0 |
 | 0x1C | QUERY_CONFIG | -- | 0 |
+| 0x1D | SET_CURRENT_SENSE | `[mode]` (0 = bus average, 1 = phase) | 1 |
+
+`SET_CURRENT_SENSE` selects what every measured-current consumer sees: the
+current loop, torque limit, sustained-overcurrent fault and reported current.
+Mode 0, the default, is the RC-averaged shunt reading, i.e. supply current. The
+drive chops only the low-side FET and holds the sector's high-side FET on, so
+off-time current freewheels through the high side and never crosses the shunt:
+the averaged shunt reads winding current x duty. Mode 1 divides that back out
+using the applied duty, filtered like the current, so currents in mA are
+winding current (torque). Below 1/8 duty the shunt carries only a few ADC
+steps, so there the estimate is the shunt reading x 8: it reads low, giving
+more torque than commanded at standstill (bounded at 8x), but holding stays
+quiet. Strike, mute-press and torque
+limit values therefore mean less torque at low speed in mode 1, and the
+current, velocity and position loops need retuning. The 4500 mA peak fault
+stays on raw shunt samples in both modes. `SAVE_SETTINGS` stores the mode in
+the record's flags (`0x0010`) without changing the record version; firmware
+without the command does not reply to it.
 
 `ENTER_BOOTLOADER` is a maintenance transition for LDROM-provisioned Gen1
 devices. The application performs the same coordinated stop as `STOP`, sends
@@ -449,7 +467,8 @@ separate from the high-frequency status and strike replies:
 
 All multi-byte fields are big-endian. Flag bits are `0x0001 = valid persisted
 record loaded`, `0x0002 = encoder zero valid`, `0x0004 = CS/LED polarity
-valid`, and `0x0008 = learned strike calibration valid`.
+valid`, `0x0008 = learned strike calibration valid`, and `0x0010 = phase
+current sense selected` (see `SET_CURRENT_SENSE`).
 
 `QUERY_STRIKE` replies with the same type `0x40 + addr` and 35 payload bytes
 (legacy firmware emits 32 bytes — older hosts should accept either length).

@@ -40,6 +40,7 @@
 #define PERSIST_FLAG_STRIKE_CAL_VALID   0x0002u
 #define PERSIST_FLAG_CSN_POLARITY_VALID 0x0004u
 #define PERSIST_FLAG_STRIKE_ANGLE_VALID 0x0008u
+#define PERSIST_FLAG_PHASE_CURRENT      0x0010u  /* current sense mode; older firmware ignores it */
 
 typedef struct {
     uint32_t magic;
@@ -201,6 +202,7 @@ static void persist_apply_record(const persist_record_t *record)
     motor_set_vel_ff(record->vel_ff);
     motor_set_pos_pid(record->pos_kp, record->pos_ki, record->pos_kd);
     motor_set_cur_pid(record->cur_kp, record->cur_ki);
+    motor_set_phase_current_sense((record->flags & PERSIST_FLAG_PHASE_CURRENT) != 0u);
 
     if (record->version >= PERSIST_VERSION_V4) {
         strike_set_mute_brake_ms(record->strike_mute_brake_ms);
@@ -272,6 +274,8 @@ static void persist_capture_runtime(persist_record_t *record, uint32_t sequence)
     motor_get_pos_pid(&record->pos_kp, &record->pos_ki, &record->pos_kd);
     record->torque_limit_ma = motor_get_torque_limit();
     motor_get_cur_pid(&record->cur_kp, &record->cur_ki);
+    if (motor_get_phase_current_sense())
+        record->flags |= PERSIST_FLAG_PHASE_CURRENT;
     record->strike_mute_brake_ms = strike_get_mute_brake_ms();
     record->strike_mute_press_ma = strike_get_mute_press_ma();
     record->strike_mute_engage_offset = strike_get_mute_engage_offset();

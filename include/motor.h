@@ -49,6 +49,14 @@ void motor_set_current(int32_t ma);
 void motor_set_torque_limit(uint32_t ma);
 uint32_t motor_get_torque_limit(void);
 
+/* Current sense: 0 = shunt (bus) average, the original behaviour; 1 = phase,
+ * the shunt average divided by the applied duty, i.e. winding current and so
+ * torque. Every measured-current consumer follows it: current loop, torque
+ * limit, sustained-overcurrent fault and reports. The peak fault stays on
+ * raw shunt samples. */
+void motor_set_phase_current_sense(uint8_t enable);
+uint8_t motor_get_phase_current_sense(void);
+
 /* PID tuning (Q8 gains) */
 void motor_set_vel_pid(int32_t kp, int32_t ki, int32_t kd);
 void motor_set_vel_ff(int32_t gain);  /* Q8 feedforward: mA per RPM */

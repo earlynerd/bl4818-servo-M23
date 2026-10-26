@@ -196,6 +196,10 @@ class FakeFleetConfigClient:
         self.calls.append(("velocity_pid", address, kp, ki, kd, reply_mode))
         return CommandAck(address, 0x07, ACK_RESULT_OK, 0)
 
+    def set_current_sense(self, address, phase, reply_mode):
+        self.calls.append(("current_sense", address, phase, reply_mode))
+        return CommandAck(address, 0x1D, ACK_RESULT_OK, 0)
+
     def clear_fault(self, address, reply_mode):
         self.calls.append(("clear", address, reply_mode))
         return CommandAck(address, 0x04, ACK_RESULT_OK, 0)
@@ -265,8 +269,30 @@ class RingParserTests(unittest.TestCase):
         self.assertTrue(config.zero_valid)
         self.assertTrue(config.csn_polarity_valid)
         self.assertTrue(config.strike_calibration_valid)
+        self.assertFalse(config.phase_current_sense)
         self.assertEqual(config.csn_assert_level, 1)
         self.assertIn(bytes([SUBCMD_QUERY_CONFIG]), client.ser.written)
+
+        phase = bytes([0x42]) + struct.pack(">hhhhhhhhhHhhhhhhHB", *values[:-2], 0x001F, 1)
+        self.assertTrue(QueuedReplyClient([phase]).query_config(2).phase_current_sense)
+
+    def test_current_sense_command_selects_phase_or_bus(self):
+        for phase, data in ((True, 1), (False, 0)):
+            client = QueuedReplyClient([bytes([0x52, 0x1D, ACK_RESULT_OK, 0, 0])])
+            ack = client.set_current_sense(2, phase, reply_mode=REPLY_MODE_ACK)
+            self.assertTrue(ack.accepted)
+            self.assertIn(bytes([0x22, 0x1D | 0x40, data]), client.ser.written)
+
+    def test_fleet_config_applies_current_sense(self):
+        bridge = object.__new__(Bridge)
+        bridge.lock = threading.Lock()
+        bridge.client = FakeFleetConfigClient()
+
+        results = bridge.apply_config([1, 3], "current_sense", {"phase": 1})
+
+        self.assertTrue(all(result["accepted"] for result in results))
+        self.assertEqual(bridge.client.calls, [("current_sense", 1, True, REPLY_MODE_ACK),
+                                               ("current_sense", 3, True, REPLY_MODE_ACK)])
 
 
 class RingEnumerationTests(unittest.TestCase):

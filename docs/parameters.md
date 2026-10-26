@@ -24,6 +24,7 @@ live settings snapshot, not only the field that was most recently changed.
 | `current_kp` | 96 | Q8 coefficient | Immediate PWM response to current error in the 6 kHz inner PI loop. | one or all |
 | `current_ki` | 5 | Q8 coefficient | Removes steady current error. | one or all |
 | `torque_limit_ma` | 3200 | mA, 0..3800 effective | Clamps commanded motor current below the firmware's hard sustained-current ceiling. | one or all |
+| `current_sense` | bus | bus average or phase | What every mA means. Bus is the averaged shunt (supply) current. Phase divides it by duty to give winding current, which is proportional to torque, because the drive chops only the low side. Switching changes the effective strike energy and the loop gains, so retune the current PI (start near a quarter of the bus values), velocity and position loops, strike currents and mute press. Saved by Save Settings. | one or all |
 | `home_offset` | 1024 | encoder counts | Resting distance away from the learned drum surface. A live change moves an idle homed mallet's hold target. | one or all |
 | `coast_distance` | 300 | encoder counts | Distance before the learned drum surface at which powered acceleration ends. | one or all |
 | `homing_duty` | 100 | signed PWM counts | Low drive used to seek the drum. Its sign selects the toward-drum direction; zero disables homing. There is no separate persisted motor-direction parameter. | one or all |

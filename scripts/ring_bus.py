@@ -66,6 +66,7 @@ SUBCMD_QUERY_STRIKE_TIMING = 0x19
 SUBCMD_STRIKE_EX     = 0x1A
 SUBCMD_ENTER_BOOTLOADER = 0x1B
 SUBCMD_QUERY_CONFIG  = 0x1C
+SUBCMD_SET_CURRENT_SENSE = 0x1D
 SUBCMD_MASK            = 0x3F
 SUBCMD_REPLY_FULL      = 0x00
 SUBCMD_REPLY_ACK       = 0x40
@@ -123,6 +124,7 @@ CONFIG_FLAG_PERSIST_VALID = 0x0001
 CONFIG_FLAG_ZERO_VALID = 0x0002
 CONFIG_FLAG_CSN_POLARITY_VALID = 0x0004
 CONFIG_FLAG_STRIKE_CAL_VALID = 0x0008
+CONFIG_FLAG_PHASE_CURRENT = 0x0010  # current sense reports duty-scaled phase current
 
 # ── Timing defaults ─────────────────────────────────────────────────────────
 
@@ -190,6 +192,7 @@ SUBCMD_NAMES  = {
     SUBCMD_STRIKE_EX: "STRIKE_EX",
     SUBCMD_ENTER_BOOTLOADER: "ENTER_BOOTLOADER",
     SUBCMD_QUERY_CONFIG: "QUERY_CONFIG",
+    SUBCMD_SET_CURRENT_SENSE: "SET_CURRENT_SENSE",
 }
 ACK_RESULT_NAMES = {
     ACK_RESULT_OK: "OK",
@@ -350,6 +353,10 @@ class TuningConfig:
     @property
     def strike_calibration_valid(self) -> bool:
         return bool(self.flags & CONFIG_FLAG_STRIKE_CAL_VALID)
+
+    @property
+    def phase_current_sense(self) -> bool:
+        return bool(self.flags & CONFIG_FLAG_PHASE_CURRENT)
 
 
 @dataclasses.dataclass
@@ -1277,6 +1284,14 @@ class RingClientV2:
                 raise RingError(f"{name} must fit in int16")
         return self._addressed_command(address, SUBCMD_SET_CUR_PID, struct.pack(">hh", kp, ki), reply_mode)
 
+    def set_current_sense(self, address: int, phase: bool,
+                          reply_mode: str = REPLY_MODE_FULL) -> AddressedReply:
+        """Select shunt (bus) average or duty-scaled phase current sensing.
+
+        Firmware without this command does not reply, so this times out."""
+        return self._addressed_command(address, SUBCMD_SET_CURRENT_SENSE,
+                                       bytes([1 if phase else 0]), reply_mode)
+
     def zero_position(self, address: int, reply_mode: str = REPLY_MODE_ACK) -> AddressedReply:
         return self._addressed_command(address, SUBCMD_ZERO_POS, reply_mode=reply_mode)
 
@@ -1922,6 +1937,7 @@ __all__ = [
     "SUBCMD_REPLY_NONE",
     "SUBCMD_SAVE_SETTINGS",
     "SUBCMD_SET_CUR_PID",
+    "SUBCMD_SET_CURRENT_SENSE",
     "SUBCMD_SET_CURRENT",
     "SUBCMD_SET_DUTY",
     "SUBCMD_SET_FF",

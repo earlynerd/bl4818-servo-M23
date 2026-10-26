@@ -74,6 +74,7 @@
 #define SUBCMD_STRIKE_EX        0x1Au  /* strike with articulation type + type-specific param */
 #define SUBCMD_ENTER_BOOTLOADER 0x1Bu
 #define SUBCMD_QUERY_CONFIG     0x1Cu  /* on-demand tunable/configuration snapshot */
+#define SUBCMD_SET_CURRENT_SENSE 0x1Du /* [mode]: 0 = shunt (bus) average, 1 = phase */
 #define SUBCMD_MASK             0x3Fu
 #define SUBCMD_REPLY_MASK       0xC0u
 #define SUBCMD_REPLY_FULL       0x00u
@@ -423,6 +424,8 @@ static void send_config_reply(void)
     }
     if (strike_is_homed())
         flags |= 0x0008u;
+    if (motor_get_phase_current_sense())
+        flags |= 0x0010u;
     irq_restore(irq_state);
 
     buf[0] = 36u;
@@ -1129,6 +1132,14 @@ static void handle_addressed_cmd(uint8_t cmd_type, const uint8_t *payload, uint8
             int16_t kp = (int16_t)(((uint16_t)payload[2] << 8) | payload[3]);
             int16_t ki = (int16_t)(((uint16_t)payload[4] << 8) | payload[5]);
             motor_set_cur_pid(kp, ki);
+            ack_result = ACK_RESULT_OK;
+        }
+        send_addressed_reply(reply_mode, subcmd, ack_result, 0u, FULL_REPLY_STATUS);
+        break;
+    case SUBCMD_SET_CURRENT_SENSE:
+        ack_result = ACK_RESULT_INVALID_ARGUMENT;
+        if (len >= 3u && payload[2] <= 1u) {
+            motor_set_phase_current_sense(payload[2]);
             ack_result = ACK_RESULT_OK;
         }
         send_addressed_reply(reply_mode, subcmd, ack_result, 0u, FULL_REPLY_STATUS);

@@ -819,6 +819,7 @@ const S = {
   kbdEnabled: false,
   rollAutoScale: true,
   rollTrimSlot: -1,  // mallet selected on the piano roll for trimming, -1 = none
+  rollFollowPausedUntil: 0,  // Date.now() until which playback follow leaves the scroll alone
   rollRowHeight: 22,
   playing: false,
   playStarting: false,
@@ -1913,6 +1914,27 @@ function renderMapTable() {
   renderKeyboardPanel();
 }
 
+// ─── Piano-roll playback cursor ──────────────────────────────
+// Cursor x in roll pixels, on the same scale as the note bars.
+function rollCursorX(c) {
+  const songMs = Math.min(c.maxMs, Math.max(0, (performance.now() - S.startWall) * (S.scale || 1)));
+  return (songMs / 1000) * 80 + 20;
+}
+
+// Keep the cursor a third of the way across the view while playing. Wheel,
+// touch or a click on the roll pauses following briefly so the player can
+// look ahead or pick a note without it sliding away.
+function followRollCursor(x) {
+  if (Date.now() < S.rollFollowPausedUntil) return;
+  const grid = document.getElementById("pianoGrid");
+  const target = Math.max(0, Math.round(x - grid.clientWidth * 0.3));
+  if (Math.abs(grid.scrollLeft - target) >= 1) grid.scrollLeft = target;
+}
+
+function pauseRollFollow() {
+  S.rollFollowPausedUntil = Date.now() + 4000;
+}
+
 // ─── Piano-roll mallet trim ──────────────────────────────────
 // Clicking a note or a mapped row label selects that mallet: its notes are
 // highlighted and the trim bar above the roll edits the same per-mallet trim
@@ -1985,7 +2007,11 @@ function bindRollTrim() {
     setSlotTrim(slot, Math.round((S.trim[slot] ?? 1) * 100) + delta);
     commit();
   };
-  document.getElementById("pianoGrid").addEventListener("click", ev => {
+  const grid = document.getElementById("pianoGrid");
+  for (const kind of ["wheel", "pointerdown", "touchstart", "keydown"]) {
+    grid.addEventListener(kind, pauseRollFollow, { passive: true });
+  }
+  grid.addEventListener("click", ev => {
     const note = ev.target.closest(".note-bar[data-slot]");
     if (note) selectRollMallet(+note.dataset.slot);
   });
@@ -3078,8 +3104,10 @@ function renderPianoRoll() {
     h += `<div style="position:absolute;left:0;right:0;top:${r*rh}%;height:${rh}%;background:${bg};border-bottom:1px solid rgba(48,42,36,0.15)"></div>`;
   }
 
-  // Cursor.
-  h += `<div id="cursor" style="position:absolute;left:20px;top:0;bottom:0;width:2px;background:var(--accent-bright);opacity:0;z-index:10"></div>`;
+  // Cursor. Re-renders during playback (selection, trim, mapping, resize)
+  // must not lose it, so it is recreated visible at the current position.
+  const cursorX = S.playing ? rollCursorX(c) : 20;
+  h += `<div id="cursor" style="position:absolute;left:${cursorX}px;top:0;bottom:0;width:2px;background:var(--accent-bright);opacity:${S.playing ? 0.8 : 0};z-index:10"></div>`;
 
   // Notes — placed at their actual pitch row. Velocity drives both bar
   // height (anchored to the row's bottom) and opacity, so loud notes fill
@@ -3353,14 +3381,17 @@ async function play() {
   // used to cancel the tail of a song whenever serial reply waits put the
   // worker behind the nominal MIDI duration.
 
+  S.rollFollowPausedUntil = 0;
   (function animate() {
     const elapsed = performance.now() - S.startWall;
     const songMs = elapsed * scale; // piano roll x-axis is in original time
     const p = Math.min(1, songMs / c.maxMs);
     document.getElementById("progressFill").style.width = (p * 100) + "%";
-    const totalSec = c.maxMs / 1000;
-    const w = Math.max(600, totalSec * 80 + 40);
-    if (curEl) curEl.style.left = (p * (w - 40) + 20) + "px";
+    // Look the cursor up each frame: a re-render replaces it.
+    const x = rollCursorX(c);
+    const cursor = document.getElementById("cursor");
+    if (cursor) cursor.style.left = x + "px";
+    followRollCursor(x);
     if (p < 1 && S.playing) S.animFrame = requestAnimationFrame(animate);
   })();
 }

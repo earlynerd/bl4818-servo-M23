@@ -29,7 +29,7 @@ function page(filename) {
   ]);
   const context = vm.createContext({
     document: { getElementById: node, createElement: element, addEventListener() {}, querySelectorAll() { return []; } },
-    window: { addEventListener() {} }, console, setInterval, clearInterval, setTimeout,
+    window: { addEventListener() {} }, console, setInterval, clearInterval, setTimeout, performance,
     localStorage: { getItem: key => storage.get(key) ?? null,
                     setItem: (key, value) => storage.set(key, value) },
     MidiTranspose: require('../player/midi_transpose.js'),
@@ -270,4 +270,30 @@ test('trim changes during playback are sent live as a ratio to the scheduled tri
   assert.equal(p.run('sent[0][0]'), '/api/play/update');
   assert.equal(p.run('Object.keys(sent[0][1].trim_scale).join()'), '1');
   assert.ok(Math.abs(p.run('sent[0][1].trim_scale[1]') - 0.75) < 1e-9);
+});
+
+test('playback cursor survives roll re-renders and the roll follows it', () => {
+  const p = page('midi_player.html');
+  p.node('mapTable').querySelector = () => null;
+  const grid = p.node('pianoGrid');
+  grid.clientWidth = 400;
+  grid.scrollLeft = 0;
+  p.run(`
+    S.count = 1; S.mapping = [60]; S.trim = [1];
+    S.composition = {originalEvents: [], maxMs: 20000, visibleVoices: null, events: [
+      {pitch: 60, timeMs: 0, durMs: 200, vel: 100, slot: 0, track: 0, channel: 0}]};
+    S.playing = true; S.scale = 1; S.startWall = performance.now() - 10000;
+    selectRollMallet(0); selectRollMallet(-1);  // the re-renders that used to lose it
+  `);
+  const cursor = grid.innerHTML.match(/id="cursor" style="[^"]*left:([\d.]+)px[^"]*opacity:([\d.]+)/);
+  assert.ok(cursor, 'cursor rendered');
+  assert.equal(cursor[2], '0.8');
+  assert.ok(Math.abs(Number(cursor[1]) - (10 * 80 + 20)) < 5, `cursor at ${cursor[1]}`);
+
+  p.run('followRollCursor(820)');
+  assert.equal(grid.scrollLeft, 820 - 120);   // cursor held a third of the way in
+  p.run('pauseRollFollow(); followRollCursor(1620)');
+  assert.equal(grid.scrollLeft, 700);         // left alone while the user scrolls
+  p.run('S.rollFollowPausedUntil = 0; followRollCursor(1620)');
+  assert.equal(grid.scrollLeft, 1500);
 });

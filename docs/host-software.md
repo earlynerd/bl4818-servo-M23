@@ -440,6 +440,10 @@ full-velocity current, and a **strike** button to audition it. This is the same
 trim as the mapping table's slider and saves the same way. Trim changes from
 either place apply live to the playing song, from that mallet's next note.
 
+During playback the roll scrolls to keep the cursor about a third of the way
+across. Scrolling with the wheel, touching or clicking the roll pauses this for
+four seconds, so you can look ahead or pick a note.
+
 **Audition** plays a synthetic sine-tone excerpt on the computer only, beginning
 at that voice's first note and limited to 20 seconds of note starts or 512 notes
 (plus at most one second of decay). It is a melody/rhythm aid, not a GM soundfont

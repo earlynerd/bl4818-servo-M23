@@ -128,11 +128,24 @@
   .piano-roll-controls { display: flex; align-items: center; gap: 8px; color: var(--text-muted); font: 11px 'JetBrains Mono', monospace; }
   .piano-roll-controls .slider { width: 130px; }
   .piano-roll { flex: none; height: 220px; min-height: 220px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; display: flex; }
-  .piano-labels { width: 56px; flex-shrink: 0; border-right: 1px solid var(--border); display: flex; flex-direction: column; }
+  .piano-labels { width: 84px; flex-shrink: 0; border-right: 1px solid var(--border); display: flex; flex-direction: column; }
   .piano-label { flex: 1; display: flex; align-items: center; justify-content: center; font-size: 9px; font-family: 'JetBrains Mono', monospace; padding: 0 6px; gap: 4px; overflow: hidden; min-height: 0; }
   .piano-label.unmapped { color: var(--text-dim); }
   .piano-label.octave { color: var(--text-muted); font-weight: 600; }
   .piano-label .addr { color: var(--text-dim); }
+  .piano-label[data-slot] { cursor: pointer; }
+  .piano-label .trim { color: var(--text-muted); }
+  .piano-label.selected { box-shadow: inset 2px 0 0 var(--accent-bright); background: rgba(232,184,80,0.16) !important; }
+  .note-bar[data-slot] { cursor: pointer; }
+  .roll-canvas.has-selection .note-bar:not(.selected) { opacity: 0.18 !important; }
+  .note-bar.selected { outline: 1px solid var(--accent-bright); }
+  .roll-trim { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 6px 10px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; font: 11px 'JetBrains Mono', monospace; color: var(--text-muted); }
+  .roll-trim[hidden] { display: none; }
+  .roll-trim .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
+  .roll-trim .slider { width: 150px; }
+  .roll-trim .pill { padding: 2px 8px; font-size: 11px; }
+  .roll-trim-name { color: var(--text); }
+  .roll-trim-note { color: var(--text-dim); }
   .piano-grid { flex: 1; overflow-x: auto; position: relative; }
   .note-bar { position: absolute; border-radius: 2px; transition: opacity 0.1s; }
   .note-bar.unmapped { outline:1px dashed var(--text-muted); opacity: 0.4 !important; }
@@ -497,6 +510,18 @@
           <span id="rollRowHeightDisplay" style="min-width:64px;text-align:right">auto</span>
         </div>
       </div>
+      <div class="roll-trim" id="rollTrimBar" hidden>
+        <span class="swatch" id="rollTrimSwatch"></span>
+        <span class="roll-trim-name" id="rollTrimName"></span>
+        <span>trim</span>
+        <button class="pill" id="rollTrimDown" type="button" title="Quieter: trim −5%" aria-label="Trim down 5%">−</button>
+        <input type="range" id="rollTrimSlider" min="25" max="200" step="5" class="slider" aria-label="Mallet trim">
+        <button class="pill" id="rollTrimUp" type="button" title="Louder: trim +5%" aria-label="Trim up 5%">+</button>
+        <span id="rollTrimValue"></span>
+        <button class="pill" id="rollTrimStrike" type="button" title="Strike this mallet at full velocity with the current trim">strike</button>
+        <span class="roll-trim-note" id="rollTrimNote"></span>
+        <button class="pill" id="rollTrimClose" type="button" title="Clear selection" aria-label="Clear mallet selection">×</button>
+      </div>
       <div class="piano-roll" id="pianoRoll">
         <div class="piano-labels" id="pianoLabels"></div>
         <div class="piano-grid" id="pianoGrid"></div>
@@ -793,6 +818,7 @@ const S = {
   loadedFromLibrary: false,
   kbdEnabled: false,
   rollAutoScale: true,
+  rollTrimSlot: -1,  // mallet selected on the piano roll for trimming, -1 = none
   rollRowHeight: 22,
   playing: false,
   playStarting: false,
@@ -1866,15 +1892,11 @@ function renderMapTable() {
     });
   });
   tbody.querySelectorAll("input[data-trim-slot]").forEach(inp => {
-    inp.addEventListener("input", () => {
-      const slot = +inp.dataset.trimSlot;
-      const pct = +inp.value;
-      S.trim[slot] = pct / 100;
-      saveTrim();
-      const lbl = tbody.querySelector(`[data-trim-label="${slot}"]`);
-      if (lbl) lbl.textContent = `${pct}%`;
+    inp.addEventListener("input", () => setSlotTrim(+inp.dataset.trimSlot, +inp.value));
+    inp.addEventListener("change", () => {
+      if (S.composition) renderPianoRoll();
+      void flushInstrumentSettings();
     });
-    inp.addEventListener("change", () => { void flushInstrumentSettings(); });
   });
   tbody.querySelectorAll("button[data-test]").forEach(b => {
     b.addEventListener("click", () => {
@@ -1888,6 +1910,88 @@ function renderMapTable() {
     b.addEventListener("click", () => openCfgModal(+b.dataset.cfg));
   });
   renderKeyboardPanel();
+}
+
+// ─── Piano-roll mallet trim ──────────────────────────────────
+// Clicking a note or a mapped row label selects that mallet: its notes are
+// highlighted and the trim bar above the roll edits the same per-mallet trim
+// as the mapping table.
+function setSlotTrim(slot, pct) {
+  pct = Math.max(25, Math.min(200, Math.round(pct / 5) * 5));
+  S.trim[slot] = pct / 100;
+  saveTrim();
+  const table = document.getElementById("mapTable");
+  const slider = table && table.querySelector(`input[data-trim-slot="${slot}"]`);
+  if (slider) slider.value = String(pct);
+  const label = table && table.querySelector(`[data-trim-label="${slot}"]`);
+  if (label) label.textContent = `${pct}%`;
+  if (slot === S.rollTrimSlot) refreshRollTrim();
+}
+
+function selectRollMallet(slot) {
+  S.rollTrimSlot = Number.isInteger(slot) && slot >= 0 && slot < S.count ? slot : -1;
+  if (S.composition) renderPianoRoll();
+  refreshRollTrim();
+}
+
+function refreshRollTrim() {
+  const bar = document.getElementById("rollTrimBar");
+  const slot = S.rollTrimSlot;
+  if (!bar) return;
+  if (!(slot >= 0 && slot < S.count)) {
+    bar.hidden = true;
+    return;
+  }
+  bar.hidden = false;
+  const pct = Math.round((S.trim[slot] ?? 1) * 100);
+  const pitch = S.mapping[slot];
+  const info = S.slots[slot] || {};
+  document.getElementById("rollTrimSwatch").style.background =
+    SLOT_COLORS[slot % SLOT_COLORS.length] || "var(--text-muted)";
+  document.getElementById("rollTrimName").textContent =
+    `${Number.isInteger(pitch) ? midiName(pitch) : "unmapped"} · addr ${slot}` +
+    (info.ring ? ` (${info.ring}:${info.local_address})` : "");
+  document.getElementById("rollTrimSlider").value = String(pct);
+  document.getElementById("rollTrimValue").textContent =
+    `${pct}% · ${effectiveCurrentForSlot(slot)} mA at full velocity`;
+  // Trims are part of the schedule sent at play start.
+  document.getElementById("rollTrimNote").textContent = S.playing ? "applies from the next play" : "";
+}
+
+function bindRollTrim() {
+  const commit = () => {
+    if (S.composition) renderPianoRoll();
+    void flushInstrumentSettings();
+  };
+  const step = delta => {
+    const slot = S.rollTrimSlot;
+    if (slot < 0) return;
+    setSlotTrim(slot, Math.round((S.trim[slot] ?? 1) * 100) + delta);
+    commit();
+  };
+  document.getElementById("pianoGrid").addEventListener("click", ev => {
+    const note = ev.target.closest(".note-bar[data-slot]");
+    if (note) selectRollMallet(+note.dataset.slot);
+  });
+  document.getElementById("pianoLabels").addEventListener("click", ev => {
+    const label = ev.target.closest(".piano-label[data-slot]");
+    if (label) selectRollMallet(+label.dataset.slot);
+  });
+  const slider = document.getElementById("rollTrimSlider");
+  slider.addEventListener("input", () => {
+    if (S.rollTrimSlot >= 0) setSlotTrim(S.rollTrimSlot, +slider.value);
+  });
+  slider.addEventListener("change", commit);
+  document.getElementById("rollTrimDown").addEventListener("click", () => step(-5));
+  document.getElementById("rollTrimUp").addEventListener("click", () => step(5));
+  document.getElementById("rollTrimStrike").addEventListener("click", () => {
+    const slot = S.rollTrimSlot;
+    if (slot < 0) return;
+    const ma = effectiveCurrentForSlot(slot);
+    strikeAsync(slot, ma, `(roll trim slot ${slot})`);
+    log(`test strike addr=${slot} ${ma} mA (trim ${Math.round((S.trim[slot] ?? 1) * 100)}%)`);
+  });
+  document.getElementById("rollTrimClose").addEventListener("click", () => selectRollMallet(-1));
 }
 
 // ─── Strike-config modal ─────────────────────────────────────
@@ -2921,16 +3025,21 @@ function renderPianoRoll() {
     const isC = (pitch % 12) === 0;
     const cls = ["piano-label"];
     if (slot < 0) cls.push(isC ? "octave" : "unmapped");
+    if (slot >= 0 && slot === S.rollTrimSlot) cls.push("selected");
     const col = slot >= 0 ? (SLOT_COLORS[slot % SLOT_COLORS.length] || "var(--text-muted)") : "";
     const bg = slot >= 0 ? "rgba(200,150,64,0.06)" : (isBlack ? "rgba(0,0,0,0.18)" : "transparent");
     const addrText = slot >= 0 ? `#${slot}` : "";
-    labels += `<div class="${cls.join(" ")}" style="${col ? `color:${col};` : ""}background:${bg}"><span>${midiName(pitch)}</span><span class="addr">${addrText}</span></div>`;
+    const trimText = slot >= 0 ? `${Math.round((S.trim[slot] ?? 1) * 100)}%` : "";
+    const slotAttrs = slot >= 0 ? ` data-slot="${slot}" title="addr ${slot} · trim ${trimText} · click to trim"` : "";
+    labels += `<div class="${cls.join(" ")}"${slotAttrs} style="${col ? `color:${col};` : ""}background:${bg}"><span>${midiName(pitch)}</span><span class="addr">${addrText}</span><span class="trim">${trimText}</span></div>`;
   }
   labelsEl.innerHTML = labels;
+  refreshRollTrim();
 
   const totalSec = c.maxMs / 1000;
   const w = Math.max(600, totalSec * 80 + 40);
-  let h = `<div style="position:relative;width:${w}px;height:100%;min-height:220px">`;
+  const selectedSlot = sourcePreview ? -1 : S.rollTrimSlot;
+  let h = `<div class="roll-canvas${selectedSlot >= 0 ? " has-selection" : ""}" style="position:relative;width:${w}px;height:100%;min-height:220px">`;
 
   // Time grid every second.
   for (let s = 0; s <= Math.ceil(totalSec); s++) {
@@ -2979,14 +3088,17 @@ function renderPianoRoll() {
     if (!sourcePreview && dropped) classes.push("unmapped");
     if (!sourcePreview && fb) classes.push("fallback");
     if (!sourcePreview && e.suppressed) classes.push("suppressed");
+    if (selectedSlot >= 0 && slot === selectedSlot) classes.push("selected");
+    const slotAttr = !sourcePreview && slot >= 0 ? ` data-slot="${slot}"` : "";
 
     const arrow = fb ? ` (rerouted -> addr ${slot})` : "";
     const tail = e.suppressed ? (e.suppressedReason === "restrike" ? " · omitted: under 50 ms" : " · merged") : (dropped ? ` · dropped` : "");
     const dest = slot >= 0 ? ` -> addr ${slot}` : "";
     const source = e.transposeKind ? ` · original ${midiName(e.originalPitch)} · ${e.transposeKind}` : "";
     const identity = `${e.trackName || `Track ${e.track + 1}`} · ch ${e.channel + 1} · ${midiVoiceInstrument(e)}`;
-    const detail = sourcePreview ? " · source preview (not drum playback)" : `${dest}${arrow}${tail}${source}`;
-    h += `<div class="${classes.join(" ")}" title="${escapeHtml(identity)} · ${midiName(e.pitch)} v${e.vel} @ ${(e.timeMs/1000).toFixed(2)}s · ${(e.durMs/1000).toFixed(2)}s${detail}" style="left:${x}px;width:${widthPx}px;top:calc(${barTopPct}% + 1px);height:calc(${barHeightPct}% - 2px);background:${color};opacity:${opacity};z-index:5"></div>`;
+    const trimHint = slot >= 0 ? ` · trim ${Math.round((S.trim[slot] ?? 1) * 100)}% · click to trim` : "";
+    const detail = sourcePreview ? " · source preview (not drum playback)" : `${dest}${arrow}${tail}${source}${trimHint}`;
+    h += `<div class="${classes.join(" ")}"${slotAttr} title="${escapeHtml(identity)} · ${midiName(e.pitch)} v${e.vel} @ ${(e.timeMs/1000).toFixed(2)}s · ${(e.durMs/1000).toFixed(2)}s${detail}" style="left:${x}px;width:${widthPx}px;top:calc(${barTopPct}% + 1px);height:calc(${barHeightPct}% - 2px);background:${color};opacity:${opacity};z-index:5"></div>`;
   }
   h += `</div>`;
   grid.innerHTML = h;
@@ -3792,6 +3904,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // Piano-roll vertical scale. Auto fit is the default; switching it off
   // restores the last manual row height. Both choices persist locally.
+  bindRollTrim();
   const rollAutoBtn = document.getElementById("rollAutoBtn");
   const rollRowHeightSlider = document.getElementById("rollRowHeightSlider");
   const rollRowHeightDisplay = document.getElementById("rollRowHeightDisplay");

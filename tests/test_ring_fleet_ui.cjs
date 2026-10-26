@@ -221,3 +221,36 @@ test('strike popup reports the server compensation, residual and last strike', a
     p.run('closeCfgModal()');
   }
 });
+
+test('piano roll selects a mallet and trims it in step with the mapping table', () => {
+  const p = page('midi_player.html');
+  p.node('currentSlider').value = '800';
+  p.node('mapTable').querySelector = () => null;
+  p.run(`
+    log = () => {}; flushInstrumentSettings = async () => {}; saveTrim = () => {};
+    S.count = 2; S.mapping = [60, 62]; S.trim = [1.1, 1.0]; S.velFloor = 0.5;
+    S.slots = [{ring: '15B', local_address: 0}, {}];
+    S.composition = {originalEvents: [], maxMs: 1000, visibleVoices: null, events: [
+      {pitch: 60, timeMs: 0, durMs: 200, vel: 100, slot: 0, track: 0, channel: 0},
+      {pitch: 62, timeMs: 300, durMs: 200, vel: 90, slot: 1, track: 0, channel: 0}]};
+    selectRollMallet(0);
+  `);
+  const labels = p.node('pianoLabels').innerHTML, grid = p.node('pianoGrid').innerHTML;
+  assert.match(labels, /class="piano-label selected" data-slot="0"[^>]*>.*?<span class="trim">110%<\/span>/);
+  assert.match(labels, /data-slot="1"[^>]*>.*?<span class="trim">100%<\/span>/);
+  assert.match(grid, /roll-canvas has-selection/);
+  assert.match(grid, /class="note-bar selected" data-slot="0"/);
+  assert.match(grid, /class="note-bar" data-slot="1"/);
+  assert.equal(p.node('rollTrimBar').hidden, false);
+  assert.equal(p.node('rollTrimName').textContent, 'C4 · addr 0 (15B:0)');
+
+  p.run('setSlotTrim(0, 87)');  // snaps to the table's 5% steps
+  assert.equal(p.run('S.trim[0]'), 0.85);
+  assert.match(p.node('rollTrimValue').textContent, /^85% · \d+ mA at full velocity$/);
+  p.run('setSlotTrim(1, 500)');  // clamped to the table's range
+  assert.equal(p.run('S.trim[1]'), 2);
+
+  p.run('selectRollMallet(-1)');
+  assert.equal(p.node('rollTrimBar').hidden, true);
+  assert.doesNotMatch(p.node('pianoGrid').innerHTML, /has-selection/);
+});

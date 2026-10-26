@@ -432,6 +432,14 @@ is disabled when that view is already active; Stop computer audition is disabled
 when no audition is running.
 Previewing never changes the Include checkboxes or the robot playback schedule.
 
+In the arrangement view, each mapped row label shows its mallet's address and
+trim. Click a note bar or a mapped row label to select that mallet: its notes
+stay highlighted while the others dim, and a trim bar above the roll shows the
+note, address (and ring), trim with −/+ 5% steps and a slider, the resulting
+full-velocity current, and a **strike** button to audition it. This is the same
+trim as the mapping table's slider and saves the same way. A song already
+playing keeps the trims it started with; changes apply from the next play.
+
 **Audition** plays a synthetic sine-tone excerpt on the computer only, beginning
 at that voice's first note and limited to 20 seconds of note starts or 512 notes
 (plus at most one second of decay). It is a melody/rhythm aid, not a GM soundfont

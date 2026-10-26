@@ -277,6 +277,23 @@ class AsyncStrikeTests(unittest.TestCase):
         self.assertEqual(player.residual_stats[0]["last"], 26 - 50)
         self.assertEqual(player.timing_stats["serial_rtt_ms"]["n"], 2)
 
+    def test_manual_strike_residuals_pair_by_device_sequence(self):
+        player = server.Player(self.bridge(self.client()))
+        report = {"sequence": 5, "flags": bus.STRIKE_TIMING_IMPACT_VALID,
+                  "trigger_to_impact_ms": 33, "trigger_to_impact_ms_precise": 32.6}
+        player.record_manual_strike(0, 30.0, {"accepted": True, "detail": 5,
+                                              "metrics": {**report, "sequence": 4}})
+        player.record_manual_strike(0, 31.0, {"accepted": True, "detail": 6,
+                                              "metrics": report, "metrics_fresh": True})
+        self.assertAlmostEqual(player.residual_stats[0]["last"], 2.6)
+        self.assertEqual(player.residual_stats[0]["n"], 1)
+        # Stale or muted reports and rejected strikes never pair.
+        player.record_manual_strike(0, None, {"accepted": True, "detail": 7,
+                                              "metrics": {**report, "sequence": 6}})
+        player.record_manual_strike(0, 30.0, {"accepted": False, "detail": 8,
+                                              "metrics": {**report, "sequence": 7}, "metrics_fresh": True})
+        self.assertEqual(player.residual_stats[0]["n"], 1)
+
     def test_reenumeration_discards_old_identity_telemetry(self):
         c = self.client()
         b = self.bridge(c)

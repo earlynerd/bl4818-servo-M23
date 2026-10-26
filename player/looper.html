@@ -458,6 +458,7 @@ const LP = {
   compEma: {},               // compEma[slot] = LatencyModel table { [binIdx]: ms }
   compEmaGlobal: {},         // all-slot table: fresh slots and curve shape
   compSequence: {},          // last learned report per slot (dedup)
+  serverLatency: null,       // server tables (GET /api/latency), preferred when present
   lastStrikeCurrent: {},     // for ACK-metric attribution
   // looper-specific project
   loops: [],                 // see makeLoop()
@@ -672,9 +673,28 @@ function effectiveCurrentForSlot(slot, velocity = 127) {
 }
 
 // ─── Latency compensation (latency_model.js, mirrors the server) ───
+// The server learns from every strike, including the player's songs, so its
+// tables are preferred; this page's own tables only see the looper's strikes.
+function latencyTables(slot) {
+  const server = LP.serverLatency;
+  if (server && Array.isArray(server.offsets)) {
+    let lane = 0;
+    server.offsets.forEach((offset, i) => { if (slot >= offset) lane = i; });
+    return { slot: (server.slots || {})[slot], shared: (server.shared || [])[lane] };
+  }
+  return { slot: LP.compEma[slot], shared: LP.compEmaGlobal };
+}
+async function refreshServerLatency() {
+  try {
+    LP.serverLatency = await api("GET", "/api/latency");
+  } catch (e) {
+    // Keep the last snapshot; older servers stay on this page's tables.
+  }
+}
 function compensationMs(slot, currentMa) {
   if (!LP.compEnabled) return 0;
-  const estimate = LatencyModel.estimate(LP.compEma[slot], LP.compEmaGlobal, currentMa);
+  const tables = latencyTables(slot);
+  const estimate = LatencyModel.estimate(tables.slot, tables.shared, currentMa);
   return estimate === null ? LP.compDefaultMs : estimate;
 }
 // Muted strikes and retriggers stay out of the model; newer reports carry
@@ -1628,6 +1648,8 @@ async function init() {
   updateClockReadout();
   // 30 Hz UI tick is plenty for the cursor sweep.
   LP.uiTimer = setInterval(uiTick, 33);
+  await refreshServerLatency();
+  setInterval(refreshServerLatency, 2000);
 }
 
 function syncTransportVisuals() {

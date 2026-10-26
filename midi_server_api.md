@@ -197,7 +197,9 @@ or motif). Current bins are log-spaced, four per octave from 25 mA, so
 and borrow the all-slot curve's shape outside a slot's own data.
 Retriggered and muted strikes are not learned. The 0.1 ms impact time is
 used when the firmware reports it. `player/latency_model.js` is the
-browser's copy of the same model. Motif playback uses that table to fire each strike command
+browser's copy of the same model; the player popup and the looper read
+the server's learned tables from `GET /api/latency`, because only the server
+sees songs it dispatches. Motif playback uses that table to fire each strike command
 *early* enough that the mallet impact lands on the intended beat. You
 don't need to do anything to opt in — just send `t_ms` values that
 reflect when you want the *impact* to happen, and the bridge handles
@@ -895,6 +897,29 @@ Synchronous fresh poll of one slot's strike-timing block. Returns the
 same shape as one entry of `/api/strike-timing.slots`, or
 `{"address": N, "sequence": 0, "flags": 0}` if the slot hasn't
 completed any strike yet.
+
+### `GET /api/latency`
+
+The server's learned trigger-to-impact tables, for display and for the
+browser's own predictions. Read-only; it never touches the bus.
+
+```json
+{"offsets": [0, 15], "shared": [{"16": 41.2, "20": 33.0}, {"20": 35.1}],
+ "slots": {"3": {"16": 40.8, "20": 32.6}, "17": {"20": 34.9}}}
+```
+
+Keys of `shared` and `slots` entries are bin indices (see
+`player/latency_model.js`). `slots` is keyed by global address and holds only
+slots that have learned something; `shared` holds one all-slot table per ring,
+and `offsets` gives each ring's first global address. A single-ring server
+reports `offsets: [0]`.
+
+While open, the player's strike popup refreshes every second from three
+read-only, bus-free sources: this endpoint for Compensation, the cached
+`GET /api/strike-timing` map for Last Strike, and `GET /api/play`
+`residual_stats` for Residual. `residual_stats` covers every strike: song
+notes, and `POST /api/strike` from any client, each paired with the model's
+prediction by device sequence.
 
 ### `GET /api/bus-health`
 

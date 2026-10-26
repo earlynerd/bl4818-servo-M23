@@ -29,7 +29,7 @@ function page(filename) {
   ]);
   const context = vm.createContext({
     document: { getElementById: node, createElement: element, addEventListener() {}, querySelectorAll() { return []; } },
-    window: { addEventListener() {} }, console,
+    window: { addEventListener() {} }, console, setInterval, clearInterval, setTimeout,
     localStorage: { getItem: key => storage.get(key) ?? null,
                     setItem: (key, value) => storage.set(key, value) },
     MidiTranspose: require('../player/midi_transpose.js'),
@@ -192,4 +192,32 @@ test('looper shares ring-specific settings and renders ring labels', async () =>
   assert.equal(p.run('Object.keys(loadFallback()).length'), 0);
   p.run('LP.count=1; LP.mapping=[60]; LP.homed=[true]; LP.slots=[{ring:"drum",local_address:0}]; renderMappingSummary();');
   assert.match(p.node('mapSummary').innerHTML, /drum:0/);
+});
+
+test('strike popup reports the server compensation, residual and last strike', async () => {
+  const p = page('midi_player.html');
+  p.node('currentSlider').value = '800';
+  p.node('cfgTarget').options = [{}, {}];
+  p.run(`
+    refreshCfgModalValues = () => {}; loadCfgConfig = async () => {};
+    S.count = 2; S.mapping = [60, 62]; S.compEnabled = true;
+    api = async (method, path) => ({
+      '/api/latency': {offsets: [0], shared: [{20: 30}], slots: {1: {16: 41.2, 20: 32.0}}},
+      '/api/strike-timing': {slots: [null, {address: 1, sequence: 7, flags: 0x1C3,
+        trigger_to_coast_ms: 15, trigger_to_impact_ms: 18, trigger_to_impact_ms_precise: 17.5,
+        trigger_to_rebound_ms: 21, estimated_strike_velocity_dps: 1930}]},
+      '/api/play': {playing: false, timing_stats: {},
+        residual_stats: {1: {last: 1.5, sum: 3, sumSq: 9, n: 2, maxAbs: 2.5}}},
+    })[path];
+    openCfgModal(1);
+  `);
+  await new Promise(resolve => setTimeout(resolve, 20));
+  try {
+    assert.match(p.node('cfgCompApplied').textContent, /^32\.0 ms @ 800 mA · this slot \(2\/29 bins\)$/);
+    assert.match(p.node('cfgResidual').textContent, /^last \+1\.50 ms · mean \+1\.50/);
+    assert.equal(p.node('cfgTimingSeq').textContent, 'seq #7');
+    assert.equal(p.node('cfgTimingImpact').textContent, '17.5 ms');
+  } finally {
+    p.run('closeCfgModal()');
+  }
 });

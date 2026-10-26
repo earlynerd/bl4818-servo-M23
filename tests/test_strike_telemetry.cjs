@@ -9,7 +9,7 @@ function context() {
     S: {compEma: {}, compEmaGlobal: {}, compSequence: {}, compEnabled: true, compDefaultMs: 50},
     LatencyModel: require('../player/latency_model.js')});
   vm.runInContext(slice('const STRIKE_TIMING_RETRIGGERED', '// Default pitch per address slot'), c);
-  vm.runInContext(slice('function compensationMs(', '// Fire-and-forget strike'), c);
+  vm.runInContext(slice('function latencyTables(', '// Fire-and-forget strike'), c);
   return c;
 }
 const close = (actual, expected) => assert.ok(Math.abs(actual - expected) < 1e-9, `${actual} != ${expected}`);
@@ -43,4 +43,13 @@ test('the 0.1 ms impact time is preferred when reported', () => {
     flags: 0x100, sequence: 5});
   close(c.compensationMs(2, 300), 21.4);
   close(c.compensationMs(3, 300), 21.4);  // shared curve for an unseen slot
+});
+test('the server tables are preferred and each ring uses its own shared curve', () => {
+  const c = context();
+  c.updateLatencyEma(3, 800, {trigger_to_impact_ms: 99, flags: 0x100, sequence: 1});
+  close(c.compensationMs(3, 800), 99);  // browser-only fallback
+  c.S.serverLatency = {offsets: [0, 15], shared: [{20: 30}, {20: 60}], slots: {3: {20: 28}}};
+  close(c.compensationMs(3, 800), 28);   // server slot table
+  close(c.compensationMs(5, 800), 30);   // ring A shared curve
+  close(c.compensationMs(16, 800), 60);  // ring B shared curve
 });

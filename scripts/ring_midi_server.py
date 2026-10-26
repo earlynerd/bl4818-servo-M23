@@ -235,6 +235,16 @@ class LatencyTracker:
                 prev = table.get(idx)
                 table[idx] = at_centre if prev is None else prev + self.EMA_ALPHA * (at_centre - prev)
 
+    def snapshot(self) -> dict:
+        """Learned tables for the browser's copy of the model (GET /api/latency).
+
+        Playback is dispatched here, so this is the table the browser shows
+        and predicts from; its own copy only learns from strikes it sends.
+        """
+        with self._lock:
+            return {"offsets": [0], "shared": [dict(self._global)],
+                    "slots": {slot: dict(table) for slot, table in self._per_slot.items()}}
+
     def compensation_ms(self, slot: int, current_ma: int) -> float:
         x = self._position(current_ma)
         if x is None:
@@ -1520,18 +1530,31 @@ class Player:
                 reasons = self._dispatch_stats["reasons"]
                 reasons[reason] = reasons.get(reason, 0) + 1
             if result:
-                timing = result.get("metrics") or {}
-                previous = self._sequence_predictions.get((address, timing.get("sequence")))
-                if result.get("metrics_fresh") and previous is not None:
-                    self._fold_stat(self.residual_stats.setdefault(address, self._new_stats_bag()),
-                                    impact_ms(timing) - previous)
-                if result.get("accepted"):
-                    self._sequence_predictions[(address, result["detail"])] = prediction
-                    while len(self._sequence_predictions) > 1024:
-                        del self._sequence_predictions[next(iter(self._sequence_predictions))]
+                self._pair_residual(address, prediction, result)
                 rtt = result.get("server_timing_us", {}).get("serial_rtt")
                 if rtt is not None:
                     self._fold_stat(self.timing_stats["serial_rtt_ms"], rtt / 1000.0)
+
+    def _pair_residual(self, address, prediction, result):
+        """Fold impact - prediction for the strike this report describes, and
+        remember this strike's prediction by its device sequence. Call with
+        _control_lock held."""
+        timing = result.get("metrics") or {}
+        previous = self._sequence_predictions.get((address, timing.get("sequence")))
+        if result.get("metrics_fresh") and previous is not None:
+            self._fold_stat(self.residual_stats.setdefault(address, self._new_stats_bag()),
+                            impact_ms(timing) - previous)
+        if result.get("accepted") and prediction is not None:
+            self._sequence_predictions[(address, result["detail"])] = prediction
+            while len(self._sequence_predictions) > 1024:
+                del self._sequence_predictions[next(iter(self._sequence_predictions))]
+
+    def record_manual_strike(self, address: int, prediction: float | None, result: dict) -> None:
+        """Residuals for strikes sent outside playback (keyboard, popup test
+        strikes, Arpeggio, from any client), so residual_stats covers every
+        strike and not only songs."""
+        with self._control_lock:
+            self._pair_residual(address, prediction, result)
 
     def _fold_dispatch_metrics(self, address: int, result: dict,
                                previous_prediction_ms: float | None) -> None:
@@ -2236,6 +2259,14 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(500, {"error": str(exc)})
             return
 
+        if self.path == "/api/latency":
+            try:
+                self._json(200, self.bridge.latency.snapshot())
+            except Exception as exc:
+                traceback.print_exc()
+                self._json(500, {"error": str(exc)})
+            return
+
         if self.path.startswith("/api/strike-timing"):
             try:
                 # /api/strike-timing?address=N triggers a fresh poll;
@@ -2430,9 +2461,14 @@ class Handler(BaseHTTPRequestHandler):
                 data = self._read_json()
                 addr = int(data["address"])
                 cur = int(data["current_ma"])
-                self._json(200, self.bridge.strike(
-                    addr, cur, strike_type=data.get("strike_type", "normal")
-                ))
+                strike_type = data.get("strike_type", "normal")
+                # The model's prediction before this strike, for its residual
+                # (muted strikes are not modelled).
+                prediction = (self.bridge.latency.compensation_ms(addr, abs(cur))
+                              if strike_type == "normal" else None)
+                result = self.bridge.strike(addr, cur, strike_type=strike_type)
+                self.bridge.player.record_manual_strike(addr, prediction, result)
+                self._json(200, result)
                 return
 
             if self.path == "/api/strikes":

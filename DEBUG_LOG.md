@@ -62,3 +62,12 @@
 - **Class:** amplified-quantization-in-derived-feedback (a controlled quantity divided by the controller's own output where the measured signal is a few LSB)
 - **Recently-touched?** yes — phase sense was added in the same session it was bench-tested.
 - **Time to fix:** about 30 minutes
+
+## 2026-10-24 — Strike popup showed "0/29 bins" and "no data yet" after playing songs
+
+- **Observation:** After several songs, every actuator's strike popup showed default compensation with 0 of 29 bins learned, and its Residual and Last Strike rows showed "no data yet".
+- **Root cause:** `player/midi_player.html` `compensationMs`/`refreshCfgTiming` read the browser's `S.compEma` tables, which `updateLatencyEma` feeds only from strikes this browser sends (`strikeAsync`). Songs are dispatched by the server, whose `LatencyTracker` was learning normally: hundreds of samples per actuator, with mean residuals within about ±0.4 ms on all but one actuator (read from the running server's `/api/play`). This predates the new bins; the old popup read the same browser-only table.
+- **Fix:** Added `GET /api/latency` (fleet-aware). While open, the popup reads the server's tables, cached last strike and residuals, and the looper reads the server's tables. The server now also records manual strikes' residuals. Each page's own records remain the fallback. The same browser-only gap affected Residual, which switched to the server's numbers only while a song played, and Last Strike, which updated only from this browser's own strikes.
+- **Class:** display-reads-local-shadow-of-server-state
+- **Recently-touched?** partly — the popup line was rewritten this session; the browser-only learning was older.
+- **Time to fix:** about 30 minutes

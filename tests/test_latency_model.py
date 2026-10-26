@@ -56,6 +56,15 @@ class LatencyTrackerTests(unittest.TestCase):
         for slot, current, expected in PARITY_ESTIMATES:
             self.assertAlmostEqual(tracker.compensation_ms(slot, current), expected, places=5)
 
+    def test_snapshot_exposes_learned_tables(self):
+        tracker = LatencyTracker()
+        tracker.update(3, 800, 30.0)
+        self.assertEqual(tracker.snapshot(), {"offsets": [0], "shared": [{20: 30.0}],
+                                              "slots": {3: {20: 30.0}}})
+        snapshot = tracker.snapshot()
+        snapshot["slots"][3][20] = 99.0  # a copy: callers cannot mutate the model
+        self.assertEqual(tracker.compensation_ms(3, 800), 30.0)
+
     def test_unusable_samples_are_ignored(self):
         tracker = LatencyTracker()
         for current, impact in ((0, 30.0), (None, 30.0), (400, None), (400, 0.0)):

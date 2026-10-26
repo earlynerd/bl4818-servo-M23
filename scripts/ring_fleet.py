@@ -72,6 +72,19 @@ class FleetLatency:
         lane, local = self.fleet.locate(address)
         return self.fleet.rings[lane].latency.compensation_ms(local, current_ma)
 
+    def snapshot(self):
+        """Per-ring shared tables; slot tables keyed by global address."""
+        snapshots = [ring.latency.snapshot() for ring in self.fleet.rings]
+        return {
+            "offsets": list(self.fleet.offsets),
+            "shared": [snap["shared"][0] for snap in snapshots],
+            "slots": {
+                offset + int(slot): table
+                for offset, snap in zip(self.fleet.offsets, snapshots)
+                for slot, table in snap["slots"].items()
+            },
+        }
+
 
 class RingFleet:
     """Bridge-compatible facade. Addresses remain fixed even on discovery failure.

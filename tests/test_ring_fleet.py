@@ -216,6 +216,12 @@ class FleetTests(unittest.TestCase):
         self.fleet.rings[1].latency.update(0, 800, 43)
         self.assertEqual(self.fleet.latency.compensation_ms(0, 800), 12)
         self.assertEqual(self.fleet.latency.compensation_ms(14, 800), 43)
+        # The browser reads this snapshot: per-ring shared tables, slot tables
+        # under global addresses (JSON turns the integer keys into strings).
+        snapshot = json.loads(json.dumps(self.fleet.latency.snapshot()))
+        self.assertEqual(snapshot["offsets"], [0, 14])
+        self.assertEqual(snapshot["shared"], [{"20": 12.0}, {"20": 43.0}])
+        self.assertEqual(snapshot["slots"], {"0": {"20": 12.0}, "14": {"20": 43.0}})
 
     def test_cancel_stops_all_workers_and_reports_each_ring_failure(self):
         self.fleet.player.play([self.event(0, 5000), self.event(14, 5000)])
@@ -492,6 +498,9 @@ class FleetTests(unittest.TestCase):
             request("/api/mapping", {"mapping": mapping, "profile_id": state["active"]})
             self.assertEqual(request("/api/mapping")["context"], self.fleet.mapping_context)
             self.assertEqual(request("/api/status")["count"], 24)
+            self.fleet.rings[1].latency.update(0, 800, 43)
+            self.assertEqual(request("/api/latency"), {"offsets": [0, 14], "shared": [{}, {"20": 43.0}],
+                                                       "slots": {"14": {"20": 43.0}}})
             response = request("/api/play", {"events": [
                 {"t_ms": 0, "pitch": 48, "velocity": 80},
                 {"t_ms": 0, "pitch": 60, "velocity": 80},

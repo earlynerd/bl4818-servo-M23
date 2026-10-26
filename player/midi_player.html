@@ -818,6 +818,11 @@ const S = {
   // fresh slot a usable estimate and supplies the curve's shape beyond the
   // currents a slot has learned. Same bin index as compEma[slot].
   compEmaGlobal: {},
+  // The server's tables (GET /api/latency). The server learns from every
+  // strike, including songs it dispatches itself, so these are preferred;
+  // compEma/compEmaGlobal above only see strikes this browser sends.
+  serverLatency: null,
+  serverLatencyTimer: null,
   lastStrikeCurrent: {},
   // Predicted compensation (ms) snapshot per slot at the moment its most-recent
   // strike was sent. The ACK that follows carries trigger_to_impact_ms for that
@@ -1099,11 +1104,54 @@ function startFirmwareMonitor() {
   S.firmwarePollIntervalId = setInterval(firmwareTick, 500);
 }
 
+// This slot's table and its ring's shared table: the server's when fetched,
+// otherwise this browser's own.
+function latencyTables(slot) {
+  const server = S.serverLatency;
+  if (server && Array.isArray(server.offsets)) {
+    let lane = 0;
+    server.offsets.forEach((offset, i) => { if (slot >= offset) lane = i; });
+    return { slot: (server.slots || {})[slot], shared: (server.shared || [])[lane], server: true };
+  }
+  return { slot: S.compEma[slot], shared: S.compEmaGlobal, server: false };
+}
+async function refreshServerLatency() {
+  try {
+    S.serverLatency = await api("GET", "/api/latency");
+  } catch (e) {
+    // Keep the last snapshot; older servers without the endpoint stay on
+    // this browser's own tables.
+  }
+}
+
+// Residual and pipeline statistics from GET /api/play.
+function noteServerStats(j) {
+  S.serverResidualStats = j.residual_stats || {};
+  S.serverTimingStats = j.timing_stats || {};
+}
+
+// Server views for the strike popup, all read-only with no bus traffic:
+// learned tables, each slot's last strike (the server caches every strike,
+// songs included) and every strike's residual.
+async function refreshServerTiming() {
+  const [timing, play] = await Promise.allSettled([
+    api("GET", "/api/strike-timing"),
+    S.playing ? Promise.resolve(null) : api("GET", "/api/play"),  // play polling covers it
+    refreshServerLatency(),
+  ]);
+  if (timing.status === "fulfilled") {
+    (timing.value.slots || []).forEach((t, slot) => { if (t) S.strikeTiming[slot] = t; });
+  }
+  if (play.status === "fulfilled" && play.value) noteServerStats(play.value);
+}
+
+
 // Wall-clock ms to fire a strike command early so the mallet's actual impact
 // lands on the intended musical beat (see latency_model.js for the lookup).
 function compensationMs(slot, currentMa) {
   if (!S.compEnabled) return 0;
-  const estimate = LatencyModel.estimate(S.compEma[slot], S.compEmaGlobal, currentMa);
+  const tables = latencyTables(slot);
+  const estimate = LatencyModel.estimate(tables.slot, tables.shared, currentMa);
   return estimate === null ? S.compDefaultMs : estimate;
 }
 
@@ -1885,9 +1933,16 @@ function openCfgModal(slot) {
   refreshCfgTiming();
   modal.style.display = "flex";
   loadCfgConfig(slot);
+  // The server's data changes with every strike, including song playback.
+  const refreshServer = () => refreshServerTiming().then(() => { if (S.cfgSlot >= 0) refreshCfgTiming(); });
+  refreshServer();
+  clearInterval(S.serverLatencyTimer);
+  S.serverLatencyTimer = setInterval(refreshServer, 1000);
 }
 function closeCfgModal() {
   S.cfgSlot = -1;
+  clearInterval(S.serverLatencyTimer);
+  S.serverLatencyTimer = null;
   document.getElementById("cfgModal").style.display = "none";
 }
 function refreshCfgModalValues() {
@@ -2026,18 +2081,20 @@ function refreshCfgTiming() {
     } else {
       const masterMa = getCurrentMa();
       const applied = compensationMs(slot, masterMa);
-      const populated = LatencyModel.learned(S.compEma[slot]).length;
-      const source = LatencyModel.source(S.compEma[slot], S.compEmaGlobal, masterMa);
-      compEl.textContent = `${applied.toFixed(1)} ms @ ${masterMa} mA · ${source} (${populated}/${LatencyModel.BIN_COUNT} bins)`;
+      const tables = latencyTables(slot);
+      const populated = LatencyModel.learned(tables.slot).length;
+      const source = LatencyModel.source(tables.slot, tables.shared, masterMa);
+      compEl.textContent = `${applied.toFixed(1)} ms @ ${masterMa} mA · ${source} ` +
+        `(${populated}/${LatencyModel.BIN_COUNT} bins${tables.server ? "" : ", this browser only"})`;
     }
   }
-  // Residual: prefer the server's view during playback (strikeAsync isn't
-  // called per-strike on the server-dispatch path, so the local bag stays
-  // frozen). Server stats use stringified addr keys; check both.
+  // Residual: the server records every strike's residual, songs and manual
+  // strikes from any client; this browser's own record is only a fallback for
+  // servers that predate that.
   const residualEl = document.getElementById("cfgResidual");
   if (residualEl) {
     const serverBag = S.serverResidualStats[slot] || S.serverResidualStats[String(slot)];
-    const rs = (S.playing && serverBag && serverBag.n > 0) ? serverBag : S.residualStats[slot];
+    const rs = serverBag && serverBag.n > 0 ? serverBag : S.residualStats[slot];
     if (!rs || rs.n === 0) {
       residualEl.textContent = "no data yet";
     } else {
@@ -2978,13 +3035,12 @@ async function runArpeggio() {
     // Give the final ACKs time to land so the EMA reflects every sample
     // before we report bin coverage.
     await new Promise(r => setTimeout(r, 400));
-    const populatedGlobal = LatencyModel.learned(S.compEmaGlobal).length;
+    await refreshServerLatency();
     let slotsWithData = 0;
     for (const i of slots) {
-      const b = S.compEma[i];
-      if (b && Object.values(b).some(v => Number.isFinite(v))) slotsWithData++;
+      if (LatencyModel.learned(latencyTables(i).slot).length) slotsWithData++;
     }
-    log(`arpeggio done: ${slotsWithData}/${slots.length} slot tables seeded, ${populatedGlobal}/${LatencyModel.BIN_COUNT} shared bins populated`);
+    log(`arpeggio done: ${slotsWithData}/${slots.length} slot tables seeded`);
     if (S.cfgSlot >= 0) refreshCfgTiming();
   } finally {
     S.arpRunning = false;
@@ -3035,8 +3091,7 @@ function startPlayPolling() {
       const r = await fetch(API_BASE + "/api/play");
       if (!r.ok) return;
       const j = await r.json();
-      S.serverResidualStats = j.residual_stats || {};
-      S.serverTimingStats = j.timing_stats || {};
+      noteServerStats(j);
       // If the server says playback finished while we weren't paying
       // attention, drop our UI to idle. The teardown setTimeout in play()
       // will still fire later but stopPlayback is idempotent.

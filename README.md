@@ -13,12 +13,9 @@ should currently be treated as a proven project under documentation rather
 than a turn-key kit.
 
 
-## Watch and listen
+## Watch
 
-This project makes much more sense with sound. Select the image or the link
-below to hear ten actuators perform on a handpan-style tongue drum.
-
-**[▶ Play the 56-second performance video with sound](docs/video/handpan_video_h264.mp4)**
+check out video of these actuators playing various instruments on [my Instagram!](www.instagram.com/sly.vester)
 
 
 ![Nine completed actuator bodies and mallets viewed from above](docs/images/actuator/9_actuators_in_a_row_topview.jpg) 
